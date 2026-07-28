@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# The browser terminal.  With a root password set it goes through login
+# like any other terminal, without one it drops straight into a shell,
+# which matches a web console that also asks for nothing.
+
+hash=$(awk -F: '$1 == "root" { print $2 }' /etc/shadow 2>/dev/null)
+case "$hash" in
+    ""|"!"|"!!"|"*")
+        exec /opt/mirai98/bin/ttyd -p 7681 -W /bin/bash -l
+        ;;
+    *)
+        exec /opt/mirai98/bin/ttyd -p 7681 -W /bin/login
+        ;;
+esac

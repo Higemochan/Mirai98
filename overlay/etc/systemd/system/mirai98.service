@@ -1,0 +1,13 @@
+[Unit]
+Description=Mirai98 Hypervisor Platform OS
+After=network-online.target mirai98-data.service
+Wants=network-online.target
+Requires=mirai98-data.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/mirai98/web/pc98web.py --config=/opt/mirai98/web/pc98web.json
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

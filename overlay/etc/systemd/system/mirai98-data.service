@@ -1,0 +1,10 @@
+[Unit]
+Description=Mirai98 data partition
+DefaultDependencies=no
+After=local-fs.target
+Before=mirai98.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/mirai98/bin/mirai98-init

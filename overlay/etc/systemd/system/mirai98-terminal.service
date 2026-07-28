@@ -1,0 +1,13 @@
+[Unit]
+Description=Mirai98 web terminal
+After=network.target
+
+[Service]
+# the wrapper decides: a password on root means login, none means a
+# shell, which matches what the web console asks for
+ExecStart=/opt/mirai98/bin/mirai98-shell
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

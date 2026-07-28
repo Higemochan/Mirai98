@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Mirai98
+Description=black screen, white Mirai98
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/mirai98
+ScriptFile=/usr/share/plymouth/themes/mirai98/mirai98.script

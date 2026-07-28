@@ -1,0 +1,49 @@
+# Mirai98 base rootfs packages (one per line; # comments allowed)
+# Changing this list changes the stage-1 cache key.
+
+# boot and system
+linux-image-amd64
+live-boot
+systemd-sysv
+udev
+dbus
+kmod
+
+# first-boot growth of the FAT32 data partition to the stick's real size,
+# and installing the whole appliance onto a fixed disk
+parted
+dosfstools
+e2fsprogs
+exfatprogs
+ntfs-3g
+grub2-common
+grub-pc-bin
+grub-efi-amd64-bin
+
+# the boot splash (the Mirai98 theme itself rides in the payload)
+plymouth
+plymouth-themes
+
+# network: DHCP via systemd-networkd, name via avahi (mirai98.local)
+iproute2
+systemd-resolved
+avahi-daemon
+libnss-mdns
+
+# the hypervisor's needs
+python3
+imagemagick
+
+# operations
+openssh-server
+ca-certificates
+less
+procps
+
+# runtime libraries for the appliance qemu build
+# (adjust after `build-mirai98.sh qemu` if ldd asks for more)
+libglib2.0-0t64
+libpixman-1-0
+libslirp0
+libpng16-16t64
+zlib1g

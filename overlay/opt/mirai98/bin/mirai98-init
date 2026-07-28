@@ -1,0 +1,107 @@
+#!/bin/sh
+
+# Mount the boot partition, work out where the machines live, and lay
+# out the tree they live in.
+#
+#   /boot-data   the stick's own FAT32 partition: always here, holds the
+#                settings that say where everything else is
+#   /storage     the tree itself, at the root of whichever partition was
+#                chosen, or of the stick's own if none was
+
+set -e
+mkdir -p /boot-data /storage
+
+grow_data() {
+    # the factory image carries a 1 GiB partition; whatever the stick
+    # has after it becomes ours on the first boot.  FAT32 is grown the
+    # boring, reliable way: keep the contents (a gigabyte at most, and
+    # toram already proved the RAM), repartition, make a fresh
+    # filesystem, put the contents back.
+    dev=$1
+    part=$(basename "$dev")
+    disk=$(lsblk -no PKNAME "$dev" 2>/dev/null | head -1)
+    [ -n "$disk" ] || return 0
+    num=$(cat "/sys/class/block/$part/partition" 2>/dev/null) || return 0
+    start=$(cat "/sys/class/block/$part/start")
+    size=$(cat "/sys/class/block/$part/size")
+    total=$(cat "/sys/class/block/$disk/size")
+    tail=$(( total - start - size ))
+    [ "$tail" -gt 32768 ] || return 0             # under 16 MiB: leave it
+    echo "mirai98-init: growing $dev by $(( tail / 2048 )) MiB"
+
+    keep=/run/mirai98-keep.tar
+    tmp=/run/mirai98-grow
+    mkdir -p "$tmp"
+    mount "$dev" "$tmp" || return 0
+    used=$(du -sm "$tmp" | cut -f1)
+    avail=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    if [ "$used" -gt $(( avail / 2 )) ]; then
+        echo "mirai98-init: not enough RAM to regrow safely; leaving as is"
+        umount "$tmp"
+        return 0
+    fi
+    tar -C "$tmp" -cf "$keep" .
+    umount "$tmp"
+    if parted -s "/dev/$disk" resizepart "$num" 100%; then
+        command -v udevadm >/dev/null && udevadm settle || true
+        if mkfs.vfat -F 32 -n MIRAI98DATA "$dev" >/dev/null; then
+            mount "$dev" "$tmp" \
+                && tar -C "$tmp" -xf "$keep" \
+                && umount "$tmp"
+            # the setup page reports this: how much room the stick turned
+            # out to have is the one thing a first boot can tell the user
+            echo "$(( tail / 2048 ))" > /run/mirai98-grown
+        fi
+    fi
+    rm -f "$keep"
+}
+
+# ------------------------------------------------- the stick's own data
+device=$(blkid -L MIRAI98DATA 2>/dev/null || true)
+if [ -n "$device" ]; then
+    mountpoint -q /boot-data || grow_data "$device"
+    mountpoint -q /boot-data || mount "$device" /boot-data
+else
+    mountpoint -q /boot-data || mount -t tmpfs -o size=2G tmpfs /boot-data
+    touch /boot-data/.volatile
+fi
+
+# --------------------------------------------------- the chosen drive
+# mirai98.json names a data drive by UUID and the folder made on it;
+# anything that goes wrong with either leaves the machines on the stick,
+# which is always readable.
+chosen=""
+uuid=$(sed -n 's/.*"uuid"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+       /boot-data/mirai98.json 2>/dev/null | head -1)
+folder=$(sed -n 's/.*"folder"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+         /boot-data/mirai98.json 2>/dev/null | head -1)
+[ -n "$folder" ] || folder=Mirai98
+if [ -n "$uuid" ]; then
+    dev=$(blkid -U "$uuid" 2>/dev/null || true)
+    if [ -z "$dev" ]; then
+        echo "mirai98-init: data drive $uuid is not here; using the stick"
+    else
+        mkdir -p /mnt/data
+        if mount "$dev" /mnt/data 2>/dev/null; then
+            if mkdir -p "/mnt/data/$folder" 2>/dev/null &&
+               touch "/mnt/data/$folder/.writable" 2>/dev/null; then
+                rm -f "/mnt/data/$folder/.writable"
+                chosen=/mnt/data/$folder
+                echo "mirai98-init: data in $dev:/$folder ($uuid)"
+            else
+                echo "mirai98-init: $dev is read-only; using the stick"
+                umount /mnt/data || true
+            fi
+        else
+            echo "mirai98-init: cannot mount $dev; using the stick"
+        fi
+    fi
+fi
+
+[ -n "$chosen" ] || chosen=/boot-data
+mkdir -p "$chosen"
+mountpoint -q /storage || mount --bind "$chosen" /storage
+
+mkdir -p /storage/pc98/vm /storage/roms \
+         /storage/pc98/disks/hdd /storage/pc98/disks/fdd \
+         /storage/pc98/disks/cdrom

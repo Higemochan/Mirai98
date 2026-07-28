@@ -1,0 +1,58 @@
+#!/bin/sh
+
+# The front panel: where to point a browser, and nothing else.
+
+esc=$(printf '\033')
+yellow="${esc}[1;33m"
+white="${esc}[1;37m"
+grey="${esc}[100m"
+plain="${esc}[0m"
+
+while true; do
+    addresses=$(hostname -I 2>/dev/null | tr ' ' '\n' \
+                | grep -E '^[0-9]+\.' | grep -v '^127\.')
+    if [ -n "$addresses" ]; then
+        urls=$(echo "$addresses" \
+               | sed "s|^|      ${white}Please open http://|; s|\$|:8098/ in your browser.${plain}|")
+    else
+        urls="      ${yellow}Waiting for an address...${plain}"
+    fi
+    # counted from the tree and the process list, not from the API: with
+    # a password set the API would not answer this screen
+    if [ -d /storage/pc98/vm ]; then
+        defined=$(find /storage/pc98/vm -name vm.xml 2>/dev/null | wc -l)
+        running=$(pgrep -c -f 'qemu-system-i386.*-qmp' 2>/dev/null)
+        [ -n "$running" ] || running=0
+        [ "$defined" = 1 ] && word=machine || word=machines
+        vms="$defined $word defined, $running running"
+    else
+        vms="starting up..."
+    fi
+    # what the login needs is worth saying, since it can be nothing
+    case $(awk -F: '$1 == "root" { print $2 }' /etc/shadow 2>/dev/null) in
+        ""|"!"|"!!"|"*") login=" No password is set." ;;
+        *)               login=" The password is the one set in the ""\
+web console." ;;
+    esac
+
+    volatile=""
+    [ -f /boot-data/.volatile ] && volatile="
+      ${yellow}No data partition: everything is lost at power-off.${plain}"
+
+    clear
+    cat <<EOF
+
+
+      ${grey}${yellow}  Mirai98 Hypervisor Platform OS  $(cat /opt/mirai98/version 2>/dev/null)  ${plain}
+
+      ${white}Welcome to Mirai98 Hypervisor Platform OS.${plain}
+
+$urls
+
+      $vms
+$volatile
+
+      Console login on tty2 (Alt+F2) or ssh as root.$login
+EOF
+    sleep 5
+done

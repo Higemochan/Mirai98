@@ -1,0 +1,16 @@
+[Unit]
+Description=Mirai98 console status screen
+After=mirai98.service
+Conflicts=getty@tty1.service
+
+[Service]
+ExecStart=/opt/mirai98/bin/mirai98-console
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
