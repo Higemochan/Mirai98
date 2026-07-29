@@ -1,7 +1,7 @@
 Mirai98
 =======
 
-Yet another AI slop for PC98 virtualization.
+A PC98 virtualization platform.
 
 Boot a PC from a USB stick and it becomes a PC-98 hypervisor: create
 virtual PC-9821s, run them, and drive their screens from a browser on
