@@ -271,21 +271,26 @@ build_usb() {
     usb_mnt=$OUT/usb-mnt
     usb_loop=""
 
-    # front partition carries the system, sized to fit; the back one is
-    # a fixed 1 GiB FAT32 the machines live on, readable anywhere.
+    # The front partition carries the system, sized to fit.  The back one
+    # starts as the smallest standards-compliant FAT32 volume (64 MiB) and
+    # grows to the end of the stick on first boot.
     # -L, because base.squashfs is a symlink into the cache.
+    local data_mb=${MIRAI98_DATA_MB:-64}
+    [[ "$data_mb" =~ ^[0-9]+$ ]] && (( data_mb >= 64 )) ||
+        { echo "MIRAI98_DATA_MB must be an integer of at least 64" >&2;
+          return 1; }
     local sys_mb=$(( ( $(du -Lm "$CACHE/base.squashfs" | cut -f1) \
                      + $(du -Lm "$OUT/mirai98.squashfs" | cut -f1) \
                      + $(du -Lm "$CACHE/vmlinuz" | cut -f1) \
                      + $(du -Lm "$CACHE/initrd.img" | cut -f1) + 96 ) ))
     local sys_end=$(( 1 + sys_mb ))
-    local total=$(( sys_end + 1024 + 1 ))
+    local total=$(( sys_end + data_mb + 1 ))
 
     rm -f "$img"
     truncate -s "${total}M" "$img"
     /sbin/parted -s "$img" mklabel msdos \
         mkpart primary fat32 1MiB "${sys_end}MiB" \
-        mkpart primary fat32 "${sys_end}MiB" "$(( sys_end + 1024 ))MiB" \
+        mkpart primary fat32 "${sys_end}MiB" "$(( sys_end + data_mb ))MiB" \
         set 1 boot on
 
     usb_loop=$(sudo losetup -P -f --show "$img")
@@ -317,7 +322,8 @@ build_usb() {
     sudo losetup -d "$usb_loop"
     usb_loop=""
     trap - EXIT
-    echo "=== usb done: $(du -h "$img" | cut -f1) (dd it to a stick)"
+    echo "=== usb done: $(du -h --apparent-size "$img" | cut -f1) image," \
+         "$(du -h "$img" | cut -f1) allocated (dd it to a stick)"
 }
 
 # ------------------------------------------------------- stage 3: the ISO
