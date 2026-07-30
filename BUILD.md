@@ -78,8 +78,9 @@ Write the result to a stick with `dd`, or boot it without one:
 
 ## The Windows application
 
-    ./build-electron.sh         # everything, into dist/mirai98-win64.zip
-    ./build-electron.sh qemu    # just the mingw cross-build
+    ./build-electron.sh          # everything, into dist/mirai98-win64.zip
+    ./build-electron.sh qemu     # just the mingw cross-build
+    ./build-electron.sh sidecar  # CPython + src/ + qemu, into out/win64/
 
 QEMU for Windows is cross-built by `win64/build.sh`, from the same
 submodule the appliance uses.  The first run builds the dependencies from
@@ -88,6 +89,28 @@ that they are stamped in `win64/root/` and skipped.  The `qemu` stage
 checks for itself that the `fat98` block driver and qcow1 support are in
 the executables, and fails if they are not: without them a guest cannot
 read a shared folder.
+
+The `sidecar` stage puts the server side together: an embeddable
+CPython from python.org, `src/`, the Windows QEMU and its DLLs, and the
+patched noVNC.  Nothing is compiled for Windows here, so it all assembles
+on Linux; `pc98web.py` reaches for nothing outside the standard library,
+which is what makes that possible.
+
+Paths in the `pc98web.json` it writes are relative to that file, so the
+directory can be unpacked anywhere.  What the user creates does not live
+in it: `--base` says where that goes, because the program's own directory
+may well be unwritable.
+
+Wine is enough for a real smoke test of the result, and it exercises the
+Windows code paths rather than the Linux ones, because `os.name` is
+`nt`:
+
+    cd out/win64/resources/sidecar
+    WINEPREFIX=~/.wine-mirai98 wine python/python.exe src/pc98web.py         --port=0 --loopback --app-token --base=Z:/tmp/mirai98-test         --config=pc98web.json
+
+It prints one `MIRAI98-READY` line with the port and the token; opening
+`http://127.0.0.1:<port>/?token=<token>` then works, and creating a disk
+image proves the bundled QEMU and `virtpc98` both load.
 
 `win64/build.sh dist` assembles the separate virtpc98 distribution.  It
 needs `win64/package-assets/virtpc98.exe`, which PyInstaller produces on

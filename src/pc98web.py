@@ -10,10 +10,26 @@ QEMU's own VNC server speaks WebSocket, so the browser connects to it
 directly and this process never touches the pixel path.
 
   pc98web.py [--host=0.0.0.0] [--port=8098] [--config=pc98web.json]
-             [--dev]
+             [--base=DIR] [--loopback] [--app-token] [--dev]
 
 The page it serves is a set of plain files in web/, read once at startup;
 --dev re-reads them per request, so an edit shows up on a reload.
+
+The last three are for being started by a program rather than a person,
+which is how the Windows application runs it:
+
+  --base=DIR    where the settings and the machines go, instead of the
+                directory it was started in
+  --loopback    keep every listener on 127.0.0.1, each machine's VNC
+                server included
+  --app-token   invent a secret and report it, to be used in place of a
+                password; the password is then no way in at all
+  --port=0      let the operating system pick the port
+
+Either of the last two prints one machine-readable line once the server
+is up, and nothing else is written to that line:
+
+  MIRAI98-READY {"port": 54321, "token": "..."}
 
 Storage follows one rule tree, so every feature knows where things are:
 
@@ -114,6 +130,18 @@ CONFIG = dict(DEFAULTS)
 # --dev: re-read the page from web/ on every request, so an edit shows up
 # on a reload.  Off, the files are read once and kept.
 DEV = False
+
+# --loopback: keep every listener on 127.0.0.1, each machine's VNC server
+# included.  An application running on the machine its user is sitting at
+# has no reason to be on the network, and on Windows a loopback-only
+# listener does not raise the firewall dialog.
+LOOPBACK = False
+
+# --app-token: a secret the program that started this one is told and
+# nobody else is, in place of a password.  Without it any page a browser
+# happens to have open could drive this API over 127.0.0.1, and this one
+# writes to real disks.
+APP_TOKEN = ""
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 DISK_KEYS = ("hdd1", "hdd2", "cd", "fdd1", "fdd2",
@@ -1151,7 +1179,12 @@ def data_choices():
 def default_storage():
     """What staying put means, said in one line."""
     if WINDOWS:
-        return {"path": BASE, "what": "where this program was started"}
+        # normally the directory it was started in, but --base moves it,
+        # and then saying "where it was started" would be a lie
+        here = os.path.abspath(CONFIG["boot"])
+        return {"path": here,
+                "what": "where this program was started"
+                        if here == os.path.abspath(BASE) else "this computer"}
     stick = "the boot medium"
     grown = grown_by()
     if grown:
@@ -2067,7 +2100,8 @@ def qemu_argv(inst):
     # the boards play into a null backend; the VNC server captures that
     # mix and hands it to any client that asks, so the browser hears them
     fm, pcm = SOUNDS[sound_of(inst)]
-    vnc = "0.0.0.0:%d,websocket=%d" % (display, ws)
+    vnc = "%s:%d,websocket=%d" % ("127.0.0.1" if LOOPBACK else "0.0.0.0",
+                                  display, ws)
     if fm or pcm:
         vnc += ",audiodev=snd"
     argv += ["-L", CONFIG["datadir"],
@@ -2339,9 +2373,17 @@ def page_bytes(name):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # set by mint_session(), sent with whatever reply follows
+    cookie = ""
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+
+    def handle_one_request(self):
+        # one connection serves many requests; a cookie minted for one of
+        # them must not ride along on the rest
+        self.cookie = ""
+        BaseHTTPRequestHandler.handle_one_request(self)
 
     def reply(self, code, body, ctype="application/json"):
         blob = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -2349,6 +2391,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(blob)))
         self.send_header("Cache-Control", "no-store")
+        if self.cookie:
+            self.send_header("Set-Cookie", self.cookie)
         self.end_headers()
         self.wfile.write(blob)
 
@@ -2377,15 +2421,37 @@ class Handler(BaseHTTPRequestHandler):
         self.fail(code, message)
 
     # --------------------------------------------------------- the lock
-    def signed_in(self):
-        if not password_set():
-            return True
+    def has_session(self):
         cookie = self.headers.get("Cookie") or ""
         for part in cookie.split(";"):
             name, _, value = part.strip().partition("=")
             if name == "mirai98" and value in _sessions:
                 return True
         return False
+
+    def signed_in(self):
+        if APP_TOKEN:
+            # the token takes the place of a password: it is handed over
+            # once, in the address the application opens, and a session
+            # cookie carries it from then on
+            if self.has_session():
+                return True
+            from urllib.parse import parse_qs, urlparse
+            given = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+            if given and hmac.compare_digest(given, APP_TOKEN):
+                self.mint_session()
+                return True
+            return False
+        if not password_set():
+            return True
+        return self.has_session()
+
+    def mint_session(self):
+        """Start a session, on the reply this handler is about to send."""
+        token = secrets.token_urlsafe(32)
+        _sessions.add(token)
+        self.cookie = ("mirai98=%s; Path=/; HttpOnly; SameSite=Strict"
+                       % token)
 
     def sign_in(self, token):
         self.send_response(200)
@@ -2407,6 +2473,12 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------- GET
     def do_GET(self):
         path = self.path.split("?")[0]
+        # A password does not exist until the first run sets one, so the
+        # wizard below has to be reachable without it.  A token does exist
+        # from the start, and so covers the wizard too.
+        if APP_TOKEN and not self.signed_in():
+            self.fail(401, "no token")
+            return
         if not setup_done():
             if path == "/":
                 self.page("setup.html")
@@ -2462,9 +2534,11 @@ class Handler(BaseHTTPRequestHandler):
                           ("" if WINDOWS else fs_of(storage_root())),
                 "default": default_storage(),
                 # on the appliance nothing chosen means the medium; on
-                # Windows the default is a path like any other
-                "on_stick": (os.path.abspath(chosen.get("path") or BASE) ==
-                             os.path.abspath(BASE)) if WINDOWS
+                # Windows the default is a path like any other, and where
+                # that is depends on --base
+                "on_stick": (os.path.abspath(chosen.get("path")
+                                             or CONFIG["boot"]) ==
+                             os.path.abspath(CONFIG["boot"])) if WINDOWS
                             else not chosen.get("uuid"),
                 "settings": settings_path(),
                 "password": password_set(),
@@ -2653,6 +2727,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if APP_TOKEN and not self.signed_in():
+            self.refuse(401, "no token")
+            return
         if not setup_done():
             if path == "/api/setup":
                 self.run_setup()
@@ -2660,6 +2737,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.refuse(409, "finish setting up first")
             return
         if path == "/api/login":
+            if APP_TOKEN:
+                # the token is the only way in; a password would be a
+                # second, weaker one
+                self.refuse(404, "no such action")
+                return
             data = self.body_json() or {}
             if not password_ok(str(data.get("password") or "")):
                 time.sleep(1)             # a wrong guess costs a second
@@ -2679,6 +2761,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, {"result": lang})
             return
         if path == "/api/password":
+            if APP_TOKEN:
+                self.refuse(404, "no such action")
+                return
             data = self.body_json() or {}
             if password_set() and not password_ok(
                     str(data.get("current") or "")):
@@ -3263,6 +3348,9 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"result": "downloading", "name": name})
 
     def do_PATCH(self):
+        if not self.signed_in():
+            self.refuse(401, "sign in first")
+            return
         if self.path.split("?")[0] != "/api/network":
             self.fail(404, "no such page")
             return
@@ -3494,22 +3582,71 @@ def start_up():
     return True
 
 
+def read_config(path):
+    """A config file, with its relative paths made absolute.
+
+    A path in it is taken as relative to the file itself, so a directory
+    that ships as one piece can be unpacked anywhere and still find the
+    things beside it.  The appliance's own config gives absolute paths and
+    is untouched by this.
+    """
+    with open(path, encoding="utf-8") as f:
+        conf = json.load(f)
+    beside = os.path.dirname(os.path.abspath(path))
+    return {key: os.path.join(beside, value)
+            if isinstance(value, str) and value and not os.path.isabs(value)
+            else value
+            for key, value in conf.items()}
+
+
+def use_base(path):
+    """Put the settings and the machines under a directory given to us.
+
+    Normally the directory the program was started in is the answer, but a
+    program that starts this one cannot promise anything about that: on
+    Windows it is wherever the launcher sat, which may well be somewhere
+    that cannot be written to.
+    """
+    root = os.path.abspath(os.path.expanduser(path))
+    os.makedirs(root, exist_ok=True)
+    CONFIG.update({"root": os.path.join(root, "pc98"),
+                   "boot": root,
+                   # uploaded real ROMs are the user's, not the program's
+                   "roms": os.path.join(root, "roms"),
+                   "legacy": os.path.join(root, "instances.json")})
+
+
 def main(argv):
-    global DEV
+    global DEV, LOOPBACK, APP_TOKEN
     host, port = "0.0.0.0", 8098
+    base, want_token = "", False
     for arg in argv[1:]:
         if arg.startswith("--host="):
             host = arg.split("=", 1)[1]
         elif arg.startswith("--port="):
             port = int(arg.split("=", 1)[1])
         elif arg.startswith("--config="):
-            with open(arg.split("=", 1)[1], encoding="utf-8") as f:
-                CONFIG.update(json.load(f))
+            CONFIG.update(read_config(arg.split("=", 1)[1]))
+        elif arg.startswith("--base="):
+            base = arg.split("=", 1)[1]
         elif arg == "--dev":
             DEV = True
+        elif arg == "--loopback":
+            LOOPBACK = True
+        elif arg == "--app-token":
+            want_token = True
         else:
             print(__doc__)
             return 2
+    if LOOPBACK:
+        host = "127.0.0.1"
+    # last, so it wins over a config file: it says where this run lives
+    if base:
+        use_base(base)
+    if want_token:
+        APP_TOKEN = secrets.token_urlsafe(32)
+    # --port=0 means "any free one", which only a program would ask for
+    started_by_program = bool(APP_TOKEN) or port == 0
     if not os.path.isfile(os.path.join(CONFIG["web"], "index.html")):
         # unlike noVNC, there is no working without this one
         print("no index.html in %s: nothing to serve" % CONFIG["web"])
@@ -3519,11 +3656,20 @@ def main(argv):
         print("no noVNC in %s: consoles will not draw" % CONFIG["novnc"])
     ready = start_up()
     server = ThreadingHTTPServer((host, port), Handler)
+    # --port=0 asks the operating system to pick one, so the answer is
+    # only known now; the caller is told below
+    port = server.server_address[1]
     print("Mirai98 Hypervisor Platform OS (%s) on http://%s:%d"
           % (PLATFORM, host, port))
     print("  machines in %s" % CONFIG["root"] if ready else
           "  not set up yet: open the address above to choose where the "
           "machines live")
+    if started_by_program:
+        # it needs the address to open, and the port may have been the
+        # operating system's choice: one line, so it can stop reading
+        print("MIRAI98-READY " + json.dumps({"port": port,
+                                             "token": APP_TOKEN}),
+              flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
