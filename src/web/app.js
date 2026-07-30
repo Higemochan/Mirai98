@@ -37,6 +37,7 @@ window.toast = t => {
 // they land in the document.  A phrase with no entry stays English.
 const JA = {
   'Host Server': 'ホストサーバー', 'Storage': 'ストレージ',
+  'This Computer': 'このコンピュータ',
   'Networking': 'ネットワーク', 'Logging': 'ログ',
   'System Settings': 'システム設定', 'Shell': 'シェル',
   'Navigator': 'ナビゲーター', 'Virtual machines': '仮想マシン',
@@ -204,6 +205,10 @@ const JA_RE = [
   [/^VNC :(\d+), websocket (\d+)$/, 'VNC :$1、WebSocket $2'],
   [/^KVM \(Experimental\)$/, 'KVM（実験的）'],
   [/^the boot medium, grown by (.+)$/, 'ブートメディア（$1 拡張済み）'],
+  [/^checking (.+)$/, '照合中 $1'],
+  [/^(.+): done, read back and checked$/, '$1: 完了（読み戻し照合済み）'],
+  [/^(.+): done$/, '$1: 完了'],
+  [/^(.+): downloaded$/, '$1: ダウンロード完了'],
 ];
 let lang = '';
 function translateNode(node) {

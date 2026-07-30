@@ -117,6 +117,10 @@ EOF
     cp -r "$BASE/src/drives" "$side/src/drives"
     rm -rf "$side/src/drives/__pycache__"
 
+    # the elevated half of drive work: a small launcher, so the UAC dialog
+    # names Mirai98 rather than Python
+    x86_64-w64-mingw32-gcc -municode -mwindows -O2         "$BASE/electron/helper/helper.c" -o "$side/mirai98-helper.exe"
+
     mkdir -p "$side/qemu/share/keymaps"
     # the windowless build too: nothing here wants a console window, and
     # it is the one a person double-clicking would rather have
@@ -222,7 +226,48 @@ build_app() {
 # --------------------------------------------------------------- the zip
 
 build_zip() {
-    todo "the portable zip" "phase 7"
+    [ -f "$STAGE/Mirai98.exe" ] || { echo "no app yet; run: $0 app"; exit 1; }
+
+    # the licences of everything that rides along.  Electron's own are at
+    # the stage top already; CPython's is inside python/.
+    mkdir -p "$STAGE/licenses/QEMU" "$STAGE/licenses/noVNC"
+    cp "$QEMU_SRC/COPYING" "$STAGE/licenses/QEMU/"
+    cp "$CACHE"/novnc/LICENSE.txt "$STAGE/licenses/noVNC/" 2>/dev/null || true
+
+    cat > "$STAGE/README.txt" <<EOF
+Mirai98 for Windows $VERSION
+============================
+
+There is nothing to install.  Unpack this folder anywhere and run
+Mirai98.exe.  Machines and disk images are kept in %APPDATA%\Mirai98,
+so deleting this folder removes the program and nothing else.
+
+If Windows warns about the file when first run, that is the mark web
+browsers put on downloads: right-click the zip before unpacking,
+Properties, tick "Unblock".
+
+Reading and writing real drives needs administrator rights: right-click
+Mirai98.exe and choose "Run as administrator" for that.  Everything else
+works without.
+
+If disk-image work feels slow, Windows Defender may be scanning every
+write.  An administrator PowerShell can exempt the data folder:
+
+  Add-MpPreference -ExclusionPath "\$env:APPDATA\Mirai98"
+
+QEMU is GPLv2: sources at https://github.com/awemorris/qemu-pc98
+(commit $(git -C "$QEMU_SRC" rev-parse --short HEAD)).  Licences for
+everything bundled are in the licenses folders.
+EOF
+
+    local name=mirai98-win64-$VERSION
+    rm -f "$DISTDIR/$name.zip" "$OUT/Mirai98"
+    # a link, so the folder people unpack is called Mirai98, not win64
+    ln -sfn win64 "$OUT/Mirai98"
+    (cd "$OUT" && zip -X -q -r "$DISTDIR/$name.zip" Mirai98)
+    rm -f "$OUT/Mirai98"
+    (cd "$DISTDIR" && sha256sum "$name.zip" > "$name.zip.sha256")
+    echo "=== dist/$name.zip ($(du -h "$DISTDIR/$name.zip" | cut -f1))"
 }
 
 # ------------------------------------------------------------------ main

@@ -171,3 +171,64 @@ def open_read(path):
 
 def open_write(path):
     return _Raw(path, writable=True)
+
+
+# ------------------------------------------------- the elevated helper
+
+def elevate(op_path):
+    """Run the drive helper with administrator rights.
+
+    Returns a process handle to poll with process_gone().  The UAC prompt
+    is the user's moment to say no; a refusal comes back as an error here,
+    not as silence.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    side = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    launcher = os.path.join(side, "mirai98-helper.exe")
+    if os.path.exists(launcher):
+        exe, params = launcher, '"%s"' % op_path
+    else:
+        # a checkout rather than the packaged tree: elevate Python itself
+        exe = os.path.join(side, "python", "pythonw.exe")
+        params = '"%s" "%s"' % (os.path.join(side, "src", "drives",
+                                             "helper.py"), op_path)
+
+    class SEI(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("fMask", wintypes.ULONG),
+                    ("hwnd", wintypes.HWND), ("lpVerb", wintypes.LPCWSTR),
+                    ("lpFile", wintypes.LPCWSTR),
+                    ("lpParameters", wintypes.LPCWSTR),
+                    ("lpDirectory", wintypes.LPCWSTR),
+                    ("nShow", ctypes.c_int),
+                    ("hInstApp", wintypes.HINSTANCE),
+                    ("lpIDList", ctypes.c_void_p),
+                    ("lpClass", wintypes.LPCWSTR),
+                    ("hkeyClass", wintypes.HKEY),
+                    ("dwHotKey", wintypes.DWORD),
+                    ("hIconOrMonitor", wintypes.HANDLE),
+                    ("hProcess", wintypes.HANDLE)]
+
+    sei = SEI()
+    sei.cbSize = ctypes.sizeof(SEI)
+    # keep the process handle, and no console for it
+    sei.fMask = 0x00000040 | 0x00008000
+    sei.lpVerb = "runas"
+    sei.lpFile = exe
+    sei.lpParameters = params
+    sei.lpDirectory = side
+    sei.nShow = 0
+    if not ctypes.windll.shell32.ShellExecuteExW(ctypes.byref(sei)):
+        code = ctypes.windll.kernel32.GetLastError()
+        if code == 1223:                     # ERROR_CANCELLED: they said no
+            raise OSError("administrator approval was refused")
+        raise OSError("could not start the elevated helper (error %d)"
+                      % code)
+    return sei.hProcess
+
+
+def process_gone(handle):
+    import ctypes
+    return ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == 0

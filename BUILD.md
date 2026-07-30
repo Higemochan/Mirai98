@@ -76,7 +76,14 @@ Write the result to a stick with `dd`, or boot it without one:
 
     ./run-dev.sh                # boots the current build in QEMU
 
-## The Windows application
+## The Windows application (retired)
+
+Built and tried, and retired: with the server, QEMU, Electron and the
+browser all on one Windows machine, it proved too slow and too fragile to
+ship, and only the Live USB is distributed.  The source stays — the
+drives layer, the split-out web UI and the cross-build all serve the
+appliance too — and everything below still works if it is ever picked up
+again.
 
     ./build-electron.sh          # everything, into dist/mirai98-win64.zip
     ./build-electron.sh qemu     # just the mingw cross-build

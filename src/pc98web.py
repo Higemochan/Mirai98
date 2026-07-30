@@ -1924,6 +1924,57 @@ def drive_job(label, kind, name, device, to_drive, confirm="",
     def progress(done):
         job["done"] = done
 
+    def elevated():
+        """The same job, done by a process that is allowed to.
+
+        Windows only hands out raw drives to administrators.  The helper
+        is started through UAC, told what to do in a file, and watched
+        through another; the refusals run again on its side, so nothing
+        is riskier for being elevated.
+        """
+        say("%s needs administrator rights; asking" % label, "disk")
+        work = tempfile.mkdtemp(prefix="mirai98-drive-")
+        opf = os.path.join(work, "op.json")
+        prf = os.path.join(work, "progress.json")
+        with open(opf, "w", encoding="utf-8") as f:
+            json.dump({"to_drive": to_drive, "image": path, "device": device,
+                       "confirm": confirm, "allow_internal": allow_internal,
+                       "check": check, "progress": prf}, f)
+        try:
+            handle = drives.impl.elevate(opf)
+        except OSError as err:
+            job.update(state="failed", error=str(err))
+            say("%s failed: %s" % (label, err), "disk")
+            shutil.rmtree(work, ignore_errors=True)
+            return
+        while True:
+            time.sleep(0.3)
+            try:
+                with open(prf, encoding="utf-8") as f:
+                    got = json.load(f)
+            except (OSError, ValueError):
+                got = {}
+            job.update(done=got.get("done", job["done"]),
+                       total=got.get("total", job["total"]),
+                       checking=got.get("checking", False))
+            if got.get("state") in ("done", "failed"):
+                job.update(state=got["state"], error=got.get("error", ""),
+                           verified=got.get("verified", ""))
+                break
+            if drives.impl.process_gone(handle) and not got:
+                job.update(state="failed", checking=False,
+                           error="the elevated helper stopped without "
+                                 "a word")
+                break
+        shutil.rmtree(work, ignore_errors=True)
+        if job["state"] == "done":
+            say("%s finished (%d bytes)%s"
+                % (label, job["done"],
+                   ", read back and checked" if job["verified"] else ""),
+                "disk")
+        else:
+            say("%s failed: %s" % (label, job["error"]), "disk")
+
     def run():
         try:
             if to_drive:
@@ -1945,6 +1996,15 @@ def drive_job(label, kind, name, device, to_drive, confirm="",
                 % (label, done,
                    ", read back and checked" if job["verified"] else ""),
                 "disk")
+        except PermissionError as err:
+            # not allowed is not the same as failed: on Windows it means
+            # ask again as an administrator, through the UAC dialog
+            if WINDOWS:
+                job.update(done=0, checking=False)
+                elevated()
+            else:
+                job.update(state="failed", error=str(err), checking=False)
+                say("%s failed: %s" % (label, err), "disk")
         except Exception as err:
             job.update(state="failed", error=str(err), checking=False)
             say("%s failed: %s" % (label, err), "disk")
