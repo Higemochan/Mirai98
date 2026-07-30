@@ -87,9 +87,13 @@ QEMU for Windows is cross-built by `win64/build.sh`, from the same
 submodule the appliance uses.  The first run builds the dependencies from
 the pinned archives in `win64/versions.conf`, which takes a while; after
 that they are stamped in `win64/root/` and skipped.  The `qemu` stage
-checks for itself that the `fat98` block driver and qcow1 support are in
-the executables, and fails if they are not: without them a guest cannot
-read a shared folder.
+checks for itself that the `fat98` block driver, qcow1 support and the VNC
+websocket listener are all in the executables, and fails if they are not.
+`configure` is given `--without-default-features`, so anything not asked
+for is simply absent and nothing says so: a build with no VNC produces an
+application whose every console is a dead grey rectangle.  The marker
+looked for is `vnc-ws-listen` rather than `vnc`, because no build has a
+bare `vnc` string in it, having VNC or not.
 
 The `sidecar` stage puts the server side together: an embeddable
 CPython from python.org, `src/`, the Windows QEMU and its DLLs, and the
@@ -146,6 +150,14 @@ something the drive itself says (its model, or its size in bytes), the
 host's own disk is never writable, and internal disks take saying so on
 top.  A write is read back afterwards and compared, because a write that
 went nowhere looks exactly like one that worked.
+
+Asking what drives exist costs a subprocess — lsblk here, PowerShell on
+Windows, where starting it at all is most of a second.  The page used to ask
+on every render, which made every click feel slow; now the layer keeps a
+listing for a few seconds and the page fetches lazily, except when a drive
+is about to be picked, where it always asks again.  Nothing that decides
+whether to write uses a kept listing: a drive swapped for another in the
+same socket would otherwise answer to the confirmation given for the first.
 
 On Windows the writing side takes the disk offline first
 (`Set-Disk -IsOffline`).  Without that, Windows' own filesystem cache

@@ -710,7 +710,7 @@ def drive_backing(path):
     """format= and file=, with the format read off the extension; QEMU
     told format=raw would happily show a guest the qcow2 container."""
     fmt = "qcow2" if path.lower().endswith(".qcow2") else "raw"
-    return "format=%s,file=%s" % (fmt, path)
+    return "format=%s,file=%s" % (fmt, win_short(path))
 
 
 _host_cpu = {}                   # last /proc/stat totals, for the delta
@@ -2060,6 +2060,46 @@ def host_facts():
     return _facts_cache
 
 
+def win_short(path):
+    """The 8.3 name of a path, on Windows, when it has one.
+
+    QEMU is handed paths inside option strings (-L, -drive file=) where
+    "OneDrive - Tabata Computer" and other space-laden, non-ASCII homes
+    have proven unreliable.  The short name is plain ASCII with no spaces
+    and names the same file, so everything QEMU gets goes through here.
+    Volumes with 8.3 names turned off just get the path back unchanged.
+    """
+    if not WINDOWS or not os.path.exists(path):
+        return path
+    import ctypes
+    buf = ctypes.create_unicode_buffer(260)
+    n = ctypes.windll.kernel32.GetShortPathNameW(path, buf, 260)
+    return buf.value if 0 < n < 260 else path
+
+
+def missing_roms():
+    """A complaint about the compatible ROMs, or "" if they are all there.
+
+    QEMU wants either pc98bank*.bin or pc98itf.bin and pc98bios.bin, in one
+    of the directories given with -L.  When it cannot find them it says so
+    without saying where it looked, which is the one thing worth knowing.
+    """
+    wanted = ("pc98itf.bin", "pc98bios.bin")
+    for where in (CONFIG["roms"], CONFIG["datadir"]):
+        if not where:
+            continue
+        try:
+            here = set(os.listdir(where))
+        except OSError:
+            continue
+        if any(n.startswith("pc98bank") for n in here):
+            return ""
+        if all(n in here for n in wanted):
+            return ""
+    return ("no PC-98 ROMs in %s: wanted pc98bank*.bin, or both %s"
+            % (CONFIG["datadir"], " and ".join(wanted)))
+
+
 def qemu_argv(inst):
     vnc, ws, qmp_port = ports_of(inst)
     display = vnc - 5900
@@ -2070,7 +2110,7 @@ def qemu_argv(inst):
     # QEMU searches -L paths in order, so putting the uploaded ROMs first
     # lets a partial real set fall through to the compatible ones
     if inst.get("bios") == "real":
-        argv += ["-L", CONFIG["roms"]]
+        argv += ["-L", win_short(CONFIG["roms"])]
     # the boards play into a null backend; the VNC server captures that
     # mix and hands it to any client that asks, so the browser hears them
     fm, pcm = SOUNDS[sound_of(inst)]
@@ -2078,7 +2118,7 @@ def qemu_argv(inst):
                                   display, ws)
     if fm or pcm:
         vnc += ",audiodev=snd"
-    argv += ["-L", CONFIG["datadir"],
+    argv += ["-L", win_short(CONFIG["datadir"]),
             "-display", "none",
             "-vnc", vnc,
             "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
@@ -2100,7 +2140,7 @@ def qemu_argv(inst):
             # files out again, and vvfat refuses rw on a snapshotted drive
             argv += ["-drive", "if=ide,bus=0,unit=%d,format=raw,"
                      "snapshot=off,file=fat98:rw:%s"
-                     % (unit, os.path.expanduser(inst["mount"]))]
+                     % (unit, win_short(os.path.expanduser(inst["mount"])))]
         else:
             argv += ["-drive", "if=ide,bus=0,unit=%d," % unit
                      + drive_backing(disk_path(inst, key))]
@@ -2152,6 +2192,13 @@ def start_instance(inst):
         result = "; ".join(trouble)
         say("vm %s not started: %s" % (inst["name"], result), "vm")
         return result
+    # QEMU's own complaint about a missing ROM says which files it wanted
+    # but not where it looked, which leaves a real answer out of reach.
+    # This says it before starting, and names the directory.
+    missing = missing_roms()
+    if missing:
+        say("vm %s not started: %s" % (inst["name"], missing), "vm")
+        return missing
     argv = qemu_argv(inst)
     log_path = os.path.join(inst_dir(inst["index"]), "qemu.log")
     with open(log_path, "ab") as log:
@@ -2377,7 +2424,15 @@ class Handler(BaseHTTPRequestHandler):
         # one connection serves many requests; a cookie minted for one of
         # them must not ride along on the rest
         self.cookie = ""
+        self.began = time.time()
         BaseHTTPRequestHandler.handle_one_request(self)
+
+    def log_request(self, code="-", size="-"):
+        # with the time it took: when the page feels slow, this says which
+        # request to blame, which guessing does not
+        took = (time.time() - getattr(self, "began", time.time())) * 1000
+        self.log_message('"%s" %s %s %dms', self.requestline, str(code),
+                         str(size), took)
 
     def reply(self, code, body, ctype="application/json"):
         blob = body if isinstance(body, bytes) else json.dumps(body).encode()
@@ -2484,6 +2539,9 @@ class Handler(BaseHTTPRequestHandler):
                     "default": default,
                     "grown": human_mb(grown) if grown else "",
                     "choices": data_choices(),
+                    # with a token in force there is nothing for a password
+                    # to guard, so the wizard has one question fewer
+                    "token": bool(APP_TOKEN),
                 })
             else:
                 self.fail(409, "finish setting up first")
@@ -2550,6 +2608,9 @@ class Handler(BaseHTTPRequestHandler):
             # the language chosen during setup, for a browser that has
             # never been here before
             facts["lang"] = read_settings().get("lang") or "en"
+            # a token in force means a password guards nothing and cannot
+            # be set, so the page leaves it out rather than offering it
+            facts["token"] = bool(APP_TOKEN)
             self.reply(200, facts)
         elif path == "/api/network":
             exists, members = bridge_state()
@@ -3611,7 +3672,10 @@ def read_config(path):
     with open(path, encoding="utf-8") as f:
         conf = json.load(f)
     beside = os.path.dirname(os.path.abspath(path))
-    return {key: os.path.join(beside, value)
+    # normpath as well as join: the separators written in the file are
+    # forward slashes, and joining leaves them, so a Windows path comes out
+    # as C:\...\qemu/share.  Most things take that; not everything does.
+    return {key: os.path.normpath(os.path.join(beside, value))
             if isinstance(value, str) and value and not os.path.isabs(value)
             else value
             for key, value in conf.items()}

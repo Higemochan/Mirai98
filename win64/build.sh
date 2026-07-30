@@ -522,12 +522,16 @@ build_qemu()
             --libdir=lib \
             --enable-relocatable \
             --disable-download \
+            `# nothing is on unless it is asked for below, which is why a` \
+            `# feature that goes missing goes missing silently; the checks` \
+            `# after the build are there for that reason` \
             --without-default-features \
             --enable-system \
             --enable-tcg \
             --disable-whpx \
             --enable-qcow1 \
             --enable-vvfat \
+            --enable-vnc \
             --enable-sdl \
             --enable-pixman \
             --enable-slirp \
@@ -555,6 +559,13 @@ build_qemu()
         "$STRINGS" "$exe" |
             grep -x qcow >/dev/null ||
             die "qemu-system-$arch.exe is missing qcow1 required by fat98:rw"
+        # Mirai98 shows every guest screen over VNC and hears it over the
+        # same socket, so it needs the websocket listener too.  There is no
+        # bare "vnc" string to look for even in a build that has it; this
+        # property name is the thing itself.
+        "$STRINGS" "$exe" |
+            grep -x vnc-ws-listen >/dev/null ||
+            die "qemu-system-$arch.exe has no VNC websocket listener"
         log "QEMU executable built: $exe"
     done
 }

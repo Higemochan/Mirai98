@@ -15,15 +15,25 @@ import json
 import os
 import subprocess
 
-# Get-Disk gives the disk, Get-Partition the drive letters that make it
+# Get-Disk gives the disks, Get-Partition the drive letters that make one
 # busy.  IsSystem or IsBoot means Windows itself is on it.
+#
+# Both are asked for once and joined here rather than calling Get-Partition
+# per disk: each of these is a CIM query, and starting PowerShell at all
+# costs most of a second, so the number of them is worth keeping down.
 LIST = r"""
 $ErrorActionPreference = 'SilentlyContinue'
+$parts = @{}
+foreach ($p in Get-Partition) {
+  if ($p.DriveLetter) {
+    if (-not $parts.ContainsKey($p.DiskNumber)) {
+      $parts[$p.DiskNumber] = @()
+    }
+    $parts[$p.DiskNumber] += "$($p.DriveLetter):"
+  }
+}
 Get-Disk | ForEach-Object {
   $d = $_
-  $letters = @(Get-Partition -DiskNumber $d.Number |
-               Where-Object DriveLetter |
-               ForEach-Object { "$($_.DriveLetter):" })
   [pscustomobject]@{
     number    = $d.Number
     path      = "\\.\PHYSICALDRIVE$($d.Number)"
@@ -34,7 +44,7 @@ Get-Disk | ForEach-Object {
     removable = ($d.BusType -in 'USB','SD','MMC')
     readonly  = [bool]$d.IsReadOnly
     system    = ([bool]$d.IsSystem -or [bool]$d.IsBoot)
-    letters   = $letters
+    letters   = @($parts[$d.Number])
   }
 } | ConvertTo-Json -Depth 3 -AsArray
 """
@@ -70,6 +80,7 @@ def enumerate_drives():
         letters = disk.get("letters") or []
         if isinstance(letters, str):
             letters = [letters]
+        letters = [x for x in letters if x]      # @($null) comes back as [null]
         size = int(disk.get("size") or 0)
         out.append({
             "path": disk.get("path") or "",

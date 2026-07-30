@@ -97,6 +97,9 @@ const JA_TEXT = {
   pwWin: 'この管理画面を守ります。',
   pwUnix: 'root のパスワードになり、管理画面とシェルの両方で聞かれます。',
   winDefault: 'このプログラムを起動した場所を使う（推奨）',
+  appDefault: 'このコンピュータに置く（推奨）',
+  onlyStep: '1 / 1',
+  done: '完了',
   otherDrive: 'ドライブにフォルダを作る',
   grown: 'このメディアの空き領域 %s を使えるようにしました。',
   none: '他のドライブは見つかりません。',
@@ -110,6 +113,9 @@ const EN_TEXT = {
   pwUnix: 'It becomes the root password: this console and the shell both ' +
           'ask for it.',
   winDefault: 'Use where this program was started (default)',
+  appDefault: 'Keep them on this computer (default)',
+  onlyStep: 'Step 1 of 1',
+  done: 'Finish',
   otherDrive: 'Use another drive and make a folder.',
   grown: 'This medium now has %s of free space to use.',
   none: 'No other drive was found.',
@@ -143,8 +149,17 @@ function draw() {
   if (!info) return;
   const d = info;
   if (d.platform === 'windows') {
-    document.getElementById('t-default').textContent = T.winDefault;
+    document.getElementById('t-default').textContent =
+      d.token ? T.appDefault : T.winDefault;
     document.getElementById('t-other').textContent = T.otherDrive;
+  }
+  // A token means an application started this and is the only way in, so
+  // a password would guard nothing.  Then there is one question, not two,
+  // and Continue is Finish.
+  if (d.token) {
+    document.getElementById('t-continue').textContent = T.done;
+    document.getElementById('t-continue').setAttribute('onclick', 'finish()');
+    document.getElementById('t-step1').textContent = T.onlyStep;
   }
   document.getElementById('pw-note').textContent =
     d.platform === 'windows' ? T.pwWin : T.pwUnix;
@@ -202,8 +217,12 @@ function toStep(n) {
   if (n === 2) document.getElementById('pw').focus();
 }
 function finish() {
-  const password = document.getElementById('pw').value;
-  if (!password && !confirm(T.noPassword)) return;
+  if (info.token && document.getElementById('radio-other').checked
+      && !chosen) { alert(T.pickOne); return; }
+  const password = info.token ? '' : document.getElementById('pw').value;
+  // asking "start without a password?" makes no sense when a password was
+  // never on offer
+  if (!info.token && !password && !confirm(T.noPassword)) return;
   document.getElementById('msg').textContent = T.working;
   fetch('/api/setup', {method: 'POST',
       body: JSON.stringify({storage: chosen, password, lang})})

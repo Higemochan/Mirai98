@@ -23,6 +23,10 @@ STAGE=$OUT/win64
 QEMU_SRC=${QEMU_SRC:-$BASE/qemu-pc98}
 VERSION=$(date +%Y%m%d)
 
+# The PC-98 machines are in both system emulators; x86_64 is the one that
+# gets used, and the one virtpc98 prefers as well.
+QEMU_ARCH=${QEMU_ARCH:-x86_64}
+
 # CPython for Windows as a zip that only needs unpacking.  pc98web uses
 # nothing outside the standard library, and every extension module it
 # does reach for is in here: _ctypes, _socket, _hashlib, _ssl and
@@ -65,7 +69,7 @@ build_qemu() {
     "$BASE/win64/build.sh" deps
     "$BASE/win64/build.sh" qemu
 
-    local exe=$BASE/win64/build/qemu-system-i386.exe
+    local exe=$BASE/win64/build/qemu-system-$QEMU_ARCH.exe
     [ -f "$exe" ] || { echo "no $exe after the qemu stage"; exit 1; }
     # record what it was built from, so it can be held against the
     # version the Live USB stamps into out/payload/opt/mirai98/version
@@ -114,14 +118,16 @@ EOF
     rm -rf "$side/src/drives/__pycache__"
 
     mkdir -p "$side/qemu/share/keymaps"
-    cp "$BASE"/win64/build/qemu-system-i386.exe \
-       "$BASE"/win64/build/qemu-system-i386w.exe "$side/qemu/"
+    # the windowless build too: nothing here wants a console window, and
+    # it is the one a person double-clicking would rather have
+    cp "$BASE"/win64/build/qemu-system-$QEMU_ARCH.exe \
+       "$BASE"/win64/build/qemu-system-${QEMU_ARCH}w.exe "$side/qemu/"
     # the DLL closure, worked out from the PE import tables
     python3 "$BASE/win64/bundle-deps.py" \
         --objdump x86_64-w64-mingw32-objdump \
         --search "$BASE/win64/root/bin" --search "$BASE/win64/root/lib" \
         --dest "$side/qemu" --report "$side/qemu/DLL-DEPENDENCIES.txt" \
-        "$side/qemu/qemu-system-i386.exe" >/dev/null
+        "$side/qemu/qemu-system-$QEMU_ARCH.exe" >/dev/null
     # what -L has to find: the compatible ROMs, and the keymaps the VNC
     # server reads.  Straight from the submodule, as the appliance does.
     cp "$QEMU_SRC"/pc-bios/pc98*.bin "$side/qemu/share/"
@@ -129,6 +135,17 @@ EOF
     # unstripped these are 78 MB each
     x86_64-w64-mingw32-strip --strip-unneeded "$side"/qemu/*.exe \
         "$side"/qemu/*.dll
+    # stripping cannot lose a feature, but shipping one that was never
+    # built can: without VNC there is no console at all, and the page
+    # would come up with a dead screen and nothing to say about it
+    # grep -x with its output thrown away, not grep -q: -q closes the pipe
+    # on the first match, strings takes SIGPIPE, and pipefail then calls
+    # the whole thing a failure
+    x86_64-w64-mingw32-strings "$side/qemu/qemu-system-$QEMU_ARCH.exe" \
+        | grep -x vnc-ws-listen > /dev/null \
+        || { echo "the staged qemu has no VNC: check --enable-vnc in"
+             echo "win64/build.sh, since --without-default-features means"
+             echo "anything not asked for is simply absent"; exit 1; }
 
     # patched noVNC, which unlike the stock one asks for the guest's sound
     if [ ! -d "$CACHE/novnc" ]; then
@@ -144,9 +161,9 @@ EOF
     # paths here are relative to this file, so the directory can be
     # unpacked anywhere.  What the user creates is not in it: --base says
     # where that goes, because this side may well be unwritable.
-    cat > "$side/pc98web.json" <<'EOF'
+    cat > "$side/pc98web.json" <<EOF
 {
-  "qemu": "qemu/qemu-system-i386.exe",
+  "qemu": "qemu/qemu-system-$QEMU_ARCH.exe",
   "datadir": "qemu/share",
   "novnc": "novnc",
   "web": "src/web"

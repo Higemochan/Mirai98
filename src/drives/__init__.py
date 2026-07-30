@@ -12,6 +12,7 @@ and there is no way past them from above.
 
 import hashlib
 import os
+import time
 
 WINDOWS = os.name == "nt"
 
@@ -29,7 +30,15 @@ class Refused(Exception):
     """This layer will not do it.  The message says why, for the user."""
 
 
-def enumerate_drives():
+# Asking costs a subprocess — lsblk here, PowerShell on Windows, where it
+# is most of a second — and the page asks on every render.  So a listing is
+# kept for a moment.  Nothing that decides whether to write uses it: see
+# check_read and check_write, which always look again.
+LISTING_AGE = 4.0
+_listing = {"at": 0.0, "drives": []}
+
+
+def enumerate_drives(fresh=False):
     """Every drive the host can see, as dictionaries all alike:
 
     path        what to open, and what a machine's config records
@@ -42,13 +51,22 @@ def enumerate_drives():
     busy        non-empty if the host is using it, and what for
     system      True if the host lives on it: never writable from here
     model       whatever the drive calls itself
+
+    A listing from the last few seconds is reused unless `fresh` says not
+    to.  Anything about to write asks fresh.
     """
-    return impl.enumerate_drives()
+    if not fresh and _listing["drives"] \
+            and time.time() - _listing["at"] < LISTING_AGE:
+        return _listing["drives"]
+    found = impl.enumerate_drives()
+    _listing.update(at=time.time(), drives=found)
+    return found
 
 
-def find(path):
+def find(path, fresh=False):
     """The drive at that path, or None."""
-    return next((d for d in enumerate_drives() if d["path"] == path), None)
+    return next((d for d in enumerate_drives(fresh)
+                 if d["path"] == path), None)
 
 
 def is_device(path):
@@ -59,7 +77,10 @@ def is_device(path):
 # ------------------------------------------------------------ the refusals
 
 def _wanted(path):
-    drive = find(path)
+    # always a fresh look: a listing from a moment ago could describe a
+    # drive that has since been unplugged, and something else put in its
+    # place would then answer to the confirmation given for the first one
+    drive = find(path, fresh=True)
     if drive is None:
         raise Refused("%s is not there" % path)
     return drive

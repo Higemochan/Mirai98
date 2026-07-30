@@ -312,16 +312,20 @@ function drawTree() {
   const running = instances.filter(i => i.running).length;
   document.getElementById('btn-shell').style.display =
     facts.platform === 'windows' ? 'none' : '';
+  const win = facts.platform === 'windows';
   document.getElementById('tree').innerHTML =
     '<div class="navhead">Navigator</div>' +
     '<div class="group">Host Server</div>' +
-    link('#/', '&#9635; Host Server') +
-    link('#/storage', '&#9707; Storage') +
-    (facts.platform === 'windows' ? '' :
-     link('#/network', '&#8646; Networking')) +
+    // on Windows the disks are what people came for, so they go first;
+    // on the appliance the host itself is the thing being administered
+    (win ? link('#/storage', '&#9707; Storage') +
+           link('#/', '&#9635; This Computer')
+         : link('#/', '&#9635; Host Server') +
+           link('#/storage', '&#9707; Storage') +
+           link('#/network', '&#8646; Networking')) +
     link('#/log', '&#9776; Logging') +
     link('#/settings', '&#9881; System Settings') +
-    (facts.platform === 'windows' ? '' : link('#/shell', '&#9002;_ Shell')) +
+    (win ? '' : link('#/shell', '&#9002;_ Shell')) +
     '<div class="group">Virtual machines <span class="count">(' +
     instances.length + ', ' + running + ' on)</span></div>' +
     link('#/vms', '&#9776; All machines') +
@@ -1077,7 +1081,9 @@ function freeDrives(kind) {
     d => !d.busy && !d.system &&
          (kind === 'cdrom' ? d.type === 'cdrom' : d.type !== 'cdrom'));
 }
-function askDrive(kind, verb) {
+async function askDrive(kind, verb) {
+  // a stick plugged in a moment ago has to be in this list
+  await refreshGear(true);
   const list = freeDrives(kind);
   if (!list.length) {
     toast('no free drive: everything the host can see is mounted');
@@ -1092,8 +1098,8 @@ function askDrive(kind, verb) {
   if (!chosen) { toast('no such drive'); return null; }
   return chosen;
 }
-window.writeToDrive = (kind, name) => {
-  const drive = askDrive(kind, 'Write ' + name + ' onto which drive?');
+window.writeToDrive = async (kind, name) => {
+  const drive = await askDrive(kind, 'Write ' + name + ' onto which drive?');
   if (!drive) return;
   // The server will not write unless it is told back what the drive says
   // about itself, and it checks that against the drive rather than against
@@ -1110,8 +1116,8 @@ window.writeToDrive = (kind, name) => {
                           task('Disk ' + name + ' → ' + drive.path,
                                'started'); pollJobs(); } });
 };
-window.readFromDrive = kind => {
-  const drive = askDrive(kind, 'Read which drive into a new image?');
+window.readFromDrive = async kind => {
+  const drive = await askDrive(kind, 'Read which drive into a new image?');
   if (!drive) return;
   const guess = drive.path.split('/').pop() +
                 (kind === 'fdd' ? '.raw' : '.raw');
@@ -1170,7 +1176,9 @@ window.pickZip = (kind, name) => {
 };
 
 async function storageView() {
-  const roms = await api('/api/roms');
+  // asked for alongside the rest rather than after it: three round trips
+  // one behind the other is what made opening this page feel slow
+  const roms = await romsSoon;
   view.innerHTML = '<div class="topbar"><h2>Storage</h2>' +
     '<span class="note">' + (hostFacts.disk_total
       ? fmtBytes(hostFacts.disk_free) + ' free of ' +
@@ -1497,20 +1505,34 @@ window.submitCreate = () => {
 // --------------------------------------------------------------- router
 // the navigator shows the whole fleet whatever page is open, so these
 // come along on every render, not only on the list
+// What drives the host has costs the server a real look at the hardware —
+// on Windows that is a PowerShell run, most of a second — and it hardly
+// ever changes.  So it is fetched lazily here, and always fresh at the one
+// moment it matters, which is when a drive is about to be picked.
+let gearAt = 0;
+const GEAR_AGE = 15000;
+async function refreshGear(force) {
+  if (!force && Date.now() - gearAt < GEAR_AGE) return;
+  const gear = await api('/api/hardware');
+  if (gear) { hardware = gear; gearAt = Date.now(); }
+}
+
 async function refreshFleet() {
-  const [fleet, gear] = await Promise.all([api('/api/instances'),
-                                           api('/api/hardware')]);
+  const [fleet] = await Promise.all([api('/api/instances'), refreshGear()]);
   if (fleet) instances = fleet;
-  if (gear) hardware = gear;
   if (!facts.hostname) {
     const f = await api('/api/facts');
     if (f) facts = f;
   }
 }
 
+// the ROM card on the storage page needs this; started here so it travels
+// with the disks rather than after them
+let romsSoon = Promise.resolve(null);
+
 async function refreshDisks() {
-  const gear = await api('/api/hardware');
-  if (gear) hardware = gear;
+  romsSoon = api('/api/roms');
+  await refreshGear();
   const disks = await api('/api/disks');
   if (!disks) return;
   catalog = disks;
@@ -1651,6 +1673,10 @@ async function settingsView() {
 // ------------------------------------------------------- the password
 function passwordCard(s) {
   const win = s.platform === 'windows';
+  // An application started this and holds a secret nothing else has, and
+  // the server listens on this machine only.  A password would guard
+  // nothing, and the server refuses to set one, so there is no card.
+  if (facts.token) return '';
   return '<div class="card"><h3>Password</h3><div class="body">' +
     '<div class="note" style="margin-bottom:.6em">' +
     (s.password
@@ -1989,7 +2015,21 @@ async function startLang() {
   document.getElementById('lang-pick').value = lang;
   if (lang === 'ja') translateNode(document.body);
 }
-startLang().then(render);
+// Where a fresh window lands.  On Windows the disks are the point, so it
+// opens on Storage; on the appliance the host overview is.  A window
+// opened with an address of its own keeps it.
+async function start() {
+  await startLang();
+  if (!location.hash || location.hash === '#/') {
+    const f = facts.platform ? facts : await api('/api/facts');
+    if (f && f.platform === 'windows') {
+      location.hash = '#/storage';
+      return;                          // the hashchange draws it
+    }
+  }
+  render();
+}
+start();
 setInterval(() => {
   const r = route();
   pollHost();
