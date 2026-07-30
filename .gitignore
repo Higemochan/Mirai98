@@ -3,12 +3,8 @@
 /out/
 /dist/
 /qemu-build/
-/win64/root/
-/win64/stage/
-/win64/build/
-/win64/deps-src/
-/win64/deps-build/
-/win64/downloads/
+
+# the mingw cross-build keeps its own list, in win64/.gitignore
 
 # Electron
 /electron/node_modules/

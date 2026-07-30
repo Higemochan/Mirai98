@@ -1,0 +1,20 @@
+# build products of the mingw cross-build; all of it can be deleted and
+# rebuilt, though deps-src/ downloads/ root/ are worth keeping because
+# rebuilding the dependencies takes a while
+/build/
+/deps-build/
+/deps-src/
+/downloads/
+/licenses/
+/qemu-pc98-bin/
+# what "build.sh release REV" assembles, named after the release
+/qemu-*-pc98-*/
+/root/
+/stage/
+/wine-prefix/
+/__pycache__/
+/cross-mingw.ini
+/toolchain-mingw.cmake
+/*.zip
+/*.sha256
+/package-assets/virtpc98.exe

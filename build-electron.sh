@@ -41,14 +41,17 @@ todo() {
 
 build_qemu() {
     [ -x "$BASE/win64/build.sh" ] || todo "the mingw cross-build" "phase 2"
-    QEMU_SOURCE_DIR=$QEMU_SRC "$BASE/win64/build.sh" all
+    # deps are stamped and skipped once built; qemu checks for itself that
+    # the fat98 block driver and qcow1 are in, and dies if they are not
+    "$BASE/win64/build.sh" deps
+    "$BASE/win64/build.sh" qemu
 
-    # vvfat98 has gone missing from a Windows build before, and nothing
-    # downstream notices until a guest cannot read a shared folder
-    "${STRINGS:-x86_64-w64-mingw32-strings}" \
-        "$BASE/win64/qemu-pc98-bin/qemu-system-i386.exe" \
-        | grep -q "start with 'fat98" || {
-            echo "this qemu has no vvfat98: check --enable-vvfat"; exit 1; }
+    local exe=$BASE/win64/build/qemu-system-i386.exe
+    [ -f "$exe" ] || { echo "no $exe after the qemu stage"; exit 1; }
+    # record what it was built from, so it can be held against the
+    # version the Live USB stamps into out/payload/opt/mirai98/version
+    git -C "$QEMU_SRC" rev-parse --short HEAD > "$OUT/win64-qemu.rev"
+    echo "=== windows qemu: $(cat "$OUT/win64-qemu.rev"), $(du -h "$exe" | cut -f1)"
 }
 
 # ---------------------------------------------------------- the sidecar
