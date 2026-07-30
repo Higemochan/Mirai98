@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mirai98 Hypervisor Platform OS</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+ <div class="logo">Mirai<span>98</span></div>
+ <div class="sub">Hypervisor Platform OS</div>
+ <div class="msg" id="msg"></div>
+ <div class="spacer"></div>
+ <button class="primary" onclick="openCreate()">Create VM</button>
+ <button onclick="location.hash='#/shell'" id="btn-shell">Shell</button>
+ <select id="lang-pick" onchange="setLang(this.value)" title="Language">
+  <option value="en">English</option>
+  <option value="ja">日本語</option>
+ </select>
+ <div class="sub" id="whereami"></div>
+</header>
+<nav id="tree"></nav>
+<main><div id="view"></div><div id="datalists"></div></main>
+<footer>
+ <div class="bar">Tasks</div>
+ <table id="tasks"></table>
+</footer>
+
+<div class="veil" id="tree-veil"
+     onclick="if(event.target===this)closeTree()">
+ <div class="dialog" style="width:40em">
+  <div class="title"><b id="tree-name"></b>
+   <span class="x" onclick="closeTree()">&#10005;</span></div>
+  <div style="padding:1em;max-height:60vh;overflow:auto;
+              font-family:ui-monospace,monospace;font-size:12px"
+       id="tree-body"></div>
+  <div class="foot"><span class="spacer"></span>
+   <button onclick="closeTree()">Close</button></div>
+ </div>
+</div>
+
+<div class="veil" id="upload-veil">
+ <div class="dialog" style="width:34em">
+  <div class="title"><b>Upload</b></div>
+  <div style="padding:1em">
+   <div id="upload-name" style="overflow-wrap:anywhere"></div>
+   <progress id="upload-bar" max="100" value="0"
+             style="width:100%;height:1.2em;margin:.8em 0"></progress>
+   <div class="note" id="upload-stat"></div>
+  </div>
+  <div class="foot"><span class="spacer"></span>
+   <button id="upload-close" onclick="closeUpload()">Cancel</button></div>
+ </div>
+</div>
+
+<div class="veil" id="veil" onclick="if(event.target===this)closeCreate()">
+ <div class="dialog">
+  <div class="title"><b>Create: Virtual Machine</b>
+   <span class="x" onclick="closeCreate()">&#10005;</span></div>
+  <div class="tabs" id="tabs"></div>
+  <form id="wizard" onsubmit="return submitCreate()">
+   <div class="pane on" data-pane="General">
+    <!-- validated in submitCreate, not by the browser: a required field
+         on a hidden tab blocks submit with nothing on screen to fix -->
+    <div class="row"><label>Name</label>
+     <input type="text" name="name" placeholder="dos620"></div>
+    <div class="row"><label>Machine type</label>
+     <select name="machine">
+      <option value="pc9821" selected>PC-9821 (386 and later)</option>
+      <option value="pc9801">PC-9801 (the older line)</option>
+     </select></div>
+    <div class="row"><label>BIOS</label>
+     <select name="bios">
+      <option value="compat" selected>Compatible (ships with Mirai98)
+      </option>
+      <option value="real">Real machine ROMs (uploaded in Storage)</option>
+     </select></div>
+    <div class="row"><label>Snapshot</label>
+     <label class="check"><input type="checkbox" name="snapshot" checked>
+      discard disk changes when the machine stops</label></div>
+   </div>
+   <div class="pane" data-pane="Disks" id="pane-disks"></div>
+   <div class="pane" data-pane="Host">
+    <div class="row"><label>Shared folder</label>
+     <input type="text" name="mount" placeholder="/data/share"></div>
+    <div class="note">Mounted as an IDE disk (fat98). Uses one of the
+     two units the disk BIOS sees.</div>
+    <div id="pane-ports" style="margin-top:1em"></div>
+    <div class="note">Host drives: see the Disks tab. Mounted drives
+     are refused. Parallel and GP-IB: not yet in QEMU.</div>
+   </div>
+   <div class="pane" data-pane="Memory">
+    <div class="row"><label>Memory</label>
+     <input type="range" id="mem-range" min="0" oninput="memSlide(this)">
+     <input type="text" name="memory" id="mem-text" value="64M"
+            style="min-width:6em" oninput="memType(this)"></div>
+    <div class="note">640K: as shipped. DOS games: 4M to 16M.
+     Windows 95: more.</div>
+   </div>
+   <div class="pane" data-pane="Sound">
+    <div class="row"><label>Sound board</label>
+     <select name="sound">
+      <option value="86" selected>PC-9801-86</option>
+      <option value="wss">WSS</option>
+      <option value="none">None</option>
+     </select></div>
+    <div class="note">PC-9801-86: FM and PCM. WSS: the Mate-X built-in.
+     The console plays whichever one is fitted.</div>
+   </div>
+   <div class="pane" data-pane="Network">
+    <div class="row"><label>Network</label>
+     <select name="net"><option value="">None</option>
+      <option value="nat">NAT</option>
+      <option value="bridge">Bridge</option></select></div>
+    <div class="note">LGY-98 board. NAT: outbound only.
+     Bridge: own address on the LAN.</div>
+   </div>
+   <div class="pane" data-pane="Options">
+    <div class="row"><label>Acceleration</label>
+     <label class="check"><input type="checkbox" name="kvm">
+      use KVM when the host has it, TCG otherwise <b>(Experimental)</b></label></div>
+    <div class="row"><label>Extra QEMU args</label>
+     <input type="text" name="extra" style="min-width:24em"></div>
+    <div class="note">Appended to the command line as typed.</div>
+   </div>
+   <div class="pane" data-pane="Confirm">
+    <div id="confirm-table"></div>
+   </div>
+   <div class="foot">
+    <span class="note" id="wizard-note"></span>
+    <span class="spacer"></span>
+    <button type="button" onclick="closeCreate()">Cancel</button>
+    <button type="button" id="btn-back" onclick="tabStep(-1)">Back</button>
+    <button type="button" id="btn-next" class="primary"
+            onclick="tabStep(1)">Next</button>
+    <button type="submit" id="btn-finish" class="primary"
+            style="display:none">Finish</button>
+   </div>
+  </form>
+ </div>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

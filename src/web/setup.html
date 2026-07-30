@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mirai98 Hypervisor Platform OS</title>
+<style>
+ body { font: 13px/1.55 system-ui, sans-serif; background: #1b1f24;
+        color: #d6dde4; min-height: 100vh; margin: 0; display: flex;
+        align-items: center; justify-content: center; }
+ .box { background: #232a31; border: 1px solid #38424c; border-radius: 4px;
+        padding: 1.6em 1.8em; width: 38em; max-width: 92vw; }
+ .logo { font-size: 19px; font-weight: 700; }
+ .logo span { color: #0095d9; }
+ .sub { color: #8d99a5; margin: .2em 0 1.4em; }
+ h2 { font-size: 15px; margin: 0 0 .6em; font-weight: 600; }
+ .note { color: #8d99a5; }
+ .pick { display: flex; gap: .6em; align-items: flex-start;
+         border: 1px solid #38424c; border-radius: 3px; padding: .7em .8em;
+         margin: .6em 0; cursor: pointer; }
+ .pick.on { border-color: #0095d9; background: #1f2933; }
+ .pick.big { justify-content: center; font-size: 15px; padding: 1em; }
+ table { width: 100%; border-collapse: collapse; margin-top: .5em; }
+ td, th { padding: .35em .5em; border-bottom: 1px solid #2f3841;
+          text-align: left; }
+ th { color: #8d99a5; font-weight: 400; }
+ tr.sel { background: #1f2933; }
+ input[type=password] { width: 100%; padding: .45em .5em; border-radius: 3px;
+         border: 1px solid #38424c; background: #1b1f24; color: #d6dde4;
+         font: inherit; }
+ .bar { display: flex; gap: .6em; margin-top: 1.4em; align-items: center; }
+ button { padding: .5em 1.1em; border-radius: 3px; border: 1px solid #38424c;
+          background: #2b333b; color: #d6dde4; font: inherit;
+          cursor: pointer; }
+ button.primary { border-color: #0095d9; background: #0095d9; color: #fff; }
+ .step { color: #8d99a5; margin-left: auto; }
+ .msg { color: #e06c5f; min-height: 1.3em; margin-top: .6em; }
+ .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="box">
+ <div class="logo">Mirai<span>98</span></div>
+ <div class="sub">Hypervisor Platform OS</div>
+
+ <div id="s0">
+  <h2 id="t-language">Language</h2>
+  <div class="pick big on" onclick="pickLang('en')">English</div>
+  <div class="pick big" onclick="pickLang('ja')">&#26085;&#26412;&#35486;</div>
+ </div>
+
+ <div id="s1" class="hide">
+  <h2 id="t-setup">Setup</h2>
+  <div class="note" id="t-where">Where should the machines live?</div>
+  <div class="pick on" id="pick-default" onclick="pickDefault()">
+   <input type="radio" name="where" checked id="radio-default">
+   <div id="t-default">Use free space on this USB media (default)</div>
+  </div>
+  <div class="pick" id="pick-other" onclick="pickOther()">
+   <input type="radio" name="where" id="radio-other">
+   <div><span id="t-other">Use existing partition and make a folder.</span>
+    <div id="choices" class="hide"></div></div>
+  </div>
+  <div class="bar"><button class="primary" onclick="toStep(2)"
+   id="t-continue">Continue</button>
+   <span class="step" id="t-step1">Step 1 of 2</span></div>
+ </div>
+
+ <div id="s2" class="hide">
+  <h2 id="t-password">Password</h2>
+  <div class="note" id="pw-note"></div>
+  <div style="margin:1em 0">
+   <input type="password" id="pw" placeholder="password" autofocus>
+  </div>
+  <div class="note" id="t-blank">Leave it empty to start without one.</div>
+  <div class="bar"><button onclick="toStep(1)" id="t-back">Back</button>
+   <button class="primary" onclick="finish()" id="t-finish">Finish</button>
+   <span class="step" id="t-step2">Step 2 of 2</span></div>
+  <div class="msg" id="msg"></div>
+ </div>
+</div>
+<script>
+const JA = {
+  't-language': '言語',
+  't-setup': 'セットアップ',
+  't-where': '仮想マシンをどこに置きますか。',
+  't-default': 'このUSBメディアの空き領域を使う（推奨）',
+  't-other': '既存のパーティションにフォルダを作る',
+  't-continue': '次へ',
+  't-step1': '1 / 2',
+  't-password': 'パスワード',
+  't-blank': '空欄のまま進めてもかまいません。',
+  't-back': '戻る',
+  't-finish': '完了',
+  't-step2': '2 / 2',
+};
+const JA_TEXT = {
+  pwWin: 'この管理画面を守ります。',
+  pwUnix: 'root のパスワードになり、管理画面とシェルの両方で聞かれます。',
+  winDefault: 'このプログラムを起動した場所を使う（推奨）',
+  otherDrive: 'ドライブにフォルダを作る',
+  grown: 'このメディアの空き領域 %s を使えるようにしました。',
+  none: '他のドライブは見つかりません。',
+  pickOne: 'ドライブを選んでください。',
+  noPassword: 'パスワードを設定せずに進めますか。',
+  working: '設定中...',
+  drive: 'ドライブ', type: '種別', size: '容量',
+};
+const EN_TEXT = {
+  pwWin: 'It guards this console.',
+  pwUnix: 'It becomes the root password: this console and the shell both ' +
+          'ask for it.',
+  winDefault: 'Use where this program was started (default)',
+  otherDrive: 'Use another drive and make a folder.',
+  grown: 'This medium now has %s of free space to use.',
+  none: 'No other drive was found.',
+  pickOne: 'Pick a drive.',
+  noPassword: 'Start without a password?',
+  working: 'setting up...',
+  drive: 'Drive', type: 'Type', size: 'Size',
+};
+
+let info = null, chosen = '', lang = 'en', T = EN_TEXT;
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
+  c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+const fmt = n => !n ? '-' : n >= (1 << 30)
+  ? (n / (1 << 30)).toFixed(1) + ' GB' : Math.round(n / (1 << 20)) + ' MB';
+
+function pickLang(which) {
+  lang = which;
+  T = which === 'ja' ? JA_TEXT : EN_TEXT;
+  try { localStorage.setItem('mirai98-lang', which); } catch (err) {}
+  if (which === 'ja')
+    for (const id in JA) document.getElementById(id).textContent = JA[id];
+  document.documentElement.lang = which;
+  draw();
+  document.getElementById('s0').classList.add('hide');
+  document.getElementById('s1').classList.remove('hide');
+}
+
+fetch('/api/setup').then(r => r.json()).then(d => { info = d; draw(); });
+
+function draw() {
+  if (!info) return;
+  const d = info;
+  if (d.platform === 'windows') {
+    document.getElementById('t-default').textContent = T.winDefault;
+    document.getElementById('t-other').textContent = T.otherDrive;
+  }
+  document.getElementById('pw-note').textContent =
+    d.platform === 'windows' ? T.pwWin : T.pwUnix;
+  const where = document.getElementById('t-default');
+  where.title = d.default.path;
+  if (d.grown) {
+    let box = document.getElementById('grown-note');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'grown-note';
+      box.className = 'note';
+      box.style.margin = '.2em 0 0';
+      where.parentNode.appendChild(box);
+    }
+    box.textContent = T.grown.replace('%s', d.grown);
+  }
+  document.getElementById('choices').innerHTML = d.choices.length
+    ? '<table><tr><th>' + esc(T.drive) + '</th><th>' + esc(T.type) +
+      '</th><th>' + esc(T.size) + '</th></tr>' +
+      d.choices.map((c, n) => '<tr id="row-' + n + '" ' +
+        'onclick="pickDrive(' + n + ')"><td>' + esc(c.path) +
+        (c.label ? ' <span class="note">' + esc(c.label) + '</span>' : '') +
+        '</td><td>' + esc(c.fstype || '?') + '</td><td>' + fmt(c.size) +
+        '</td></tr>').join('') + '</table>'
+    : '<div class="note">' + esc(T.none) + '</div>';
+}
+function pickDefault() {
+  chosen = '';
+  document.getElementById('radio-default').checked = true;
+  document.getElementById('pick-default').classList.add('on');
+  document.getElementById('pick-other').classList.remove('on');
+  document.getElementById('choices').classList.add('hide');
+}
+function pickOther() {
+  document.getElementById('radio-other').checked = true;
+  document.getElementById('pick-other').classList.add('on');
+  document.getElementById('pick-default').classList.remove('on');
+  document.getElementById('choices').classList.remove('hide');
+}
+function pickDrive(n) {
+  chosen = info.choices[n].id;
+  pickOther();
+  for (const row of document.querySelectorAll('#choices tr'))
+    row.classList.remove('sel');
+  const row = document.getElementById('row-' + n);
+  if (row) row.classList.add('sel');
+}
+function toStep(n) {
+  if (n === 2 && document.getElementById('radio-other').checked && !chosen) {
+    alert(T.pickOne);
+    return;
+  }
+  document.getElementById('s1').classList.toggle('hide', n !== 1);
+  document.getElementById('s2').classList.toggle('hide', n !== 2);
+  if (n === 2) document.getElementById('pw').focus();
+}
+function finish() {
+  const password = document.getElementById('pw').value;
+  if (!password && !confirm(T.noPassword)) return;
+  document.getElementById('msg').textContent = T.working;
+  fetch('/api/setup', {method: 'POST',
+      body: JSON.stringify({storage: chosen, password, lang})})
+    .then(async r => {
+      const d = await r.json().catch(() => ({}));
+      if (r.ok) { location.href = '/'; return; }
+      document.getElementById('msg').textContent = d.error || 'refused';
+    });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,168 @@
+ :root {
+   --bg: #1b1f24; --panel: #232a31; --panel2: #2b333b; --line: #38424c;
+   --ink: #d6dde4; --dim: #8d99a5; --accent: #0095d9; --link: #4db8f0;
+   --ok: #6cc04a; --off: #7d858c; --cpu: #0095d9; --mem: #00b39f;
+ }
+ * { box-sizing: border-box; }
+ html, body { height: 100%; }
+ body { margin: 0; font: 13px/1.45 system-ui, sans-serif;
+        background: var(--bg); color: var(--ink);
+        display: grid; grid-template-rows: 42px 1fr 150px;
+        grid-template-columns: 15em 1fr;
+        grid-template-areas: "head head" "tree main" "tasks tasks"; }
+ a { color: var(--link); text-decoration: none; }
+
+ header { grid-area: head; background: #10151a; display: flex;
+          align-items: center; gap: 1em; padding: 0 1em;
+          border-bottom: 1px solid var(--line); }
+ header .logo { font-weight: 700; letter-spacing: .5px; font-size: 15px; }
+ header .logo span { color: var(--accent); }
+ header .sub { color: var(--dim); }
+ header .spacer { flex: 1; }
+ header .msg { color: #f0c674; }
+
+ nav { grid-area: tree; background: var(--panel); overflow: auto;
+       border-right: 1px solid var(--line); padding: 0 0 .6em; }
+ nav .group { color: var(--dim); font-size: 11px; text-transform: uppercase;
+              letter-spacing: .06em; padding: .9em 1em .25em; }
+ nav .navhead { padding: .5em 1em; font-weight: 600; font-size: 12px;
+                letter-spacing: .04em; color: var(--dim);
+                background: var(--panel2);
+                border-bottom: 1px solid var(--line); }
+ nav a { display: block; color: var(--ink); padding: .3em 1em .3em 1.4em;
+         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+ nav a:hover { background: var(--panel2); }
+ nav a.on { background: #14324a; color: #fff;
+            box-shadow: inset 3px 0 0 var(--accent); }
+ nav a .count { color: var(--dim); font-size: 11px; }
+
+ /* the toolbar row VMware puts under every title */
+ .actions { display: flex; gap: .4em; flex-wrap: wrap;
+            padding: .5em 0 .8em; border-bottom: 1px solid var(--line);
+            margin-bottom: 1em; }
+ .crumb { color: var(--dim); font-size: 12px; margin-bottom: .3em; }
+ .crumb a { color: var(--link); }
+ .titlerow { display: flex; align-items: center; gap: .6em; }
+ .titlerow h2 { margin: 0; font-size: 18px; font-weight: 500; }
+ .titlerow .glyph { font-size: 20px; color: var(--accent); }
+ /* resource consumption bars, the ESXi summary panel */
+ .meterlab { display: flex; justify-content: space-between;
+             font-size: 12px; color: var(--dim); }
+ .track { height: 14px; background: #171c21; border: 1px solid var(--line);
+          margin: .15em 0 .8em; }
+ .track > div { height: 100%; background: linear-gradient(#3fb0e8,
+                #0d7fb8); }
+ nav a .dot { display: inline-block; width: .55em; height: .55em;
+              border-radius: 50%; margin-right: .5em;
+              background: var(--off); }
+ nav a.run .dot { background: var(--ok); }
+ nav .node { padding-left: 1em; font-weight: 600; }
+
+ main { grid-area: main; overflow: auto; padding: 1em 1.2em; }
+ footer { grid-area: tasks; background: var(--panel); overflow: auto;
+          border-top: 1px solid var(--line); }
+ footer .bar { padding: .4em 1em; color: var(--dim);
+               border-bottom: 1px solid var(--line);
+               position: sticky; top: 0; background: var(--panel); }
+
+ .card { background: var(--panel); border: 1px solid var(--line);
+         border-radius: 3px; margin-bottom: 1em; }
+ .card > h3 { margin: 0; padding: .55em .9em; font-size: 13px;
+              font-weight: 600; border-bottom: 1px solid var(--line);
+              background: var(--panel2); }
+ .card > .body { padding: .9em; }
+ .card h4 { margin: 0; padding: .4em .9em; font-size: 12px;
+            font-weight: 600; color: var(--dim);
+            background: #22262a; border-bottom: 1px solid var(--line);
+            border-top: 1px solid var(--line); }
+ .card h4:first-child { border-top: none; }
+ table { border-collapse: collapse; width: 100%; }
+ th, td { padding: .45em .7em; text-align: left; vertical-align: middle;
+          border-bottom: 1px solid var(--line); }
+ th { color: var(--dim); font-weight: 600; font-size: 11px;
+      text-transform: uppercase; letter-spacing: .04em; }
+ tr:last-child td { border-bottom: none; }
+
+ button { font: inherit; padding: .28em .8em; border-radius: 3px;
+          border: 1px solid var(--line); background: var(--panel2);
+          color: var(--ink); cursor: pointer; }
+ button:hover:not(:disabled) { background: #3a4046; }
+ button.primary { background: var(--accent); border-color: var(--accent);
+                  color: #fff; }
+ button.primary:hover:not(:disabled) { background: #f08000; }
+ button:disabled { opacity: .4; cursor: default; }
+ input[type=text], input[type=number], select {
+   font: inherit; padding: .25em .4em; border-radius: 3px;
+   border: 1px solid var(--line); background: #1b1e21; color: var(--ink); }
+ input[type=text], select { min-width: 14em; }
+ input[type=range] { vertical-align: middle; width: 14em; }
+ label.check { user-select: none; }
+
+ .state { display: inline-block; padding: 0 .55em; border-radius: 9px;
+          font-size: 11px; border: 1px solid var(--line);
+          color: var(--dim); }
+ .state.on { border-color: #3f7a2c; background: #23331c; color: #9ede7a; }
+ img.thumb, .thumb-empty { width: 116px; height: 73px; display: block;
+   background: #000; border: 1px solid var(--line); }
+ img.thumb { object-fit: contain; }
+ .thumb-empty { display: flex; align-items: center; justify-content: center;
+                color: #555; font-size: 11px; }
+ .topbar { display: flex; align-items: center; gap: .8em;
+           margin-bottom: .8em; }
+ .topbar h2 { margin: 0; font-size: 17px; font-weight: 600; }
+ .grid2 { display: grid; grid-template-columns: 25em 1fr; gap: 1em;
+          align-items: start; }
+ dl { display: grid; grid-template-columns: 8.5em 1fr; margin: 0;
+      row-gap: .3em; }
+ dt { color: var(--dim); } dd { margin: 0; }
+ .row { display: flex; align-items: center; gap: .6em; margin: .35em 0; }
+ .row > label:first-child { width: 9em; color: var(--dim); flex: none; }
+ .bar-btns { display: flex; gap: .5em; flex-wrap: wrap; }
+
+ /* graphs, cockpit style: labels outside, plot stretches */
+ .graphs { display: grid; grid-template-columns: repeat(auto-fit,
+           minmax(20em, 1fr)); gap: 1.2em; }
+ .graph .cap { color: var(--dim); margin-bottom: .2em; }
+ .graph .cap b { color: var(--ink); float: right; font-weight: 600; }
+ .graph .plotrow { display: flex; gap: .4em; }
+ .graph .ylab { display: flex; flex-direction: column;
+                justify-content: space-between; font-size: 10px;
+                color: var(--dim); height: 110px; text-align: right;
+                width: 3.2em; flex: none; }
+ .graph .plot { flex: 1; height: 110px; background: #15181a;
+                border: 1px solid var(--line); }
+ .graph svg { display: block; width: 100%; height: 100%; }
+ .graph .xlab { display: flex; justify-content: space-between;
+                font-size: 10px; color: var(--dim); margin: .15em 0 0 3.6em; }
+
+ #console-box { background: #000; height: 480px; position: relative;
+                resize: vertical; overflow: hidden; min-height: 240px; }
+ .hint { color: #666; position: absolute; top: 45%; width: 100%;
+         text-align: center; }
+
+ /* the create dialog */
+ .veil { position: fixed; inset: 0; background: #000a; display: none;
+         align-items: center; justify-content: center; z-index: 20; }
+ .veil.open { display: flex; }
+ .dialog { width: 46em; max-width: 95vw; background: var(--panel);
+           border: 1px solid var(--line); border-radius: 4px;
+           box-shadow: 0 10px 40px #000a; }
+ .dialog .title { padding: .6em .9em; border-bottom: 1px solid var(--line);
+                  display: flex; align-items: center;
+                  background: var(--panel2); }
+ .dialog .title b { color: var(--link); font-weight: 600; }
+ .dialog .title .x { margin-left: auto; cursor: pointer;
+                     color: var(--dim); }
+ .tabs { display: flex; gap: .3em; padding: .5em .9em 0;
+         border-bottom: 1px solid var(--line); }
+ .tabs span { padding: .35em .9em; border: 1px solid transparent;
+              border-bottom: none; border-radius: 3px 3px 0 0;
+              color: var(--dim); cursor: pointer; }
+ .tabs span.on { background: var(--panel2); border-color: var(--line);
+                 color: #fff; margin-bottom: -1px; }
+ .pane { display: none; padding: 1em; min-height: 17em; }
+ .pane.on { display: block; }
+ .dialog .foot { padding: .6em .9em; border-top: 1px solid var(--line);
+                 display: flex; gap: .5em; align-items: center; }
+ .dialog .foot .spacer { flex: 1; }
+ .note { color: var(--dim); font-size: 12px; }

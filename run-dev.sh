@@ -12,8 +12,8 @@ BASE=$(cd "$(dirname "$0")" && pwd)
 CACHE=$BASE/cache
 OUT=$BASE/out
 
-[ -f "$CACHE/base.squashfs" ] || { echo "run ./build-mirai98.sh first"; exit 1; }
-[ -f "$OUT/mirai98.squashfs" ] || { echo "run ./build-mirai98.sh first"; exit 1; }
+[ -f "$CACHE/base.squashfs" ] || { echo "run ./build-liveusb.sh first"; exit 1; }
+[ -f "$OUT/mirai98.squashfs" ] || { echo "run ./build-liveusb.sh first"; exit 1; }
 
 root=$OUT/liveroot
 rm -rf "$root"

@@ -58,5 +58,7 @@ larger stick simply gives you more room for disk images.
 
 ## Building it yourself
 
-See [BUILD.md](BUILD.md).  One script builds the whole image; QEMU comes
-from [qemu-pc98](https://github.com/awemorris/qemu-pc98).
+See [BUILD.md](BUILD.md).  `./build-liveusb.sh` makes the USB image and
+`./build-electron.sh` makes the Windows application; QEMU comes from the
+[qemu-pc98](https://github.com/awemorris/qemu-pc98) submodule, so the two
+are always built from the same commit.

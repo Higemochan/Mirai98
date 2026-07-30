@@ -1,33 +1,40 @@
 #!/bin/bash
 
-# Mirai98 Hypervisor Platform OS image builder
+# Mirai98 Hypervisor Platform OS: the Live USB image
 #
-#   ./build-mirai98.sh          build what is missing (base, qemu, payload)
-#   ./build-mirai98.sh qemu     force the appliance QEMU rebuild
-#   ./build-mirai98.sh base     force the base rootfs rebuild
-#   ./build-mirai98.sh iso      also wrap everything into a BIOS+UEFI ISO
+#   ./build-liveusb.sh          build what is missing (base, qemu, payload)
+#   ./build-liveusb.sh qemu     force the appliance QEMU rebuild
+#   ./build-liveusb.sh base     force the base rootfs rebuild
+#   ./build-liveusb.sh usb      wrap everything into dist/mirai98-usb.img
+#   ./build-liveusb.sh iso      wrap everything into a BIOS+UEFI ISO
+#
+# QEMU comes from the qemu-pc98 submodule, so the appliance and the
+# Windows build (build-electron.sh) are always the same commit.
 #
 # The output splits along how often things change:
 #   cache/base-<hash>.squashfs   Debian userland; rebuilt only when
 #                                packages.list or the distro changes
 #   cache/vmlinuz, initrd.img    kernel pair, extracted from the base
-#   out/mirai98.squashfs          qemu + web app + config; seconds to rebuild
+#   out/mirai98.squashfs         qemu + web app + config; seconds to rebuild
+#   dist/mirai98-usb.img         what you write to a stick
 # live-boot unions every /live/*.squashfs, so the payload rides on top of
 # the base without ever touching it.  ./run-dev.sh boots the pair in QEMU
-# without making an ISO at all.
+# without making an image at all.
 
 set -euo pipefail
 
 BASE=$(cd "$(dirname "$0")" && pwd)
 CACHE=$BASE/cache
 OUT=$BASE/out
+# where the things worth keeping land; DIST below is the Debian suite
+DISTDIR=$BASE/dist
 DIST=trixie
 MIRROR=http://deb.debian.org/debian
 STAGE1_VERSION=3                 # bump to force a base rebuild
 VERSION=$(date +%Y%m%d)
 
-# github.com/awemorris/qemu-pc98: the machine, its ROMs and its keymaps
-QEMU_SRC=${QEMU_SRC:-$HOME/qemu-pc98}
+# the qemu-pc98 submodule: the machine, its ROMs and its keymaps
+QEMU_SRC=${QEMU_SRC:-$BASE/qemu-pc98}
 QEMU_BUILD=$BASE/qemu-build
 NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
 # FreeDOS(98): the GPL kernel and shell, built for PC-98 by lpproj.  It
@@ -36,9 +43,16 @@ FREEDOS_URL=https://github.com/lpproj/fdkernel/releases/download/test-20220120-c
 # a static binary, because trixie dropped the ttyd package
 TTYD_URL=https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64
 
-mkdir -p "$CACHE" "$OUT"
+mkdir -p "$CACHE" "$OUT" "$DISTDIR"
 
-key=$( (echo "$DIST $STAGE1_VERSION"; grep -v '^#' "$BASE/packages.list") \
+[ -f "$QEMU_SRC/configure" ] || {
+    echo "no QEMU source in $QEMU_SRC"
+    echo "if that is the submodule, check it out first:"
+    echo "    git submodule update --init"
+    exit 1; }
+
+key=$( (echo "$DIST $STAGE1_VERSION"; \
+        grep -v '^#' "$BASE/appliance/packages.list") \
       | sha256sum | cut -c1-16)
 BASE_SQ=$CACHE/base-$key.squashfs
 
@@ -57,7 +71,7 @@ build_base() {
     trap 'sudo umount -l "$root"/{proc,sys,dev/pts,dev} 2>/dev/null || true' \
         EXIT
 
-    grep -v '^#' "$BASE/packages.list" | grep . \
+    grep -v '^#' "$BASE/appliance/packages.list" | grep . \
         | sudo tee "$root/tmp/packages" >/dev/null
     sudo chroot "$root" sh -ec '
         export DEBIAN_FRONTEND=noninteractive
@@ -73,9 +87,10 @@ build_base() {
     make_splash
     sudo mkdir -p "$root/usr/share/plymouth/themes/mirai98" \
                   "$root/etc/plymouth"
-    sudo cp "$BASE"/overlay/usr/share/plymouth/themes/mirai98/mirai98.* \
-            "$CACHE/splash.png" "$root/usr/share/plymouth/themes/mirai98/"
-    sudo cp "$BASE/overlay/etc/plymouth/plymouthd.conf" \
+    sudo cp \
+        "$BASE"/appliance/overlay/usr/share/plymouth/themes/mirai98/mirai98.* \
+        "$CACHE/splash.png" "$root/usr/share/plymouth/themes/mirai98/"
+    sudo cp "$BASE/appliance/overlay/etc/plymouth/plymouthd.conf" \
             "$root/etc/plymouth/"
     sudo chroot "$root" sh -ec '
         plymouth-set-default-theme mirai98
@@ -128,6 +143,12 @@ build_payload() {
         || { echo "no appliance qemu yet; run: $0 qemu"; exit 1; }
     [ -f "$BASE/src/pc98web.py" ] \
         || { echo "put pc98web.py in $BASE/src/ first"; exit 1; }
+    # a syntax error in the page is a blank screen with nothing in the
+    # log, so it is worth a second here rather than a bug report later
+    command -v node >/dev/null \
+        || { echo "node is needed to check the page: apt install nodejs";
+             exit 1; }
+    python3 "$BASE/src/check_page.py" "$BASE/src/web"
 
     if [ ! -d "$CACHE/novnc" ]; then
         echo "fetching noVNC..."
@@ -167,6 +188,9 @@ build_payload() {
     cp "$BASE/src/pc98web.py" "$stage/opt/mirai98/web/"
     # pc98web leans on virtpc98 for image creation and conversion
     cp "$BASE/src/virtpc98.py" "$stage/opt/mirai98/web/"
+    # the page: index.html and the script and style it pulls in, in a
+    # directory of their own so nothing else can be reached from there
+    cp -r "$BASE/src/web" "$stage/opt/mirai98/web/ui"
     cp -r "$CACHE/novnc" "$stage/opt/mirai98/web/novnc"
     # stock noVNC never asks for the guest's sound; patched, it rides
     # the same WebSocket as the pixels
@@ -195,11 +219,12 @@ EOF
   "datadir": "/opt/mirai98",
   "root": "/storage/pc98",
   "boot": "/boot-data",
-  "novnc": "/opt/mirai98/web/novnc"
+  "novnc": "/opt/mirai98/web/novnc",
+  "web": "/opt/mirai98/web/ui"
 }
 EOF
 
-    cp -r "$BASE/overlay/." "$stage/"
+    cp -r "$BASE/appliance/overlay/." "$stage/"
     chmod +x "$stage"/opt/mirai98/bin/*
     # the plymouth theme wants the same splash grub uses
     make_splash
@@ -213,10 +238,13 @@ EOF
     ln -sf /etc/systemd/system/mirai98-terminal.service "$wants/"
     ln -sf /usr/lib/systemd/system/systemd-networkd.service "$wants/"
 
-    # which QEMU this image carries, so a running appliance can say so
+    # which QEMU this image carries, so a running appliance can say so.
+    # the same stamp goes into the Windows build, and the two are only
+    # comparable if it is really there: a missing revision is a failure
     qemu_rev=$(git -C "$QEMU_SRC" rev-parse --short HEAD 2>/dev/null || true)
-    echo "$VERSION${qemu_rev:+ (qemu $qemu_rev)}" \
-        > "$stage/opt/mirai98/version"
+    [ -n "$qemu_rev" ] \
+        || { echo "no commit for $QEMU_SRC: cannot stamp the image"; exit 1; }
+    echo "$VERSION (qemu $qemu_rev)" > "$stage/opt/mirai98/version"
     mksquashfs "$stage" "$OUT/mirai98.squashfs" -comp zstd -noappend -quiet
     echo "=== stage 2 done: $(du -h "$OUT/mirai98.squashfs" | cut -f1)"
 }
@@ -266,8 +294,8 @@ EOF
 # ------------------------------------------------- stage 3b: the USB image
 
 build_usb() {
-    echo "=== usb: out/mirai98-usb.img"
-    local img=$OUT/mirai98-usb.img
+    echo "=== usb: dist/mirai98-usb.img"
+    local img=$DISTDIR/mirai98-usb.img
     usb_mnt=$OUT/usb-mnt
     usb_loop=""
 
@@ -329,7 +357,7 @@ build_usb() {
 # ------------------------------------------------------- stage 3: the ISO
 
 build_iso() {
-    echo "=== stage 3: out/mirai98-$VERSION-amd64.iso"
+    echo "=== stage 3: dist/mirai98-$VERSION-amd64.iso"
     local tree=$OUT/iso
     rm -rf "$tree"
     mkdir -p "$tree/live" "$tree/boot/grub"
@@ -339,9 +367,9 @@ build_iso() {
     make_splash
     cp "$CACHE/splash.png" "$tree/boot/grub/"
     grub_cfg > "$tree/boot/grub/grub.cfg"
-    grub-mkrescue -o "$OUT/mirai98-$VERSION-amd64.iso" "$tree" \
+    grub-mkrescue -o "$DISTDIR/mirai98-$VERSION-amd64.iso" "$tree" \
         --product-name=Mirai98 2>/dev/null
-    echo "=== stage 3 done: $(du -h "$OUT/mirai98-$VERSION-amd64.iso" | cut -f1)"
+    echo "=== stage 3 done: $(du -h "$DISTDIR/mirai98-$VERSION-amd64.iso" | cut -f1)"
 }
 
 # ------------------------------------------------------------------ main
@@ -359,5 +387,5 @@ case "${1:-}" in
           [ -f "$CACHE/qemu-system-i386" ] || build_qemu
           build_payload
           echo "ready: ./run-dev.sh boots it; '$0 usb' or '$0 iso' wraps it" ;;
-    *)    sed -n '3,11p' "$0"; exit 2 ;;
+    *)    sed -n '3,9p' "$0"; exit 2 ;;
 esac

@@ -1,0 +1,3 @@
+[submodule "qemu-pc98"]
+	path = qemu-pc98
+	url = https://github.com/awemorris/qemu-pc98.git

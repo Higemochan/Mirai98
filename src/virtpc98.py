@@ -1351,13 +1351,12 @@ def fdd_format_of(path):
 
 SETTINGS = "virtpc98.ini"
 SECTION = "virtpc98"
-# The PC-98 machines live in the i386 target, which is what the Windows
-# build ships; the older x86_64 build carried them too, so keep looking
-# for it after the current names rather than stranding an existing setup.
-QEMU_NAMES = ("qemu-system-i386.exe", "qemu-system-i386w.exe",
-              "qemu-system-i386",
-              "qemu-system-x86_64.exe", "qemu-system-x86_64w.exe",
-              "qemu-system-x86_64")
+# The Windows package ships both system emulators.  Prefer x86_64, while
+# keeping the i386 names as a fallback for older and hand-made packages.
+QEMU_NAMES = ("qemu-system-x86_64.exe", "qemu-system-x86_64w.exe",
+              "qemu-system-x86_64",
+              "qemu-system-i386.exe", "qemu-system-i386w.exe",
+              "qemu-system-i386")
 COMPAT_ROM_DIR = os.path.join("share", "pc98bios")
 ROM_NAMES = ("bios-xa7c9w", "roms", "bios")
 ROM_FILES = ("pc98bank0.bin", "pc98font.bin")
@@ -2417,6 +2416,9 @@ Booting
                [--memory=64M] [--kvm] [--hyperv] [--qemu=PATH]
                [--sound=86|wss|none] [--lan] [--dry-run]
 
+  --kvm and --hyperv are experimental; without them the guest runs
+  under TCG, which is the tested path.
+
   --sound fits one board: 86 is the PC-9801-86 (FM and PCM), wss is the
   Mate-X built-in Sound System.  The default is 86.
 
@@ -2752,8 +2754,9 @@ def gui():
             row += 1
             # only one accelerator at a time, and only where it exists
             self.kvm_button, self.hv_button = self.add_checks(
-                virt, 0, (("KVM (Linux-only)", self.kvm),
-                          ("Hyper-V (Windows-only)", self.hyperv)))
+                virt, 0,
+                (("KVM (Experimental)", self.kvm),
+                 ("Hyper-V (Experimental)", self.hyperv)))
             self.kvm_button.configure(command=lambda: self.hyperv.set(False))
             self.hv_button.configure(command=lambda: self.kvm.set(False))
             if not os.path.exists("/dev/kvm"):
