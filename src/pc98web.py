@@ -549,9 +549,15 @@ def next_index(instances):
 
 
 def ports_of(inst):
+    """The three ports a machine keeps for life, from its index.
+
+    The bases can be moved in the config, which is what lets a second copy
+    run beside an appliance that is already using the usual ones.
+    """
     index = inst["index"]
-    return (5900 + VNC_DISPLAY_BASE + index, WEBSOCKET_BASE + index,
-            QMP_BASE + index)
+    return (5900 + CONFIG.get("vnc_display", VNC_DISPLAY_BASE) + index,
+            CONFIG.get("websocket", WEBSOCKET_BASE) + index,
+            CONFIG.get("qmp", QMP_BASE) + index)
 
 
 def sanitize(data, taken_names=()):
@@ -2186,6 +2192,17 @@ def start_instance(inst):
         proc = subprocess.Popen(argv, stdout=log, stderr=log,
                                 start_new_session=True)
     _procs[inst["name"]] = proc
+    # A machine is deliberately in a session of its own, so that restarting
+    # this server does not take the guests down with it.  That also means
+    # no signal to this process reaches them, so the pid is written down:
+    # whatever started this server can then clear up after it even if it
+    # has stopped answering.
+    try:
+        with open(os.path.join(inst_dir(inst["index"]), "qemu.pid"), "w") \
+                as f:
+            f.write("%d\n" % proc.pid)
+    except OSError:
+        pass
     # give it a moment to either come up or die with a reason
     for _ in range(20):
         if proc.poll() is not None:
@@ -2204,8 +2221,16 @@ def start_instance(inst):
     return "started (slow to answer QMP)"
 
 
+def forget_pid(inst):
+    try:
+        os.remove(os.path.join(inst_dir(inst["index"]), "qemu.pid"))
+    except OSError:
+        pass
+
+
 def stop_instance(inst):
     if not is_running(inst):
+        forget_pid(inst)
         return "not running"
     qmp(inst, "quit")
     proc = _procs.pop(inst["name"], None)
@@ -2216,6 +2241,7 @@ def stop_instance(inst):
             proc.kill()
     for _ in range(20):
         if not is_running(inst):
+            forget_pid(inst)
             say("vm %s stopped" % inst["name"], "vm")
             return "stopped"
         time.sleep(0.25)
@@ -2759,6 +2785,25 @@ class Handler(BaseHTTPRequestHandler):
             lang = "ja" if str(data.get("lang") or "") == "ja" else "en"
             write_settings({"lang": lang})
             self.reply(200, {"result": lang})
+            return
+        if path == "/api/shutdown":
+            # The application that started us is closing.  Only it may ask:
+            # on the appliance this server is the system's, not a window's.
+            if not APP_TOKEN:
+                self.refuse(404, "no such action")
+                return
+            with _lock:
+                instances = load_instances()
+            running = [i for i in instances if is_running(i)]
+            left = [i["name"] for i in running
+                    if stop_instance(i) != "stopped"]
+            self.reply(200, {"result": "stopping",
+                             "stopped": len(running) - len(left),
+                             "left": left})
+            # once the reply is out, and from another thread, or this one
+            # would be waiting on itself
+            threading.Thread(target=self.server.shutdown,
+                             daemon=True).start()
             return
         if path == "/api/password":
             if APP_TOKEN:

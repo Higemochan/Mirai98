@@ -34,6 +34,14 @@ PYTHON_SHA256=f6cca216a359be84797cabb54149ce5e062afb16cc7567eb7fc51cacb2d86b65
 
 NOVNC_URL=https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
 
+# Electron, as the prebuilt Windows zip.  Taking it this way rather than
+# through npm keeps the whole build to file copying, so it runs here and
+# needs no Windows machine and no wine.
+ELECTRON_VERSION=v43.2.0
+ELECTRON_ZIP=electron-$ELECTRON_VERSION-win32-x64.zip
+ELECTRON_URL=https://github.com/electron/electron/releases/download/$ELECTRON_VERSION/$ELECTRON_ZIP
+ELECTRON_SHA256=eba5f5088af40ecb364fe258809c79a5234c6ece5a75c64722772eba01b02786
+
 mkdir -p "$CACHE" "$OUT" "$DISTDIR"
 
 [ -f "$QEMU_SRC/configure" ] || {
@@ -143,15 +151,53 @@ EOF
 }
 EOF
 
-    git -C "$QEMU_SRC" rev-parse --short HEAD > "$STAGE/qemu.rev"
-    echo "$VERSION" > "$STAGE/version"
+    # inside the sidecar: Electron lays a "version" file of its own at the
+    # top of the stage, and would overwrite one put there
+    { echo "Mirai98 $VERSION"
+      echo "QEMU $(git -C "$QEMU_SRC" rev-parse --short HEAD)"
+      echo "CPython $PYTHON_VERSION"
+      echo "Electron ${ELECTRON_VERSION#v}"; } > "$side/build.txt"
     echo "=== sidecar staged in out/win64 ($(du -sh "$STAGE" | cut -f1))"
 }
 
 # --------------------------------------------------------- the Electron
 
+fetch_pinned() {
+    local file=$1 url=$2 sum=$3
+    [ -f "$file" ] && return
+    echo "fetching $(basename "$file")..."
+    wget -qO "$file.part" "$url"
+    echo "$sum  $file.part" | sha256sum -c --quiet \
+        || { rm -f "$file.part"; echo "checksum mismatch: $url"; exit 1; }
+    mv "$file.part" "$file"
+}
+
 build_app() {
-    todo "the Electron shell" "phase 4"
+    [ -d "$STAGE/resources/sidecar" ] \
+        || { echo "no sidecar yet; run: $0 sidecar"; exit 1; }
+    for f in "$BASE"/electron/main/*.js "$BASE/electron/preload.js"; do
+        node --check "$f" || exit 1
+    done
+
+    fetch_pinned "$CACHE/$ELECTRON_ZIP" "$ELECTRON_URL" "$ELECTRON_SHA256"
+    rm -rf "$OUT/electron"
+    mkdir -p "$OUT/electron"
+    unzip -q "$CACHE/$ELECTRON_ZIP" -d "$OUT/electron"
+
+    # Electron looks for its application in resources/app, and the sidecar
+    # is already staged beside where that goes
+    cp -r "$OUT"/electron/* "$STAGE/"
+    rm -rf "$STAGE/resources/default_app.asar"
+    mkdir -p "$STAGE/resources/app"
+    cp -r "$BASE"/electron/main "$BASE"/electron/preload.js \
+          "$BASE"/electron/package.json "$STAGE/resources/app/"
+    # electron.exe is the name of the thing people will double-click
+    mv "$STAGE/electron.exe" "$STAGE/Mirai98.exe"
+
+    echo "=== app staged in out/win64 ($(du -sh "$STAGE" | cut -f1))"
+    echo "    Mirai98.exe keeps Electron's own icon: setting ours needs"
+    echo "    rcedit, which wants wine here, and is not worth a build"
+    echo "    dependency.  See BUILD.md."
 }
 
 # --------------------------------------------------------------- the zip

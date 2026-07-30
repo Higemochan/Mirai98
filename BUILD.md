@@ -81,6 +81,7 @@ Write the result to a stick with `dd`, or boot it without one:
     ./build-electron.sh          # everything, into dist/mirai98-win64.zip
     ./build-electron.sh qemu     # just the mingw cross-build
     ./build-electron.sh sidecar  # CPython + src/ + qemu, into out/win64/
+    ./build-electron.sh app      # ... and Electron over the top of it
 
 QEMU for Windows is cross-built by `win64/build.sh`, from the same
 submodule the appliance uses.  The first run builds the dependencies from
@@ -111,6 +112,28 @@ Windows code paths rather than the Linux ones, because `os.name` is
 It prints one `MIRAI98-READY` line with the port and the token; opening
 `http://127.0.0.1:<port>/?token=<token>` then works, and creating a disk
 image proves the bundled QEMU and `virtpc98` both load.
+
+The `app` stage lays Electron's own prebuilt Windows zip over that and
+puts `electron/` in as `resources/app`, so the whole build is still only
+file copying and needs no Windows machine and no wine.  `electron.exe`
+becomes `Mirai98.exe`; it keeps Electron's icon, because changing that
+needs rcedit, which would want wine here.  If the icon matters for a
+release, run rcedit on a Windows machine afterwards.
+
+Two things about the shell are worth knowing before changing it.
+
+`electron/main/sidecar.js` deliberately uses nothing from Electron, so it
+can be exercised with plain node — and it is where the awkward part lives.
+A machine is started with `start_new_session`, in a session of its own, so
+that restarting the server does not take the guests down with it; the cost
+is that no signal to the server reaches them.  So the server writes each
+machine's pid into `vm/vm-N/qemu.pid`, and the shell kills by pid when the
+server stops answering.  Killing a process group would do nothing, on
+either platform.
+
+The renderer gets no Node: the page is the same one the appliance serves to
+an ordinary browser, and must not come to depend on Electron.  That is why
+`preload.js` is almost empty.
 
 `win64/build.sh dist` assembles the separate virtpc98 distribution.  It
 needs `win64/package-assets/virtpc98.exe`, which PyInstaller produces on
