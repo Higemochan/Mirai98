@@ -135,6 +135,30 @@ The renderer gets no Node: the page is the same one the appliance serves to
 an ordinary browser, and must not come to depend on Electron.  That is why
 `preload.js` is almost empty.
 
+## Real drives
+
+Everything that touches a real drive goes through `src/drives/`: one
+door, two implementations (lsblk on the appliance, PowerShell and raw
+physical-drive handles on Windows), and all of the refusals.  The
+refusals live in the layer rather than in the page so that no caller can
+write to a drive by simply forgetting to ask: writing takes repeating
+something the drive itself says (its model, or its size in bytes), the
+host's own disk is never writable, and internal disks take saying so on
+top.  A write is read back afterwards and compared, because a write that
+went nowhere looks exactly like one that worked.
+
+On Windows the writing side takes the disk offline first
+(`Set-Disk -IsOffline`).  Without that, Windows' own filesystem cache
+writes its stale idea of the disk back over the image minutes later, and
+the result looks written but is quietly wrong.
+
+The server also takes `--parent-pid`: it watches that process and, once
+it is gone, stops every machine and exits.  That is the net under an
+application crash — without it the machines and the server survive,
+holding ports, invisible to the next start.  Watching an inherited pipe
+would be tidier and does not work: Electron's helpers inherit the handle
+and outlive the crash, so the pipe never closes.
+
 `win64/build.sh dist` assembles the separate virtpc98 distribution.  It
 needs `win64/package-assets/virtpc98.exe`, which PyInstaller produces on
 Windows and so cannot be built here; drop it in by hand before running

@@ -1,0 +1,12 @@
+{
+  "name": "mirai98",
+  "productName": "Mirai98",
+  "version": "1.0.0",
+  "description": "PC-98 virtualization for Windows",
+  "license": "GPL-2.0-only",
+  "main": "main/index.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  }
+}

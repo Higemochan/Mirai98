@@ -110,6 +110,8 @@ EOF
     mkdir -p "$side/src"
     cp "$BASE/src/pc98web.py" "$BASE/src/virtpc98.py" "$side/src/"
     cp -r "$BASE/src/web" "$side/src/web"
+    cp -r "$BASE/src/drives" "$side/src/drives"
+    rm -rf "$side/src/drives/__pycache__"
 
     mkdir -p "$side/qemu/share/keymaps"
     cp "$BASE"/win64/build/qemu-system-i386.exe \

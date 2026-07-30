@@ -11,6 +11,7 @@ directly and this process never touches the pixel path.
 
   pc98web.py [--host=0.0.0.0] [--port=8098] [--config=pc98web.json]
              [--base=DIR] [--loopback] [--app-token] [--dev]
+             [--parent-pid=N]
 
 The page it serves is a set of plain files in web/, read once at startup;
 --dev re-reads them per request, so an edit shows up on a reload.
@@ -25,6 +26,8 @@ which is how the Windows application runs it:
   --app-token   invent a secret and report it, to be used in place of a
                 password; the password is then no way in at all
   --port=0      let the operating system pick the port
+  --parent-pid  stop the machines and quit once that process is gone, so
+                that an application crashing does not leave them running
 
 Either of the last two prints one machine-readable line once the server
 is up, and nothing else is written to that line:
@@ -71,6 +74,8 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import drives
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WINDOWS = os.name == "nt"
@@ -211,7 +216,7 @@ def disk_path(inst, key):
 
 
 def is_device(path):
-    return path.startswith("/dev/") or path.startswith("\\\\.\\")
+    return drives.is_device(path)
 
 
 def free_bytes(path):
@@ -222,64 +227,12 @@ def free_bytes(path):
 
 
 def host_drives():
-    """Real drives the host could hand to a guest, and whether they are
-    free to hand over: anything mounted stays with the host."""
-    mounted = {}
-    for path in ("/proc/mounts",):
-        try:
-            with open(path) as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) > 1 and parts[0].startswith("/dev/"):
-                        mounted[parts[0]] = parts[1]
-        except OSError:
-            pass
-    out = []
-    try:
-        raw = subprocess.run(
-            ["lsblk", "-J", "-o", "NAME,PATH,SIZE,TYPE,RM,RO,MODEL,"
-             "MOUNTPOINT"], capture_output=True, text=True,
-            timeout=10).stdout
-        blocks = json.loads(raw or "{}").get("blockdevices", [])
-    except (OSError, ValueError, subprocess.SubprocessError):
-        blocks = []
+    """Real drives the host could hand to a guest.
 
-    def walk(node, parent=None):
-        path = node.get("path") or ""
-        kind = node.get("type") or ""
-        if kind in ("disk", "rom", "part"):
-            busy = mounted.get(path, "") or node.get("mountpoint") or ""
-            children = node.get("children") or []
-            # a disk whose partition is mounted is just as unavailable
-            for child in children:
-                busy = busy or mounted.get(child.get("path") or "", "")
-            out.append({
-                "path": path,
-                "size": node.get("size") or "",
-                "type": "cdrom" if kind == "rom" else
-                        ("fdd" if path.startswith("/dev/fd") else "hdd"),
-                "removable": node.get("rm") in (True, "1"),
-                "readonly": node.get("ro") in (True, "1"),
-                "model": (node.get("model") or "").strip(),
-                "busy": busy,
-                "system": path.startswith("/dev/loop") or
-                          busy in ("/", "/data"),
-            })
-        for child in node.get("children") or []:
-            walk(child, node)
-
-    for node in blocks:
-        walk(node)
-    # floppies rarely show up in lsblk unless media is in the drive
-    for n in range(4):
-        path = "/dev/fd%d" % n
-        if os.path.exists(path) and not any(d["path"] == path
-                                            for d in out):
-            out.append({"path": path, "size": "", "type": "fdd",
-                        "removable": True, "readonly": False,
-                        "model": "floppy drive", "busy": mounted.get(path, ""),
-                        "system": False})
-    return out
+    The drives layer knows what a drive is on this platform; this is the
+    one shape the rest of the program and the page work in.
+    """
+    return drives.enumerate_drives()
 
 
 def busy_drives(inst):
@@ -892,7 +845,12 @@ LOG_KINDS = ("system", "vm", "disk", "network", "web")
 def say(text, kind="system"):
     """One line in the system log, and on stderr for whoever is watching."""
     line = "%s [%s] %s" % (time.strftime("%F %T"), kind, text)
-    sys.stderr.write(line + "\n")
+    try:
+        sys.stderr.write(line + "\n")
+    except OSError:
+        # stderr is a pipe to whoever started us, and they may be the
+        # very thing whose death is being reported
+        pass
     try:
         with _log_lock:
             path = log_path()
@@ -1930,55 +1888,65 @@ def install_to_disk(device, copy_data=False):
     return job
 
 
-def drive_job(label, kind, name, device, to_drive):
-    """Copy between an image and a real drive, block by block.
+def drive_job(label, kind, name, device, to_drive, confirm="",
+              allow_internal=False, check=True):
+    """Copy between an image and a real drive.
 
-    Refuses anything the host has mounted, in either direction: writing
-    would corrupt what the host is using, and reading it would produce a
-    torn copy.
+    Every refusal is the drives layer's, so that nothing can be written by
+    a caller that simply forgot to ask.  Writing also needs `confirm` to
+    repeat what the drive says about itself, and is followed by reading it
+    back and comparing, because a write that went nowhere and a write that
+    worked look exactly alike until someone tries to boot from it.
     """
     path = os.path.join(disks_root(kind), name)
     job = {"name": label, "kind": kind, "done": 0, "total": 0,
-           "state": "running", "error": ""}
-    drive = next((d for d in host_drives() if d["path"] == device), None)
-    if drive is None:
-        job.update(state="failed", error="%s is not there" % device)
-    elif drive["busy"]:
-        job.update(state="failed",
-                   error="%s is mounted on %s" % (device, drive["busy"]))
-    elif drive["system"]:
-        job.update(state="failed", error="%s belongs to the host" % device)
-    if job["state"] == "failed":
-        _jobs[label] = job
-        say("%s refused: %s" % (label, job["error"]), "disk")
-        return job
-
-    source, target = (path, device) if to_drive else (device, path)
+           "state": "running", "error": "", "verified": "",
+           "checking": False}
     try:
-        job["total"] = os.path.getsize(source) if to_drive \
-            else int(subprocess.run(["blockdev", "--getsize64", device],
-                                    capture_output=True, text=True,
-                                    timeout=10).stdout or 0)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        job["total"] = 0
+        if to_drive:
+            drive = drives.check_write(device, confirm, allow_internal)
+            job["total"] = os.path.getsize(path)
+            if drive["size_bytes"] and job["total"] > drive["size_bytes"]:
+                raise drives.Refused(
+                    "%s holds %d bytes and the image is %d"
+                    % (device, drive["size_bytes"], job["total"]))
+        else:
+            drive = drives.check_read(device)
+            job["total"] = drive["size_bytes"]
+    except drives.Refused as err:
+        job.update(state="failed", error=str(err))
+        _jobs[label] = job
+        say("%s refused: %s" % (label, err), "disk")
+        return job
+    sector = drive["sector"]
     _jobs[label] = job
+
+    def progress(done):
+        job["done"] = done
 
     def run():
         try:
-            with open(source, "rb") as src, \
-                    open(target, "r+b" if to_drive else "wb") as dst:
-                while True:
-                    block = src.read(4 << 20)
-                    if not block:
-                        break
-                    dst.write(block)
-                    job["done"] += len(block)
-                dst.flush()
-                os.fsync(dst.fileno())
-            job["state"] = "done"
-            say("%s finished (%d bytes)" % (label, job["done"]), "disk")
+            if to_drive:
+                with open(path, "rb") as src,                         drives.impl.open_write(device) as dst:
+                    written, done = drives.copy(src, dst, sector, progress)
+                if check:
+                    job.update(checking=True, done=0)
+                    ok, said = drives.verify(device, done, written, progress)
+                    job["checking"] = False
+                    if not ok:
+                        raise OSError(said)
+                    job["verified"] = said[:16]
+            else:
+                with drives.impl.open_read(device) as src,                         open(path, "wb") as dst:
+                    _read, done = drives.copy(src, dst, 1, progress,
+                                              limit=job["total"] or None)
+            job.update(state="done", done=done)
+            say("%s finished (%d bytes)%s"
+                % (label, done,
+                   ", read back and checked" if job["verified"] else ""),
+                "disk")
         except Exception as err:
-            job.update(state="failed", error=str(err))
+            job.update(state="failed", error=str(err), checking=False)
             say("%s failed: %s" % (label, err), "disk")
 
     threading.Thread(target=run, daemon=True).start()
@@ -3044,8 +3012,13 @@ class Handler(BaseHTTPRequestHandler):
         if verb == "to-drive":
             data = self.body_json() or {}
             device = str(data.get("device") or "")
+            # what the user typed to say they mean this drive, and not
+            # some other one that happens to be plugged in
             job = drive_job("%s → %s" % (name, device), kind, name, device,
-                            to_drive=True)
+                            to_drive=True,
+                            confirm=str(data.get("confirm") or ""),
+                            allow_internal=bool(data.get("internal")),
+                            check=data.get("check", True) is not False)
             if job["state"] == "failed":
                 self.fail(409, job["error"])
                 return
@@ -3644,6 +3617,60 @@ def read_config(path):
             for key, value in conf.items()}
 
 
+def watch_parent(pid):
+    """Stop the machines and quit once the given process is gone.
+
+    Asked for with --parent-pid, by an application that wants this server
+    to be its own and not outlive it.  Without it, an application that
+    crashes leaves this server and every guest running, holding a port and
+    invisible to the next attempt to start.
+
+    Watching an inherited pipe for end-of-file would be the tidier trick,
+    and does not work: Electron's helper processes inherit the same handle
+    and carry on running after the process that spawned them is killed, so
+    the pipe never closes.  Watching the pid is what is left.
+    """
+    def gone():
+        if WINDOWS:
+            import ctypes
+            # SYNCHRONIZE is enough to wait on it, and the wait is exact
+            handle = ctypes.windll.kernel32.OpenProcess(0x00100000, False,
+                                                        pid)
+            if not handle:
+                return True              # already gone
+            ctypes.windll.kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        while True:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return True
+            time.sleep(2)
+
+    def wait():
+        gone()
+        # from here the exit must happen whatever else does, and one
+        # machine failing to stop must not stop the next from being
+        # tried: this net exists for the messy cases, and the messy
+        # cases are exactly where any of this can throw
+        try:
+            say("the program that started this has gone; stopping the "
+                "machines", "system")
+            with _lock:
+                instances = load_instances()
+            for inst in instances:
+                try:
+                    if is_running(inst):
+                        stop_instance(inst)
+                except Exception:
+                    pass
+        finally:
+            os._exit(0)
+
+    threading.Thread(target=wait, daemon=True).start()
+
+
 def use_base(path):
     """Put the settings and the machines under a directory given to us.
 
@@ -3664,7 +3691,7 @@ def use_base(path):
 def main(argv):
     global DEV, LOOPBACK, APP_TOKEN
     host, port = "0.0.0.0", 8098
-    base, want_token = "", False
+    base, want_token, parent = "", False, 0
     for arg in argv[1:]:
         if arg.startswith("--host="):
             host = arg.split("=", 1)[1]
@@ -3680,6 +3707,8 @@ def main(argv):
             LOOPBACK = True
         elif arg == "--app-token":
             want_token = True
+        elif arg.startswith("--parent-pid="):
+            parent = int(arg.split("=", 1)[1])
         else:
             print(__doc__)
             return 2
@@ -3690,6 +3719,8 @@ def main(argv):
         use_base(base)
     if want_token:
         APP_TOKEN = secrets.token_urlsafe(32)
+    if parent:
+        watch_parent(parent)
     # --port=0 means "any free one", which only a program would ask for
     started_by_program = bool(APP_TOKEN) or port == 0
     if not os.path.isfile(os.path.join(CONFIG["web"], "index.html")):

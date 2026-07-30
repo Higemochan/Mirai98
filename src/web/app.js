@@ -1095,10 +1095,17 @@ function askDrive(kind, verb) {
 window.writeToDrive = (kind, name) => {
   const drive = askDrive(kind, 'Write ' + name + ' onto which drive?');
   if (!drive) return;
-  if (!confirm('Everything on ' + drive.path + ' will be overwritten by ' +
-               name + '.\n\nContinue?')) return;
+  // The server will not write unless it is told back what the drive says
+  // about itself, and it checks that against the drive rather than against
+  // anything sent from here.  So if the wrong drive was picked, this is
+  // where it shows, and nothing on this side can wave it through.
+  const asked = drive.model || String(drive.size_bytes);
+  const said = prompt('Everything on ' + drive.path + ' will be overwritten' +
+    ' by ' + name + '.\n\nType this to confirm:\n\n    ' + asked, '');
+  if (said === null) return;
   api('/api/disk/' + kind + '/' + encodeURIComponent(name) + '/to-drive',
-      {method: 'POST', body: JSON.stringify({device: drive.path})})
+      {method: 'POST', body: JSON.stringify(
+        {device: drive.path, confirm: said, internal: !drive.removable})})
     .then(r => { if (r) { toast('writing to ' + drive.path);
                           task('Disk ' + name + ' → ' + drive.path,
                                'started'); pollJobs(); } });
@@ -1241,13 +1248,17 @@ async function pollJobs() {
     const mine = jobs.filter(j => j.kind === kind);
     slot.innerHTML = mine.map(j =>
       j.state === 'running'
-        ? 'downloading ' + esc(j.name) + ': ' + fmtBytes(j.done) +
+        // a write to a drive is read back afterwards and compared, which
+        // takes as long again and is worth saying rather than looking stuck
+        ? (j.checking ? 'checking ' : '') + esc(j.name) + ': ' +
+          fmtBytes(j.done) +
           (j.total ? ' of ' + fmtBytes(j.total) + ' (' +
            (j.done / j.total * 100).toFixed(0) + '%)' : '')
         : j.state === 'failed'
           ? '<span style="color:#e06c5f">' + esc(j.name) + ': ' +
             esc(j.error) + '</span>'
-          : esc(j.name) + ': downloaded').join('<br>');
+          : esc(j.name) + ': done' +
+            (j.verified ? ', read back and checked' : '')).join('<br>');
     if (mine.some(j => j.state === 'done' &&
                        !catalog[kind].some(f => f.name === j.name)))
       render();

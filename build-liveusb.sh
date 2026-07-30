@@ -186,8 +186,11 @@ build_payload() {
     cp "$QEMU_SRC"/pc-bios/pc98*.bin "$stage/opt/mirai98/"
     cp "$QEMU_SRC"/pc-bios/keymaps/* "$stage/opt/mirai98/keymaps/"
     cp "$BASE/src/pc98web.py" "$stage/opt/mirai98/web/"
-    # pc98web leans on virtpc98 for image creation and conversion
+    # pc98web leans on virtpc98 for image creation and conversion, and on
+    # drives/ for everything that touches a real one
     cp "$BASE/src/virtpc98.py" "$stage/opt/mirai98/web/"
+    cp -r "$BASE/src/drives" "$stage/opt/mirai98/web/drives"
+    rm -rf "$stage/opt/mirai98/web/drives/__pycache__"
     # the page: index.html and the script and style it pulls in, in a
     # directory of their own so nothing else can be reached from there
     cp -r "$BASE/src/web" "$stage/opt/mirai98/web/ui"
