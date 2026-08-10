@@ -2168,7 +2168,8 @@ def qemu_argv(inst):
             "-M", "%s,accel=%s%s" % (
                 inst.get("machine") or "pc9821", accel,
                 ",pcspk-audiodev=snd" if any(SOUNDS[sound_of(inst)]) else ""),
-            "-m", inst.get("memory") or "64M"]
+            "-m", inst.get("memory") or "64M",
+            "-k", "ja"]   # PC-98 is a JIS keyboard; use the Japanese VNC keymap
     # QEMU searches -L paths in order, so putting the uploaded ROMs first
     # lets a partial real set fall through to the compatible ones
     if inst.get("bios") == "real":
