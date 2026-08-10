@@ -649,30 +649,53 @@ window.saveVm = (form, name) => {
 // the pixels (S16LE, stereo, 44.1 kHz).  Chunks are turned into
 // AudioBuffers and scheduled back to back on a small jitter cushion.
 const AUDIO_RATE = 44100;
-let audioCtx = null, audioAt = 0, audioOn = false;
+const RING_FRAMES = AUDIO_RATE;               // 1 s ring
+const AUDIO_PREFILL = Math.floor(AUDIO_RATE * 0.12);
+let audioCtx = null, audioNode = null, audioOn = false;
+let ringL = null, ringR = null, wPos = 0, rPos = 0, primed = false;
+// One continuous ScriptProcessor drains a ring buffer.  Scheduling a fresh
+// AudioBuffer per chunk left clicks between them that a pure tone (the
+// power-on beep) exposed; a single stream removes the seams.
+function audioStart() {
+  if (audioCtx) return;
+  audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+  ringL = new Float32Array(RING_FRAMES);
+  ringR = new Float32Array(RING_FRAMES);
+  wPos = 0; rPos = 0; primed = false;
+  audioNode = audioCtx.createScriptProcessor(1024, 0, 2);
+  audioNode.onaudioprocess = (e) => {
+    const oL = e.outputBuffer.getChannelData(0);
+    const oR = e.outputBuffer.getChannelData(1);
+    const avail = (wPos - rPos + RING_FRAMES) % RING_FRAMES;
+    if (!primed) {
+      if (avail < AUDIO_PREFILL) { oL.fill(0); oR.fill(0); return; }
+      primed = true;
+    }
+    for (let i = 0; i < oL.length; i++) {
+      if (rPos === wPos) { oL[i] = 0; oR[i] = 0; primed = false; }
+      else {
+        oL[i] = ringL[rPos]; oR[i] = ringR[rPos];
+        rPos = (rPos + 1) % RING_FRAMES;
+      }
+    }
+  };
+  audioNode.connect(audioCtx.destination);
+}
 function audioChunk(bytes) {
-  if (!audioCtx) return;
+  if (!audioCtx || !ringL) return;
   const frames = bytes.byteLength >> 2;         // 2 channels x 16 bits
   if (!frames) return;
-  const view = new DataView(bytes.buffer, bytes.byteOffset,
-                            bytes.byteLength);
-  const buf = audioCtx.createBuffer(2, frames, AUDIO_RATE);
-  const left = buf.getChannelData(0), right = buf.getChannelData(1);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   for (let i = 0; i < frames; i++) {
-    left[i] = view.getInt16(i * 4, true) / 32768;
-    right[i] = view.getInt16(i * 4 + 2, true) / 32768;
+    ringL[wPos] = view.getInt16(i * 4, true) / 32768;
+    ringR[wPos] = view.getInt16(i * 4 + 2, true) / 32768;
+    wPos = (wPos + 1) % RING_FRAMES;
+    if (wPos === rPos) rPos = (rPos + 1) % RING_FRAMES;   // full: drop oldest
   }
-  const src = audioCtx.createBufferSource();
-  src.buffer = buf;
-  src.connect(audioCtx.destination);
-  const now = audioCtx.currentTime;
-  if (audioAt < now + 0.15) audioAt = now + 0.15;   // fell behind: rebase
-  src.start(audioAt);
-  audioAt += buf.duration;
 }
 function enableAudioNow() {
   if (!rfb || !rfb.enableAudio) return;
-  if (!audioCtx) audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+  audioStart();
   audioCtx.resume();
   rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
   audioOn = true;
@@ -684,8 +707,7 @@ window.toggleAudio = () => {
   audioOn = !audioOn;
   const btn = document.getElementById('btn-audio');
   if (audioOn) {
-    if (!audioCtx)
-      audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+    audioStart();
     audioCtx.resume();
     rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
     if (btn) { btn.textContent = '🔊 Sound on'; }
@@ -698,8 +720,9 @@ window.toggleAudio = () => {
 };
 function stopAudio() {
   audioOn = false;
+  if (audioNode) { try { audioNode.disconnect(); } catch (e) {} audioNode = null; }
   if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
-  audioAt = 0;
+  ringL = ringR = null; wPos = 0; rPos = 0; primed = false;
 }
 
 window.connectConsole = async (name, ws) => {
