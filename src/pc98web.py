@@ -2165,7 +2165,9 @@ def qemu_argv(inst):
     display = vnc - 5900
     accel = "kvm:tcg" if inst.get("accel", "tcg") == "kvm" else "tcg"
     argv = [CONFIG["qemu"],
-            "-M", "%s,accel=%s" % (inst.get("machine") or "pc9821", accel),
+            "-M", "%s,accel=%s%s" % (
+                inst.get("machine") or "pc9821", accel,
+                ",pcspk-audiodev=snd" if any(SOUNDS[sound_of(inst)]) else ""),
             "-m", inst.get("memory") or "64M"]
     # QEMU searches -L paths in order, so putting the uploaded ROMs first
     # lets a partial real set fall through to the compatible ones
