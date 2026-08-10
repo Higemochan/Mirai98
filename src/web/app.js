@@ -670,6 +670,15 @@ function audioChunk(bytes) {
   src.start(audioAt);
   audioAt += buf.duration;
 }
+function enableAudioNow() {
+  if (!rfb || !rfb.enableAudio) return;
+  if (!audioCtx) audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+  audioCtx.resume();
+  rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
+  audioOn = true;
+  const btn = document.getElementById('btn-audio');
+  if (btn) { btn.textContent = '\u{1F50A} Sound on'; }
+}
 window.toggleAudio = () => {
   if (!rfb || !rfb.enableAudio) { toast('no console'); return; }
   audioOn = !audioOn;
@@ -712,7 +721,7 @@ window.connectConsole = async (name, ws) => {
   consoleWatch = new ResizeObserver(() =>
     window.dispatchEvent(new Event('resize')));
   consoleWatch.observe(target);
-  rfb.addEventListener('connect', () => toast(name + ': console connected'));
+  rfb.addEventListener('connect', () => { toast(name + ': console connected'); enableAudioNow(); });
   rfb.addEventListener('disconnect',
                        () => toast(name + ': console disconnected'));
   rfb.addEventListener('audiodata', e => audioChunk(e.detail.data));
