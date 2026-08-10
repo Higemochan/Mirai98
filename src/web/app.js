@@ -666,7 +666,7 @@ function audioChunk(bytes) {
   src.buffer = buf;
   src.connect(audioCtx.destination);
   const now = audioCtx.currentTime;
-  if (audioAt < now + 0.05) audioAt = now + 0.05;   // fell behind: rebase
+  if (audioAt < now + 0.15) audioAt = now + 0.15;   // fell behind: rebase
   src.start(audioAt);
   audioAt += buf.duration;
 }
