@@ -69,6 +69,10 @@ function captureRelativePointer(rfb, target) {
   }
   const CENTER = 0x7FFF;
   rfb._sendMouse = function () {};        // silence noVNC's absolute sends
+  // FM TOWNS draws its own (software) cursor, so noVNC sees no server cursor
+  // and hides the local one (canvas cursor:none) -- which left the pointer
+  // invisible after Esc.  Ask noVNC to always show a dot cursor instead.
+  rfb.showDotCursor = true;
   let locked = false, mask = 0, accX = 0, accY = 0, flush = false;
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
