@@ -1,16 +1,57 @@
 // FM TOWNS front-end plugin for the Mirai98 web manager.
 //
-// Registers the "towns" machine so the create form offers it with Towns
-// defaults (16 MiB, real ROM set, built-in sound, disc in the CD-ROM slot),
-// tags TOWNS machines in the list, and captures the mouse on a TOWNS console
-// so the relative Towns pointer does not escape the canvas.  The PC-98 side
-// is untouched: the console hook only engages for machine === "towns".
+// Registers the "towns" machine: Towns create defaults, a list badge, a
+// Towns-specific hardware form (only what the emulation actually wires),
+// and relative-pointer capture on a TOWNS console.  The PC-98 side is
+// untouched: the console hook only engages for machine === "towns".
 
-// Capture the pointer for a relative-mouse guest.  QEMU's VNC turns each
-// absolute pointer event into a delta from the last one, which stalls at the
-// canvas edge; instead we ask for QEMU's relative branch (pseudo-encoding
-// -257) and, while the pointer is locked, feed each host movement as a delta
-// around 0x7FFF.  Returns a cleanup function.
+// ---- Towns hardware form --------------------------------------------------
+// The stock form is PC-98 shaped (IDE HDD, PC-98 SCSI, board sound, compat
+// BIOS).  For FM TOWNS the machine wires only the built-in CD drive, the
+// built-in sound and the real ROM set, so we show just those.  SCSI HDD and
+// CD-DA playback are not emulated yet, so they are deliberately absent.
+function townsEditForm(i, h) {
+  const note = (t) => ' <span class="note">' + t + '</span>';
+  const memOpts = h.MEMS.map(m =>
+    '<option' + (i.memory === m ? ' selected' : '') + '>' + m + '</option>'
+  ).join('');
+  const machineOpts = h.machineList().map(m =>
+    '<option' + ((i.machine || 'towns') === m ? ' selected' : '') + '>' + m +
+    '</option>').join('');
+  return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
+    '<div class="row"><label>CD-ROM</label>' +
+      h.diskSelect('cd', 'cdrom', i.cd) +
+      note('built-in FM TOWNS CD drive; use a .cue/.bin set (or a .img with ' +
+           'a sibling .cue) so the CD-DA audio tracks are kept') + '</div>' +
+    '<div class="row"><label>Machine type</label>' +
+      '<select name="machine">' + machineOpts + '</select></div>' +
+    '<div class="row"><label>Memory</label>' +
+      '<select name="memory">' + memOpts + '</select></div>' +
+    '<div class="row"><label>BIOS</label>' + note('FM TOWNS real ROM set ' +
+      '(no compatible BIOS)') +
+      '<input type="hidden" name="bios" value="real"></div>' +
+    '<div class="row"><label>Sound</label>' + note('built-in FM TOWNS sound ' +
+      '(YM2612 + RF5C68), always on') +
+      '<input type="hidden" name="sound" value="none"></div>' +
+    // unchecked, hidden: the Towns machine runs under TCG (icount needs it)
+    '<input type="checkbox" name="kvm" hidden>' +
+    '<div class="row"><label>Snapshot</label>' +
+      '<label class="check"><input type="checkbox" name="snapshot"' +
+      (i.snapshot ? ' checked' : '') + '> discard changes</label></div>' +
+    '<div class="row"><label>Extra args</label>' +
+      '<input type="text" name="extra" value="' + h.esc(i.extra || '') +
+      '"></div>' +
+    '<div class="row"><label></label><button class="primary"' +
+      (i.running ? ' disabled title="stop it first"' : '') + '>Save</button>' +
+      '<button type="button" onclick="removeVm(\'' + i.name + '\')"' +
+      (i.running ? ' disabled' : '') + '>Delete</button></div></form>';
+}
+
+// ---- relative-pointer capture (only for a Towns console) ------------------
+// QEMU's VNC turns each absolute pointer event into a delta from the last
+// one, which stalls at the canvas edge; instead we ask for QEMU's relative
+// branch (pseudo-encoding -257) and, while the pointer is locked, feed each
+// host movement as a delta around 0x7FFF.  Returns a cleanup function.
 function captureRelativePointer(rfb, target) {
   const RFB = rfb.constructor;
   if (!RFB.messages._townsRelPatched) {
@@ -71,8 +112,7 @@ function captureRelativePointer(rfb, target) {
     if (!locked) {
       mask = 0;
       // Pointer Lock hid the cursor and noVNC leaves the canvas at
-      // `cursor:none`; bring a visible host cursor back after Esc so the
-      // pointer is not lost over the console.
+      // cursor:none; bring a visible host cursor back after Esc.
       const c = canvas();
       if (c) c.style.cursor = 'default';
     }
@@ -98,6 +138,7 @@ window.registerMachinePlugin({
              lockSound: true, lockBios: true }
   },
   badge: { towns: 'TOWNS' },
+  editForm: { towns: townsEditForm },
   // only a TOWNS console gets the pointer capture; PC-98 stays as it was
   console: (rfb, target, name) => {
     let cleanup = null, cancelled = false;

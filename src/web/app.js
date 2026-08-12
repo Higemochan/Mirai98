@@ -11,12 +11,13 @@ const loadRFB = async () => RFB ||
 // the create form, per-machine create defaults, a list badge, and an optional
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
-  { machines: [], defaults: {}, badge: {}, console: [] };
+  { machines: [], defaults: {}, badge: {}, console: [], editForm: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   (p.machines || []).forEach(m => { if (!P.machines.includes(m)) P.machines.push(m); });
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
+  Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
   if (p.console) P.console.push(p.console);
   lastList = '';   // a new machine/badge must invalidate the cached VM list
 };
@@ -630,6 +631,12 @@ function hardwareTable(i) {
 }
 
 function editForm(i) {
+  // a machine plugin may supply its own hardware form (given the helpers it
+  // needs); otherwise the stock PC-98 form below is used
+  const custom = window.MiraiPlugins.editForm[i.machine];
+  if (custom) {
+    return custom(i, { esc, diskSelect, machineList, MEMS });
+  }
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     DISK_ROWS.map(([k, label, kind]) =>
       '<div class="row"><label>' + label + '</label>' +
