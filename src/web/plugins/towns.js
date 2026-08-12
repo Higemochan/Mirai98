@@ -68,7 +68,14 @@ function captureRelativePointer(rfb, target) {
   const onLock = () => {
     locked = document.pointerLockElement === canvas();
     hint.style.display = locked ? 'none' : '';
-    if (!locked) mask = 0;
+    if (!locked) {
+      mask = 0;
+      // Pointer Lock hid the cursor and noVNC leaves the canvas at
+      // `cursor:none`; bring a visible host cursor back after Esc so the
+      // pointer is not lost over the console.
+      const c = canvas();
+      if (c) c.style.cursor = 'default';
+    }
   };
   document.addEventListener('mousedown', onDown, true);
   document.addEventListener('mouseup', onUp, true);
