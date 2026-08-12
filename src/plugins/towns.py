@@ -24,13 +24,16 @@ def towns_argv(api, inst):
     accel = "kvm:tcg" if inst.get("accel", "tcg") == "kvm" else "tcg"
     towns_roms = cfg.get("towns_roms") or os.path.join(cfg["roms"], "towns")
     host = "127.0.0.1" if api.LOOPBACK else "0.0.0.0"
-    vncarg = "%s:%d,websocket=%d" % (host, display, ws)
+    # the VNC server captures the guest's audio mix (CD-DA, FM, PCM) off the
+    # 'snd' audiodev and streams it to the browser over the same WebSocket
+    vncarg = "%s:%d,websocket=%d,audiodev=snd" % (host, display, ws)
     argv = [cfg["qemu"],
             "-M", "towns,accel=%s" % accel,
             "-m", inst.get("memory") or "16M",
             "-L", api.win_short(towns_roms),
             "-L", api.win_short(cfg["datadir"]),
             "-display", "none",
+            "-audiodev", "none,id=snd",
             "-vnc", vncarg,
             "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port,
             # the free-running timer paces the boot off wall-clock; icount
