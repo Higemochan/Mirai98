@@ -4,6 +4,53 @@ let RFB = null;
 const loadRFB = async () => RFB ||
   (RFB = (await import('/novnc/core/rfb.js')).default);
 
+// --- machine plugins -------------------------------------------------------
+// Extra machine types (FM TOWNS, ...) register here; the core reads the
+// registry at render time, so a plugin loaded after the first paint still
+// shows up on the next screen the app draws.  A plugin adds machine ids for
+// the create form, per-machine create defaults, a list badge, and an optional
+// console hook (returning a cleanup function).
+window.MiraiPlugins = window.MiraiPlugins ||
+  { machines: [], defaults: {}, badge: {}, console: [] };
+window.registerMachinePlugin = (p) => {
+  const P = window.MiraiPlugins;
+  (p.machines || []).forEach(m => { if (!P.machines.includes(m)) P.machines.push(m); });
+  Object.assign(P.defaults, p.defaults || {});
+  Object.assign(P.badge, p.badge || {});
+  if (p.console) P.console.push(p.console);
+};
+// the machine ids offered in the create form: core PC-98 plus any plugin
+const machineList = () => ['pc9821', 'pc9801'].concat(window.MiraiPlugins.machines);
+// a machine's cell in the list, with a plugin badge if it registered one
+const machineCell = (m) => {
+  m = m || 'pc9821';
+  const b = window.MiraiPlugins.badge[m];
+  return esc(m) + (b ? ' <span style="display:inline-block;padding:0 .4em;' +
+    'border-radius:.3em;background:#7a3cff;color:#fff;font-size:.8em;' +
+    'vertical-align:middle">' + esc(b) + '</span>' : '');
+};
+// apply a plugin machine's create defaults when the type changes (a core
+// PC-98 machine just re-enables the board and BIOS choices)
+window.applyMachineDefaults = (sel) => {
+  const form = sel.form;
+  const d = window.MiraiPlugins.defaults[sel.value];
+  if (form.sound) form.sound.disabled = !!(d && d.lockSound);
+  if (form.bios) form.bios.disabled = !!(d && d.lockBios);
+  if (!d) return;
+  if (d.memory && form.memory) form.memory.value = d.memory;
+  if (d.sound && form.sound) form.sound.value = d.sound;
+  if (d.bios && form.bios) form.bios.value = d.bios;
+};
+// pull in the front-end plugins the server advertises, then redraw
+(async () => {
+  let list = [];
+  try { list = await (await fetch('/api/plugins')).json(); } catch (e) { return; }
+  for (const f of list) {
+    try { await import('/plugins/' + f); } catch (e) { console.error('plugin', f, e); }
+  }
+  if (list.length) { try { render(); } catch (e) {} }
+})();
+
 const MEMS = ["640K","2M","4M","8M","16M","32M","64M","128M","256M","512M",
               "1G","2G","4G","8G","16G","32G"];
 // the boards are named after the chips, so they keep their capitals
@@ -443,7 +490,7 @@ function listRow(i) {
     '<td><a href="#/vm/' + i.name + '">' + esc(i.name) + '</a></td>' +
     '<td><span class="state' + (i.running ? ' on' : '') + '">' +
     (i.running ? 'running' : 'stopped') + '</span></td>' +
-    '<td class="note">' + esc(i.machine || 'pc9821') + '</td>' +
+    '<td class="note">' + machineCell(i.machine) + '</td>' +
     '<td>' + esc(i.memory) + (i.snapshot ? ' <span class="note">snap</span>'
                                          : '') + '</td>' +
     '<td class="note" style="max-width:24em;overflow-wrap:anywhere">' +
@@ -583,8 +630,9 @@ function editForm(i) {
     DISK_ROWS.map(([k, label, kind]) =>
       '<div class="row"><label>' + label + '</label>' +
       diskSelect(k, kind, i[k]) + '</div>').join('') +
-    '<div class="row"><label>Machine type</label><select name="machine">' +
-    ['pc9821','pc9801'].map(m => '<option' +
+    '<div class="row"><label>Machine type</label>' +
+    '<select name="machine" onchange="applyMachineDefaults(this)">' +
+    machineList().map(m => '<option' +
       ((i.machine || 'pc9821') === m ? ' selected' : '') + '>' + m +
       '</option>').join('') + '</select></div>' +
     '<div class="row"><label>Shared folder</label>' +
@@ -741,6 +789,14 @@ window.connectConsole = async (name, ws) => {
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
+  // let plugins augment the console (e.g. relative-pointer capture)
+  window._pluginConsoleCleanups = [];
+  (window.MiraiPlugins.console || []).forEach(fn => {
+    try {
+      const c = fn(rfb, target, name);
+      if (c) window._pluginConsoleCleanups.push(c);
+    } catch (e) { console.error('console plugin', e); }
+  });
   consoleWatch = new ResizeObserver(() =>
     window.dispatchEvent(new Event('resize')));
   consoleWatch.observe(target);
@@ -753,6 +809,8 @@ window.connectConsole = async (name, ws) => {
     document.getElementById(id).style.display = '';
 };
 window.disconnectConsole = () => {
+  (window._pluginConsoleCleanups || []).forEach(c => { try { c(); } catch (e) {} });
+  window._pluginConsoleCleanups = [];
   if (consoleWatch) { consoleWatch.disconnect(); consoleWatch = null; }
   if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
   stopAudio();

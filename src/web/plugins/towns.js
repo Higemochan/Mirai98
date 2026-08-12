@@ -1,0 +1,107 @@
+// FM TOWNS front-end plugin for the Mirai98 web manager.
+//
+// Registers the "towns" machine so the create form offers it with Towns
+// defaults (16 MiB, real ROM set, built-in sound, disc in the CD-ROM slot),
+// tags TOWNS machines in the list, and captures the mouse on a TOWNS console
+// so the relative Towns pointer does not escape the canvas.  The PC-98 side
+// is untouched: the console hook only engages for machine === "towns".
+
+// Capture the pointer for a relative-mouse guest.  QEMU's VNC turns each
+// absolute pointer event into a delta from the last one, which stalls at the
+// canvas edge; instead we ask for QEMU's relative branch (pseudo-encoding
+// -257) and, while the pointer is locked, feed each host movement as a delta
+// around 0x7FFF.  Returns a cleanup function.
+function captureRelativePointer(rfb, target) {
+  const RFB = rfb.constructor;
+  if (!RFB.messages._townsRelPatched) {
+    const orig = RFB.messages.clientEncodings;
+    RFB.messages.clientEncodings = function (sock, encodings) {
+      if (!encodings.includes(-257)) encodings = encodings.concat([-257]);
+      return orig.call(this, sock, encodings);
+    };
+    const origHandleRect = RFB.prototype._handleRect;
+    RFB.prototype._handleRect = function () {
+      if (this._FBU.encoding === -257) return true;   // pointer-type-change: no data
+      return origHandleRect.call(this);
+    };
+    RFB.messages._townsRelPatched = true;
+  }
+  const CENTER = 0x7FFF;
+  rfb._sendMouse = function () {};        // silence noVNC's absolute sends
+  let locked = false, mask = 0, accX = 0, accY = 0, flush = false;
+  const canvas = () => target.querySelector('canvas');
+  const send = (dx, dy, m) => {
+    if (!rfb || rfb._rfbConnectionState !== 'connected') return;
+    RFB.messages.pointerEvent(rfb._sock,
+      (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
+  };
+  const onDown = (ev) => {
+    if (!locked) {
+      if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
+      return;
+    }
+    mask |= (1 << ev.button); send(0, 0, mask); ev.preventDefault(); ev.stopPropagation();
+  };
+  const onUp = (ev) => {
+    if (!locked) return;
+    mask &= ~(1 << ev.button); send(0, 0, mask); ev.preventDefault(); ev.stopPropagation();
+  };
+  const onMove = (ev) => {
+    if (!locked) return;
+    accX += ev.movementX; accY += ev.movementY; ev.preventDefault(); ev.stopPropagation();
+    if (!flush) {
+      flush = true;
+      requestAnimationFrame(() => {
+        flush = false;
+        if (accX || accY) { send(accX, accY, mask); accX = 0; accY = 0; }
+      });
+    }
+  };
+  const hint = document.createElement('div');
+  hint.textContent = 'クリックでマウス操作を開始（Escで解除）';
+  hint.style.cssText = 'position:absolute;left:50%;bottom:8px;' +
+    'transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;' +
+    'font:12px sans-serif;padding:4px 10px;border-radius:4px;' +
+    'pointer-events:none;z-index:5';
+  if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+  target.appendChild(hint);
+  const onLock = () => {
+    locked = document.pointerLockElement === canvas();
+    hint.style.display = locked ? 'none' : '';
+    if (!locked) mask = 0;
+  };
+  document.addEventListener('mousedown', onDown, true);
+  document.addEventListener('mouseup', onUp, true);
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('pointerlockchange', onLock);
+  return () => {
+    document.removeEventListener('mousedown', onDown, true);
+    document.removeEventListener('mouseup', onUp, true);
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('pointerlockchange', onLock);
+    if (document.pointerLockElement) document.exitPointerLock();
+    hint.remove();
+  };
+}
+
+window.registerMachinePlugin({
+  machines: ['towns'],
+  defaults: {
+    towns: { memory: '16M', sound: 'none', bios: 'real',
+             lockSound: true, lockBios: true }
+  },
+  badge: { towns: 'TOWNS' },
+  // only a TOWNS console gets the pointer capture; PC-98 stays as it was
+  console: (rfb, target, name) => {
+    let cleanup = null, cancelled = false;
+    fetch('/api/instances/' + encodeURIComponent(name))
+      .then(r => r.json())
+      .then(inst => {
+        if (!cancelled && inst && inst.machine === 'towns') {
+          cleanup = captureRelativePointer(rfb, target);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; if (cleanup) cleanup(); };
+  }
+});

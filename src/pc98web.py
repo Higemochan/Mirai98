@@ -156,6 +156,68 @@ DISK_DIR = {"hdd1": "hdd", "hdd2": "hdd", "fdd1": "fdd", "fdd2": "fdd",
             "cd": "cdrom"}
 NETWORKS = ("", "nat", "bridge")
 MACHINES = ("pc9821", "pc9801")
+
+# --- machine plugins -------------------------------------------------------
+# Extra machine types (e.g. FM TOWNS) live as self-contained plugins under
+# plugins/*.py, so the core stays a pure PC-98 manager.  A plugin's
+# register(api) may add a machine name and a builder returning its QEMU argv;
+# everything else (create/start/console/snapshot) is the unchanged PC-98 flow.
+MACHINE_ARGV = {}
+
+
+class PluginAPI:
+    """The surface a machine plugin is given; names resolve lazily."""
+    os = os
+
+    @property
+    def CONFIG(self):
+        return CONFIG
+
+    @property
+    def LOOPBACK(self):
+        return LOOPBACK
+
+    def ports_of(self, inst):
+        return ports_of(inst)
+
+    def win_short(self, path):
+        return win_short(path)
+
+    def disk_path(self, inst, kind):
+        return disk_path(inst, kind)
+
+    def add_machine(self, name):
+        global MACHINES
+        if name not in MACHINES:
+            MACHINES = MACHINES + (name,)
+
+    def machine_argv(self, name, builder):
+        MACHINE_ARGV[name] = builder
+
+
+def load_plugins():
+    import glob
+    import importlib.util
+    pdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+    if not os.path.isdir(pdir):
+        return
+    api = PluginAPI()
+    for path in sorted(glob.glob(os.path.join(pdir, "*.py"))):
+        name = os.path.basename(path)
+        if name.startswith("_"):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "mirai_plugin_" + name[:-3], path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if hasattr(mod, "register"):
+                mod.register(api)
+                say("machine plugin loaded: %s" % name, "web")
+        except Exception as exc:
+            say("machine plugin failed (%s): %s" % (name, exc), "web")
+
+
 # the ROM set a real machine has; anything not uploaded falls back to the
 # compatible ROMs that ship with the appliance
 ROM_FILES = ("pc98bios.bin", "pc98itf.bin", "pc98ide.bin", "pc98scsi.bin",
@@ -2161,6 +2223,10 @@ def missing_roms():
 
 
 def qemu_argv(inst):
+    # a plugin-provided machine builds its own command line
+    builder = MACHINE_ARGV.get(inst.get("machine") or "pc9821")
+    if builder:
+        return builder(inst)
     vnc, ws, qmp_port = ports_of(inst)
     display = vnc - 5900
     accel = "kvm:tcg" if inst.get("accel", "tcg") == "kvm" else "tcg"
@@ -2621,6 +2687,16 @@ class Handler(BaseHTTPRequestHandler):
             self.page("index.html")
         elif path in ("/app.js", "/style.css"):
             self.page(path[1:])
+        elif (path.startswith("/plugins/") and path.endswith(".js")
+              and ".." not in path):
+            # front-end plugin scripts, served from web/plugins/
+            self.page(path[1:])
+        elif path == "/api/plugins":
+            pdir = os.path.join(CONFIG["web"], "plugins")
+            names = sorted(f for f in os.listdir(pdir)
+                           if f.endswith(".js")) \
+                if os.path.isdir(pdir) else []
+            self.reply(200, names)
         elif path == "/api/instances":
             with _lock:
                 instances = load_instances()
@@ -3848,6 +3924,8 @@ def main(argv):
         APP_TOKEN = secrets.token_urlsafe(32)
     if parent:
         watch_parent(parent)
+    # machine plugins register after the config is settled, before serving
+    load_plugins()
     # --port=0 means "any free one", which only a program would ask for
     started_by_program = bool(APP_TOKEN) or port == 0
     if not os.path.isfile(os.path.join(CONFIG["web"], "index.html")):
