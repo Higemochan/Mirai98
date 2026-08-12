@@ -18,6 +18,7 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   if (p.console) P.console.push(p.console);
+  lastList = '';   // a new machine/badge must invalidate the cached VM list
 };
 // the machine ids offered in the create form: core PC-98 plus any plugin
 const machineList = () => ['pc9821', 'pc9801'].concat(window.MiraiPlugins.machines);
@@ -48,7 +49,10 @@ window.applyMachineDefaults = (sel) => {
   for (const f of list) {
     try { await import('/plugins/' + f); } catch (e) { console.error('plugin', f, e); }
   }
-  if (list.length) { try { render(); } catch (e) {} }
+  // repaint once plugins are registered; lastList is cleared so the cached
+  // (badge-less) list is invalidated, and the async render's rejection is
+  // handled rather than escaping the old synchronous try/catch
+  if (list.length) { lastList = ''; render().catch(() => {}); }
 })();
 
 const MEMS = ["640K","2M","4M","8M","16M","32M","64M","128M","256M","512M",
@@ -1558,6 +1562,18 @@ window.openCreate = () => {
   document.getElementById('mem-text').value = '64M';
   document.getElementById('wizard').reset();
   document.getElementById('mem-text').value = '64M';
+  // let plugins add their machine types to the (static) create form select
+  const msel = document.querySelector('#wizard select[name="machine"]');
+  if (msel) {
+    window.MiraiPlugins.machines.forEach(m => {
+      if (![...msel.options].some(o => o.value === m)) {
+        const o = document.createElement('option');
+        o.value = m; o.textContent = m;
+        msel.appendChild(o);
+      }
+    });
+    msel.onchange = () => window.applyMachineDefaults(msel);
+  }
   tab = 0;
   drawTabs();
   document.getElementById('veil').classList.add('open');
