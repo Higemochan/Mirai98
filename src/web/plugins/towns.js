@@ -52,21 +52,48 @@ function townsEditForm(i, h) {
 // one, which stalls at the canvas edge; instead we ask for QEMU's relative
 // branch (pseudo-encoding -257) and, while the pointer is locked, feed each
 // host movement as a delta around 0x7FFF.  Returns a cleanup function.
+// Whether the NEXT console connection belongs to a TOWNS machine, decided
+// in the consolePrep hook BEFORE the RFB object exists: the -257 request
+// must ride in the initial client-encodings message of the handshake, and
+// only for TOWNS consoles (a PC-98 console keeps its stock pointer path).
+const townsConsoles = new Set();
+let relativeNext = false;
+
+async function ensureRelPatch() {
+  const RFB = (await import('/novnc/core/rfb.js')).default;
+  if (RFB.messages._townsRelPatched) return;
+  const orig = RFB.messages.clientEncodings;
+  RFB.messages.clientEncodings = function (sock, encodings) {
+    if (relativeNext && !encodings.includes(-257)) {
+      encodings = encodings.concat([-257]);
+    }
+    return orig.call(this, sock, encodings);
+  };
+  const origHandleRect = RFB.prototype._handleRect;
+  RFB.prototype._handleRect = function () {
+    if (this._FBU.encoding === -257) return true;   // pointer-type-change: no data
+    return origHandleRect.call(this);
+  };
+  RFB.messages._townsRelPatched = true;
+}
+
+async function prepTownsConsole(name) {
+  relativeNext = false;
+  try {
+    const r = await fetch('/api/instances/' + encodeURIComponent(name));
+    const inst = await r.json();
+    if (inst && inst.machine === 'towns') {
+      townsConsoles.add(name);
+      relativeNext = true;
+    } else {
+      townsConsoles.delete(name);
+    }
+  } catch (e) { townsConsoles.delete(name); }
+  await ensureRelPatch();
+}
+
 function captureRelativePointer(rfb, target) {
   const RFB = rfb.constructor;
-  if (!RFB.messages._townsRelPatched) {
-    const orig = RFB.messages.clientEncodings;
-    RFB.messages.clientEncodings = function (sock, encodings) {
-      if (!encodings.includes(-257)) encodings = encodings.concat([-257]);
-      return orig.call(this, sock, encodings);
-    };
-    const origHandleRect = RFB.prototype._handleRect;
-    RFB.prototype._handleRect = function () {
-      if (this._FBU.encoding === -257) return true;   // pointer-type-change: no data
-      return origHandleRect.call(this);
-    };
-    RFB.messages._townsRelPatched = true;
-  }
   const CENTER = 0x7FFF;
   rfb._sendMouse = function () {};        // silence noVNC's absolute sends
   // FM TOWNS draws its own (software) cursor, so noVNC sees no server cursor
@@ -143,17 +170,11 @@ window.registerMachinePlugin({
   },
   badge: { towns: 'TOWNS' },
   editForm: { towns: townsEditForm },
-  // only a TOWNS console gets the pointer capture; PC-98 stays as it was
-  console: (rfb, target, name) => {
-    let cleanup = null, cancelled = false;
-    fetch('/api/instances/' + encodeURIComponent(name))
-      .then(r => r.json())
-      .then(inst => {
-        if (!cancelled && inst && inst.machine === 'towns') {
-          cleanup = captureRelativePointer(rfb, target);
-        }
-      })
-      .catch(() => {});
-    return () => { cancelled = true; if (cleanup) cleanup(); };
-  }
+  // decided synchronously from the consolePrep result: by the time the
+  // console hook runs the machine kind is already known, so the capture
+  // is in place before the first pointer event (the old fetch-here-async
+  // gating raced the VNC handshake and lost the -257 negotiation)
+  consolePrep: prepTownsConsole,
+  console: (rfb, target, name) =>
+    townsConsoles.has(name) ? captureRelativePointer(rfb, target) : null
 });

@@ -14,11 +14,13 @@ window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
+  P.consolePrep = P.consolePrep || [];
   (p.machines || []).forEach(m => { if (!P.machines.includes(m)) P.machines.push(m); });
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
   if (p.console) P.console.push(p.console);
+  if (p.consolePrep) P.consolePrep.push(p.consolePrep);
   lastList = '';   // a new machine/badge must invalidate the cached VM list
 };
 // the machine ids offered in the create form: core PC-98 plus any plugin
@@ -796,6 +798,12 @@ window.connectConsole = async (name, ws) => {
                          'program.';
     toast('no noVNC to draw the console with');
     return;
+  }
+  // plugins prepare the connection first (e.g. the relative-pointer
+  // negotiation must be in place before the VNC handshake advertises the
+  // client encodings, so this happens before the RFB object exists)
+  for (const fn of (window.MiraiPlugins.consolePrep || [])) {
+    try { await fn(name); } catch (e) { console.error('console prep', e); }
   }
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
