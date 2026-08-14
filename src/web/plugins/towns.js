@@ -8,8 +8,8 @@
 // ---- Towns hardware form --------------------------------------------------
 // The stock form is PC-98 shaped (IDE HDD, PC-98 SCSI, board sound, compat
 // BIOS).  For FM TOWNS the machine wires only the built-in CD drive, the
-// built-in sound and the real ROM set, so we show just those.  SCSI HDD and
-// CD-DA playback are not emulated yet, so they are deliberately absent.
+// built-in sound (FM, PCM and CD-DA playback) and the real ROM set, so we
+// show just those.  SCSI HDD is not emulated yet, so it is absent.
 function townsEditForm(i, h) {
   const note = (t) => ' <span class="note">' + t + '</span>';
   const memOpts = h.MEMS.map(m =>

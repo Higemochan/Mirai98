@@ -28,17 +28,16 @@ def towns_argv(api, inst):
     # 'snd' audiodev and streams it to the browser over the same WebSocket
     vncarg = "%s:%d,websocket=%d,audiodev=snd" % (host, display, ws)
     argv = [cfg["qemu"],
-            "-M", "towns,accel=%s" % accel,
+            # audiodev reaches the machine so the on-board YM2612/RF5C68 and
+            # the CD-DA voice all open on the backend the VNC server streams
+            "-M", "towns,accel=%s,audiodev=snd" % accel,
             "-m", inst.get("memory") or "16M",
             "-L", api.win_short(towns_roms),
             "-L", api.win_short(cfg["datadir"]),
             "-display", "none",
             "-audiodev", "none,id=snd",
             "-vnc", vncarg,
-            "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port,
-            # the free-running timer paces the boot off wall-clock; icount
-            # fast-forwards that idle so the OS reaches its desktop in seconds
-            "-icount", "shift=8,sleep=off"]
+            "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
     if inst.get("snapshot"):
         argv.append("-snapshot")
     if inst.get("cd"):
