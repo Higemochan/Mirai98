@@ -27,11 +27,9 @@ function townsEditForm(i, h) {
       '<select name="machine">' + machineOpts + '</select></div>' +
     '<div class="row"><label>Memory</label>' +
       '<select name="memory">' + memOpts + '</select></div>' +
-    '<div class="row"><label>BIOS</label>' + note('FM TOWNS real ROM set ' +
-      '(no compatible BIOS)') +
+    '<div class="row"><label>BIOS</label>' + note(TOWNS_BIOS) +
       '<input type="hidden" name="bios" value="real"></div>' +
-    '<div class="row"><label>Sound</label>' + note('built-in FM TOWNS sound ' +
-      '(YM2612 + RF5C68), always on') +
+    '<div class="row"><label>Sound</label>' + note(TOWNS_SOUND) +
       '<input type="hidden" name="sound" value="none"></div>' +
     // unchecked, hidden: the Towns machine runs under TCG (icount needs it)
     '<input type="checkbox" name="kvm" hidden>' +
@@ -52,21 +50,28 @@ function townsEditForm(i, h) {
 // PC-98 (compat/real BIOS, a sound board, an IDE CD-ROM); the Towns machine
 // ignores the bios/sound fields altogether -- it always boots the real ROM
 // set with the on-board sound -- so say what really runs.
+const TOWNS_BIOS = 'FM TOWNS real ROM set';
+const TOWNS_SOUND = 'built-in YM2612 FM + RF5C68 PCM, CD-DA';
+if (typeof JA === 'object') {          // the core's phrase table, if present
+  JA[TOWNS_BIOS] = 'FM TOWNS 実機ROMセット';
+  JA[TOWNS_SOUND] = '内蔵 YM2612 FM + RF5C68 PCM、CD-DA';
+}
+// (i may be a create-wizard draft without ports; the table then omits Display)
 function townsHardware(i, h) {
   const rows = [
-    ['&#9636; Memory', h.esc(i.memory)],
+    ['&#9636; Memory', h.esc(i.memory || '')],
     ['&#9881; Machine', h.esc(i.machine || 'towns') + ' (TCG)'],
-    ['&#9750; BIOS', 'FM TOWNS real ROM set'],
-    ['&#9834; Sound', 'built-in YM2612 FM + RF5C68 PCM, CD-DA'],
-    ['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
-     ', websocket ' + i.ports[1]]];
+    ['&#9750; BIOS', TOWNS_BIOS],
+    ['&#9834; Sound', TOWNS_SOUND]];
+  if (i.ports) rows.push(['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
+     ', websocket ' + i.ports[1]]);
   if (i.cd) rows.push(['&#9707; CD-ROM', h.esc(i.cd) +
     ' <span class="note">(built-in FM TOWNS drive, read-only; a .cue ' +
     'beside the image carries the audio tracks)</span>']);
   if (i.snapshot)
     rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
   if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
-  return { rows, bios: 'FM TOWNS real ROM set' };
+  return { rows, bios: TOWNS_BIOS, sound: TOWNS_SOUND };
 }
 
 // ---- relative-pointer capture (only for a Towns console) ------------------

@@ -43,6 +43,27 @@ window.applyMachineDefaults = (sel) => {
   const d = window.MiraiPlugins.defaults[sel.value];
   if (form.sound) form.sound.disabled = !!(d && d.lockSound);
   if (form.bios) form.bios.disabled = !!(d && d.lockBios);
+  // a locked choice says what the machine really has instead (the plugin's
+  // hardware description), so the greyed "None" is not read as no sound
+  const hw = window.MiraiPlugins.hardware[sel.value];
+  const desc = hw ? hw({machine: sel.value}, { esc }) : {};
+  for (const [field, text] of [['sound', desc.sound], ['bios', desc.bios]]) {
+    const el = form[field];
+    if (!el) continue;
+    let note = el.parentNode.querySelector('.plugin-fixed');
+    if (text) {
+      if (!note) {
+        note = document.createElement('span');
+        note.className = 'note plugin-fixed';
+        el.insertAdjacentElement('afterend', note);
+      }
+      note.textContent = ' ' + text;
+      el.style.display = 'none';
+    } else {
+      if (note) note.remove();
+      el.style.display = '';
+    }
+  }
   if (!d) return;
   if (d.memory && form.memory) form.memory.value = d.memory;
   if (d.sound && form.sound) form.sound.value = d.sound;
@@ -1554,12 +1575,14 @@ function wizardValues() {
 function drawConfirm() {
   const v = wizardValues();
   const anyDisk = DISK_ROWS.some(([k]) => v[k]);
+  const hw = window.MiraiPlugins.hardware[v.machine];
+  const desc = hw ? hw(v, { esc }) : {};
   const rows = [['Name', v.name || '(unnamed)'],
                 ['Machine type', v.machine],
-                ['BIOS', v.bios === 'real' ? 'real machine ROMs'
-                                           : 'compatible'],
+                ['BIOS', desc.bios || (v.bios === 'real' ? 'real machine ROMs'
+                                                         : 'compatible')],
                 ['Memory', v.memory],
-                ['Sound', soundName(v.sound)],
+                ['Sound', desc.sound || soundName(v.sound)],
                 ['Acceleration', v.accel === 'kvm'
                                 ? 'KVM (Experimental)'
                                                    : 'TCG only'],
