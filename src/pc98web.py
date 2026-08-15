@@ -170,6 +170,9 @@ PLUGIN_FIELDS = {}
 # machine name -> fn(record) -> complaint | None; runs last in sanitize() and
 # may trim or refuse what makes no sense for that machine
 MACHINE_SANITIZE = {}
+# (kind, format) -> fn(dest, data): a plugin's own image builder for the
+# Storage "Create" form (kind is hdd or fdd; format the value it registered)
+DISK_BUILDERS = {}
 
 
 class PluginAPI:
@@ -200,6 +203,10 @@ class PluginAPI:
 
     def machine_argv(self, name, builder):
         MACHINE_ARGV[name] = builder
+
+    def disk_builder(self, kind, fmt, fn):
+        """Offer a disk image format of the plugin's own in Storage."""
+        DISK_BUILDERS[(kind, fmt)] = fn
 
     def machine_sanitize(self, name, fn):
         """A final check/trim of an instance record for this machine."""
@@ -3666,7 +3673,10 @@ class Handler(BaseHTTPRequestHandler):
         quiet = lambda *a: None
         try:
             import virtpc98
-            if kind == "hdd":
+            builder = DISK_BUILDERS.get((kind, str(data.get("format") or "")))
+            if builder:
+                builder(dest, data)
+            elif kind == "hdd":
                 image_kind = (virtpc98.KIND_QCOW2
                               if name.endswith(".qcow2") else None)
                 virtpc98.new_image(

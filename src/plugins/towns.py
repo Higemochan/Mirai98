@@ -31,6 +31,62 @@ def register(api):
     api.add_field("boot", lambda v: None if v in BOOT_KEYS
                   else "boot must be empty, cd, fd or hd")
     api.machine_sanitize("towns", towns_sanitize)
+    for fmt in TOWNS_FLOPPIES:
+        api.disk_builder("fdd", fmt, towns_new_floppy)
+    api.disk_builder("hdd", "towns", towns_new_hard_disk)
+
+
+# FM TOWNS floppy layouts (MS-DOS FAT12 as the Towns FORMAT command lays
+# them out): bytes/sector, sectors/cluster, root entries, total sectors,
+# media byte, sectors/FAT, sectors/track, heads
+TOWNS_FLOPPIES = {
+    "towns-1.23": (1024, 1, 192, 1232, 0xfe, 2, 8, 2),   # 2HD 1.23 MB
+    "towns-1.44": (512, 1, 224, 2880, 0xf0, 9, 18, 2),   # 2HD 1.44 MB
+    "towns-720":  (512, 2, 112, 1440, 0xf9, 3, 9, 2),    # 2DD 720 KB
+    "towns-640":  (512, 2, 112, 1280, 0xfb, 2, 8, 2),    # 2DD 640 KB
+}
+
+
+def towns_new_floppy(dest, data):
+    """An empty FAT12 floppy image in one of the FM TOWNS layouts."""
+    import struct
+    fmt = str(data.get("format") or "")
+    bps, spc, root, total, media, spf, spt, heads = TOWNS_FLOPPIES[fmt]
+    label = (str(data.get("label") or "NO NAME").upper()[:11]).ljust(11)
+    boot = bytearray(bps)
+    boot[0:3] = b"\xeb\x3c\x90"
+    boot[3:11] = b"FMTOWNS "
+    struct.pack_into("<HBHBHHBHHHII", boot, 11, bps, spc, 1, 2, root, total,
+                     media, spf, spt, heads, 0, 0)
+    boot[36] = 0x00                       # drive number
+    boot[38] = 0x29                       # extended boot signature
+    struct.pack_into("<I", boot, 39, 0x12345678)
+    boot[43:54] = label.encode("ascii", "replace")
+    boot[54:62] = b"FAT12   "
+    boot[bps - 2:bps] = b"\x55\xaa"
+    fat = bytearray(spf * bps)
+    fat[0:3] = bytes([media, 0xff, 0xff])
+    root_dir = bytearray(root * 32)
+    root_dir[0:11] = label.encode("ascii", "replace")
+    root_dir[11] = 0x08                   # volume label entry
+    image = bytearray(total * bps)
+    image[0:bps] = boot
+    off = bps
+    for _ in range(2):
+        image[off:off + len(fat)] = fat
+        off += len(fat)
+    image[off:off + len(root_dir)] = root_dir
+    with open(dest, "wb") as f:
+        f.write(image)
+
+
+def towns_new_hard_disk(dest, data):
+    """A blank SCSI hard disk image for an FM TOWNS: all zeros, to be
+    initialised (partitions + format) by the Towns OS SETUP / HD
+    utility, the way a new drive was on the real machine."""
+    megabytes = int(data.get("size") or 40)
+    with open(dest, "wb") as f:
+        f.truncate(megabytes << 20)
 
 
 def towns_sanitize(record):

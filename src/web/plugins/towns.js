@@ -296,6 +296,20 @@ window.registerMachinePlugin({
   badge: { towns: 'TOWNS' },
   editForm: { towns: townsEditForm },
   hardware: { towns: townsHardware },
+  // Storage "Create": FM TOWNS floppy layouts (empty FAT12, as the Towns
+  // FORMAT command lays them out) and a blank SCSI hard disk to be
+  // initialised by the Towns OS SETUP / hard-disk utility
+  diskFormats: {
+    fdd: [{ value: 'towns-1.23', label: '1.23M FM TOWNS 2HD',
+            note: 'raw image (.raw), FAT12, empty; the usual Towns floppy' },
+          { value: 'towns-1.44', label: '1.44M FM TOWNS 2HD' },
+          { value: 'towns-720', label: '720K FM TOWNS 2DD' },
+          { value: 'towns-640', label: '640K FM TOWNS 2DD' }],
+    hdd: [{ value: 'towns', label: 'FM TOWNS SCSI (blank .h0)',
+            note: 'all zeros: attach as SCSI HDD and initialise it ' +
+                  '(partitions, format) from the Towns OS system CD\'s ' +
+                  'SETUP / hard-disk utility, as on the real machine' }]
+  },
   wizard: { towns: { panes: { Disks: townsWizardDisks, Host: null,
                               Memory: townsWizardMemory, Network: null,
                               Options: townsWizardOptions },

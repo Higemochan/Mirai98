@@ -12,7 +12,7 @@ const loadRFB = async () => RFB ||
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
-    hardware: {}, wizard: {} };
+    hardware: {}, wizard: {}, diskFormats: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -24,6 +24,10 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.hardware, p.hardware || {});   // per-machine hardware view
   P.wizard = P.wizard || {};
   Object.assign(P.wizard, p.wizard || {});       // per-machine create wizard
+  P.diskFormats = P.diskFormats || {};           // Storage "Create" formats
+  for (const kind of Object.keys(p.diskFormats || {})) {
+    P.diskFormats[kind] = (P.diskFormats[kind] || []).concat(p.diskFormats[kind]);
+  }
   if (p.console) P.console.push(p.console);
   if (p.consolePrep) P.consolePrep.push(p.consolePrep);
   lastList = '';   // a new machine/badge must invalidate the cached VM list
@@ -1093,6 +1097,12 @@ function storageCard(kind, files) {
       '\')">Delete</button></td></tr>';
   }).join('');
   let create = '';
+  // a machine plugin may add image formats of its own (label, note)
+  const extra = window.MiraiPlugins.diskFormats[kind] || [];
+  const extraOpts = extra.map(f => '<option value="' + esc(f.value) + '">' +
+                                   esc(f.label) + '</option>').join('');
+  const extraNotes = extra.filter(f => f.note).map(f =>
+    '<div class="note">' + esc(f.label) + ': ' + esc(f.note) + '</div>').join('');
   if (kind === 'hdd')
     create = '<h4>Create a disk</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'hdd\')" class="row">' +
@@ -1101,18 +1111,22 @@ function storageCard(kind, files) {
       [40,80,160,320,640,1200,2100,4300].map(s => '<option' +
         (s === 40 ? ' selected' : '') + '>' + s + '</option>').join('') +
       '</select><span class="note">MB</span>' +
+      (extra.length ? '<select name="format"><option value="">PC-98 ' +
+       '(FAT, formatted)</option>' + extraOpts + '</select>' : '') +
       '<label class="check"><input type="checkbox" name="fat32"> FAT32' +
       '</label><button class="primary">Create</button></form>' +
       '<div class="note">.qcow2 grows on demand. .hdi: Anex86. ' +
-      '.raw: flat.</div></div>';
+      '.raw: flat.</div>' + extraNotes + '</div>';
   else if (kind === 'fdd')
     create = '<h4>Create a floppy</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'fdd\')" class="row">' +
       '<input type="text" name="name" placeholder="new-floppy.fdi" ' +
       'required style="min-width:11em"><select name="format">' +
-      '<option>1.2</option><option>1.44</option></select>' +
+      '<option value="1.2">1.2 (PC-98)</option>' +
+      '<option value="1.44">1.44 (PC-98)</option>' + extraOpts + '</select>' +
       '<button class="primary">Create</button></form>' +
-      '<div class="note">.fdi or .raw. Formatted, empty.</div></div>';
+      '<div class="note">.fdi or .raw. Formatted, empty.</div>' +
+      extraNotes + '</div>';
   return '<div class="card"><h3>disks/' + kind + '/</h3>' +
     '<h4>Images</h4><table>' +
     '<tr><th>Name</th><th>Size</th><th>Modified</th><th>Used by</th>' +
