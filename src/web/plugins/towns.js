@@ -42,6 +42,13 @@ function townsEditForm(i, h) {
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + bootOpts + '</select>' +
       note('the key held at power-on for the system ROM') + '</div>' +
+    '<div class="row"><label>CMOS seed</label>' +
+      '<select name="cmos">' + townsCmosOpts(i.cmos) + '</select>' +
+      '<button type="button" onclick="townsResetCmos(\'' + i.name + '\')"' +
+      (i.running ? ' disabled title="stop it first"' : '') +
+      '>Reset CMOS</button>' +
+      note('the machine keeps its own CMOS (SETUP settings); Reset drops it ' +
+           'so the next start begins from the chosen seed') + '</div>' +
     '<div class="row"><label>Machine type</label>' +
       '<select name="machine">' + machineOpts + '</select></div>' +
     '<div class="row"><label>Memory</label>' +
@@ -94,7 +101,8 @@ function townsHardware(i, h) {
       ' <span class="note">(SCSI ID ' + n + ')</span>']);
   });
   rows.push(['&#9654; Boot from', townsBootLabel(i.boot)]);
-  rows.push(['&#9881; CMOS', 'per-machine towns.cmos (kept beside vm.xml)']);
+  rows.push(['&#9881; CMOS', 'per-machine towns.cmos, seeded from ' +
+    townsCmosLabel(i.cmos)]);
   if (i.snapshot)
     rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
   if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
@@ -113,6 +121,21 @@ const TOWNS_BOOTS = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
                      ['hd', 'SCSI hard disk 0']];
 const townsBootLabel = v =>
   (TOWNS_BOOTS.find(([k]) => k === (v || '')) || TOWNS_BOOTS[0])[1];
+// where a machine's CMOS starts from (see plugins/towns.py CMOS_SEEDS)
+const TOWNS_CMOS = [['', 'standard (nothing registered; SETUP registers disks)'],
+                    ['real', 'real machine copy (towns.cmos.hdd)']];
+const townsCmosLabel = v =>
+  (TOWNS_CMOS.find(([k]) => k === (v || '')) || TOWNS_CMOS[0])[1];
+const townsCmosOpts = v => TOWNS_CMOS.map(([k, label]) =>
+  '<option value="' + k + '"' + ((v || '') === k ? ' selected' : '') + '>' +
+  label + '</option>').join('');
+window.townsResetCmos = async (name) => {
+  if (!confirm('Drop ' + name + '\'s CMOS? The next start seeds it afresh ' +
+               '(the Towns OS SETUP settings in it are lost).')) return;
+  const r = await api('/api/instances/' + encodeURIComponent(name) + '/x/reset-cmos',
+                      {method: 'POST', body: '{}'});
+  if (r) toast('CMOS reset; next start seeds from ' + r.seed);
+};
 
 function townsWizardDisks(h) {
   return '<div class="row"><label>CD-ROM</label>' +
@@ -146,6 +169,10 @@ function townsWizardOptions(h) {
       (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
     '</select>' + h.note('the key held at power-on for the system ROM') +
     '</div>' +
+    '<div class="row"><label>CMOS seed</label><select name="cmos">' +
+    townsCmosOpts('') + '</select>' +
+    h.note('standard is right for a new machine; the real machine copy ' +
+           'only for hard disk images taken from that machine') + '</div>' +
     '<div class="row"><label>Extra QEMU args</label>' +
     '<input type="text" name="extra" style="min-width:24em"></div>' +
     '<div class="note">Appended to the command line as typed. The machine ' +
@@ -158,6 +185,7 @@ function townsWizardConfirm(v, h) {
                 ['Memory', h.esc(v.memory)],
                 ['Sound', TOWNS_SOUND],
                 ['Boot from', townsBootLabel(v.boot)],
+                ['CMOS seed', townsCmosLabel(v.cmos)],
                 ['Snapshot', v.snapshot ? 'yes' : 'no']];
   if (v.cd) rows.push(['CD-ROM', h.esc(v.cd)]);
   if (v.fdd1) rows.push(['Floppy A', h.esc(v.fdd1)]);

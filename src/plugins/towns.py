@@ -10,8 +10,8 @@ flow; only the command line differs.
 
 Per machine it also keeps a CMOS file (the battery-backed settings the
 Towns OS SETUP writes: drive registration, boot options) beside vm.xml,
-seeded from the ROM set's towns.cmos - the .hdd variant when the machine
-has a SCSI disk, so the drives are registered from the first boot.
+seeded from the ROM set's towns.cmos (or, on request, towns.cmos.hdd, a
+real machine's copy for images taken from it) and reset on demand.
 
 The matching front-end lives in web/plugins/towns.js (machine option,
 Towns defaults, the list badge, its hardware form and the relative-pointer
@@ -30,7 +30,35 @@ def register(api):
     api.machine_argv("towns", lambda inst: towns_argv(api, inst))
     api.add_field("boot", lambda v: None if v in BOOT_KEYS
                   else "boot must be empty, cd, fd or hd")
+    api.add_field("cmos", lambda v: None if v in CMOS_SEEDS
+                  else "cmos must be empty or real")
     api.machine_sanitize("towns", towns_sanitize)
+    api.instance_action("towns", "reset-cmos",
+                        lambda inst, data: towns_reset_cmos(api, inst))
+
+
+# where a machine's CMOS starts from when it has none yet: "" = the ROM
+# set's towns.cmos (nothing registered; the Towns OS SETUP registers hard
+# disks, as on a new machine), "real" = towns.cmos.hdd beside it, a copy of
+# a real machine's CMOS with its own disks registered - only for images
+# taken from that machine
+CMOS_SEEDS = {"": "towns.cmos", "real": "towns.cmos.hdd"}
+
+
+def towns_reset_cmos(api, inst):
+    """Drop the machine's CMOS so the next start seeds it afresh."""
+    os = api.os
+    if api.is_running(inst):
+        return (409, "shut it down first")
+    path = os.path.join(api.inst_dir(inst), "towns.cmos")
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError as err:
+        return (500, "could not remove the CMOS: %s" % err)
+    return {"result": "cmos reset", "seed": CMOS_SEEDS.get(
+        inst.get("cmos") or "", "towns.cmos")}
     for fmt in TOWNS_FLOPPIES:
         api.disk_builder("fdd", fmt, towns_new_floppy)
     api.disk_builder("hdd", "towns", towns_new_hard_disk)
@@ -109,13 +137,14 @@ def towns_sanitize(record):
 
 
 def towns_cmos(api, inst, towns_roms):
-    """This machine's CMOS file, created from the right seed if missing."""
+    """This machine's CMOS file, created from the chosen seed if missing."""
     os = api.os
     path = os.path.join(api.inst_dir(inst), "towns.cmos")
     if not os.path.exists(path):
-        has_hd = any(inst.get(k) for k in ("scsi1", "scsi2", "scsi3", "scsi4"))
-        seeds = [os.path.join(towns_roms, "towns.cmos.hdd")] if has_hd else []
-        seeds.append(os.path.join(towns_roms, "towns.cmos"))
+        seeds = [os.path.join(towns_roms,
+                              CMOS_SEEDS.get(inst.get("cmos") or "",
+                                             "towns.cmos")),
+                 os.path.join(towns_roms, "towns.cmos")]
         for seed in seeds:
             if os.path.exists(seed):
                 os.makedirs(os.path.dirname(path), exist_ok=True)

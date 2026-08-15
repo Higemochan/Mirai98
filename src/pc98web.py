@@ -173,6 +173,9 @@ MACHINE_SANITIZE = {}
 # (kind, format) -> fn(dest, data): a plugin's own image builder for the
 # Storage "Create" form (kind is hdd or fdd; format the value it registered)
 DISK_BUILDERS = {}
+# (machine, action) -> fn(inst, data) -> reply dict | (status, message):
+# a plugin's own POST /api/instances/<name>/x/<action>
+PLUGIN_ACTIONS = {}
 
 
 class PluginAPI:
@@ -203,6 +206,13 @@ class PluginAPI:
 
     def machine_argv(self, name, builder):
         MACHINE_ARGV[name] = builder
+
+    def instance_action(self, machine, action, fn):
+        """A POST /api/instances/<name>/x/<action> of the plugin's own."""
+        PLUGIN_ACTIONS[(machine, action)] = fn
+
+    def is_running(self, inst):
+        return is_running(inst)
 
     def disk_builder(self, kind, fmt, fn):
         """Offer a disk image format of the plugin's own in Storage."""
@@ -3276,6 +3286,24 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r"^/api/disks/(hdd|fdd)/convert$", path)
         if m:
             self.convert_disk(m.group(1))
+            return
+        m = re.match(r"^/api/instances/([^/]+)/x/([a-z0-9_-]+)$", path)
+        if m:
+            data = self.body_json() or {}
+            with _lock:
+                inst = find_instance(load_instances(), m.group(1))
+                if inst is None:
+                    self.fail(404, "no such instance")
+                    return
+                fn = PLUGIN_ACTIONS.get((inst.get("machine"), m.group(2)))
+                if fn is None:
+                    self.fail(404, "no such action for this machine")
+                    return
+                result = fn(inst, data)
+            if isinstance(result, tuple):
+                self.fail(result[0], result[1])
+            else:
+                self.reply(200, result)
             return
         m = re.match(r"^/api/instances/([^/]+)/media$", path)
         if m:
