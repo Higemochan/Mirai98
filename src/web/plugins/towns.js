@@ -113,14 +113,17 @@ function captureRelativePointer(rfb, target) {
   // press-and-hold Esc into the exit gesture.  Elsewhere a single Esc
   // still releases the pointer (browser-mandated).
   const kbLock = !!(navigator.keyboard && navigator.keyboard.lock);
-  const engage = async () => {
+  const engage = () => {
     const c = canvas();
     if (!c) return;
+    // Fullscreen and pointer lock must BOTH be requested inside the same
+    // user gesture -- awaiting the fullscreen promise first consumes the
+    // activation and the pointer-lock request is then denied.  Lock the
+    // Escape key once the fullscreen transition has settled.
     if (kbLock && !document.fullscreenElement) {
-      try {
-        await target.requestFullscreen();
-        await navigator.keyboard.lock(['Escape']);
-      } catch (e) { /* fall back to plain pointer lock */ }
+      target.requestFullscreen()
+        .then(() => navigator.keyboard.lock(['Escape']))
+        .catch((e) => console.warn('towns console: fullscreen/kb-lock', e));
     }
     c.requestPointerLock();
   };

@@ -50,7 +50,9 @@ window.applyMachineDefaults = (sel) => {
   let list = [];
   try { list = await (await fetch('/api/plugins')).json(); } catch (e) { return; }
   for (const f of list) {
-    try { await import('/plugins/' + f); } catch (e) { console.error('plugin', f, e); }
+    // cache-bust: plugin scripts are tiny and must never be served stale
+    try { await import('/plugins/' + f + '?v=' + Date.now()); }
+    catch (e) { console.error('plugin', f, e); }
   }
   // repaint once plugins are registered; lastList is cleared so the cached
   // (badge-less) list is invalidated, and the async render's rejection is
