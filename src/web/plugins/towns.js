@@ -47,6 +47,28 @@ function townsEditForm(i, h) {
       (i.running ? ' disabled' : '') + '>Delete</button></div></form>';
 }
 
+// ---- Towns hardware view --------------------------------------------------
+// The read-only "Hardware configuration" table.  The stock rows describe a
+// PC-98 (compat/real BIOS, a sound board, an IDE CD-ROM); the Towns machine
+// ignores the bios/sound fields altogether -- it always boots the real ROM
+// set with the on-board sound -- so say what really runs.
+function townsHardware(i, h) {
+  const rows = [
+    ['&#9636; Memory', h.esc(i.memory)],
+    ['&#9881; Machine', h.esc(i.machine || 'towns') + ' (TCG)'],
+    ['&#9750; BIOS', 'FM TOWNS real ROM set'],
+    ['&#9834; Sound', 'built-in YM2612 FM + RF5C68 PCM, CD-DA'],
+    ['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
+     ', websocket ' + i.ports[1]]];
+  if (i.cd) rows.push(['&#9707; CD-ROM', h.esc(i.cd) +
+    ' <span class="note">(built-in FM TOWNS drive, read-only; a .cue ' +
+    'beside the image carries the audio tracks)</span>']);
+  if (i.snapshot)
+    rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
+  if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
+  return { rows, bios: 'FM TOWNS real ROM set' };
+}
+
 // ---- relative-pointer capture (only for a Towns console) ------------------
 // QEMU's VNC turns each absolute pointer event into a delta from the last
 // one, which stalls at the canvas edge; instead we ask for QEMU's relative
@@ -170,6 +192,7 @@ window.registerMachinePlugin({
   },
   badge: { towns: 'TOWNS' },
   editForm: { towns: townsEditForm },
+  hardware: { towns: townsHardware },
   // decided synchronously from the consolePrep result: by the time the
   // console hook runs the machine kind is already known, so the capture
   // is in place before the first pointer event (the old fetch-here-async
