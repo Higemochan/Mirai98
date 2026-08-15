@@ -24,6 +24,9 @@ function townsEditForm(i, h) {
   const bootOpts = TOWNS_BOOTS.map(([v, label]) =>
     '<option value="' + v + '"' + ((i.boot || '') === v ? ' selected' : '') +
     '>' + label + '</option>').join('');
+  const midiOpts = TOWNS_MIDI.map(([v, label]) =>
+    '<option value="' + v + '"' + ((i.midi || '') === v ? ' selected' : '') +
+    '>' + label + '</option>').join('');
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', i.cd) +
@@ -39,6 +42,11 @@ function townsEditForm(i, h) {
       h.diskSelect(k, 'hdd', i[k]) +
       (n === 0 ? note('SCSI ID ' + n + '; a raw image (e.g. a Tsugaru .h0)')
                : note('SCSI ID ' + n)) + '</div>').join('') +
+    '<div class="row"><label>MIDI</label>' +
+      '<select name="midi">' + midiOpts + '</select>' +
+      note('the MT-402/403 card; its music is mixed into the machine sound ' +
+           'and reaches you over the console. A few titles will not run ' +
+           'with a card fitted') + '</div>' +
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + bootOpts + '</select>' +
       note('the key held at power-on for the system ROM') + '</div>' +
@@ -121,6 +129,11 @@ const TOWNS_BOOTS = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
                      ['hd', 'SCSI hard disk 0']];
 const townsBootLabel = v =>
   (TOWNS_BOOTS.find(([k]) => k === (v || '')) || TOWNS_BOOTS[0])[1];
+// the MIDI card, and what plays what it is sent (see plugins/towns.py)
+const TOWNS_MIDI = [['', 'No MIDI card'],
+                    ['synth', 'MIDI card + SoundFont synthesiser']];
+const townsMidiLabel = v =>
+  (TOWNS_MIDI.find(([k]) => k === (v || '')) || TOWNS_MIDI[0])[1];
 // where a machine's CMOS starts from (see plugins/towns.py CMOS_SEEDS)
 const TOWNS_CMOS = [['', 'standard (nothing registered; SETUP registers disks)'],
                     ['real', 'real machine copy (towns.cmos.hdd)']];

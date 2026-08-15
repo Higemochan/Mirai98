@@ -24,6 +24,12 @@ import shutil
 # ("" = the ROM's own order: floppy, CD-ROM, then hard disk)
 BOOT_KEYS = {"": None, "cd": "CD", "fd": "F0", "hd": "H0"}
 
+# the MIDI card is off unless asked for: a few titles will not run with
+# one fitted.  "synth" renders what the card is sent with a SoundFont
+# and mixes it into the machine's sound, which is what reaches the
+# browser over the console connection.
+MIDI_MODES = {"": None, "synth": "on"}
+
 
 def register(api):
     api.add_machine("towns")
@@ -32,6 +38,8 @@ def register(api):
                   else "boot must be empty, cd, fd or hd")
     api.add_field("cmos", lambda v: None if v in CMOS_SEEDS
                   else "cmos must be empty or real")
+    api.add_field("midi", lambda v: None if v in MIDI_MODES
+                  else "midi must be empty or synth")
     api.machine_sanitize("towns", towns_sanitize)
     api.instance_action("towns", "reset-cmos",
                         lambda inst, data: towns_reset_cmos(api, inst))
@@ -172,6 +180,12 @@ def towns_argv(api, inst):
     bootkey = BOOT_KEYS.get(inst.get("boot") or "")
     if bootkey:
         machine += ",bootkey=%s" % bootkey
+    # the MIDI card's synthesiser opens on the same audiodev as the rest,
+    # so its music arrives in step with the FM and PCM channels
+    if MIDI_MODES.get(inst.get("midi") or ""):
+        machine += ",midi=on"
+        if cfg.get("soundfont"):
+            machine += ",soundfont=%s" % api.win_short(cfg["soundfont"])
     argv = [cfg["qemu"],
             "-M", machine,
             "-m", inst.get("memory") or "16M",
