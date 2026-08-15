@@ -583,7 +583,7 @@ async function listView(force) {
 
 // ---------------------------------------------------------- detail view
 function diskSelect(key, kind, value, name) {
-  const files = catalog[kind] || [];
+  const files = (catalog[kind] || []).filter(f => !f.orphan);
   // real drives of the matching sort come after the images, so a guest
   // can be pointed at the host's own CD or floppy
   const drives = (hardware.drives || []).filter(
@@ -738,6 +738,16 @@ window.toggleEdit = () => {
   const show = edit.style.display === 'none';
   edit.style.display = show ? '' : 'none';
   document.getElementById('hw-view').style.display = show ? 'none' : '';
+};
+window.renameVm = async (name) => {
+  const to = prompt('New name (1-32 letters, digits, - or _)', name);
+  if (!to || to === name) return;
+  const i = await api('/api/instances/' + encodeURIComponent(name));
+  if (!i) return;
+  i.name = to;
+  const d = await api('/api/instances/' + encodeURIComponent(name),
+                      {method: 'PUT', body: JSON.stringify(i)});
+  if (d) { toast('renamed'); location.hash = '#/vm/' + to; }
 };
 window.saveVm = (form, name) => {
   const inst = {name};
@@ -911,6 +921,8 @@ async function detailView(name) {
     '<a href="#/vms">Virtual machines</a> &rsaquo; ' + esc(name) + '</div>' +
     '<div class="titlerow"><span class="glyph">&#9635;</span>' +
     '<h2>' + esc(name) + '</h2>' +
+    (i.running ? '' : '<button type="button" title="rename" ' +
+      'onclick="renameVm(\'' + name + '\')">&#9998;</button>') +
     '<span class="state' + (i.running ? ' on' : '') + '">' +
     (i.running ? 'running' : 'stopped') + '</span></div>' +
     actionBar([
@@ -1077,13 +1089,33 @@ const CONVERT_TARGETS = {
   'fdd:.fdi': ['raw'], 'fdd:.raw': ['fdi'], 'fdd:.img': ['fdi'],
 };
 
+// what a catalog entry is: its type, and for a CD dump the state of its
+// cue sheet (tracks, audio, a sheet that cannot be followed, an orphan)
+function diskTypeCell(f) {
+  let t = esc(f.type || extOf(f.name) || '-');
+  if (f.orphan) {
+    return '<span style="color:#e06c5f">' + t + ' — no data file: ' +
+      esc((f.missing || []).join(', ')) + '</span>';
+  }
+  if (f.cue) {
+    t += ' <span class="note">' + f.tracks + ' trk' +
+         (f.audio ? ', ' + f.audio + ' audio' : '') + '</span>';
+    if (f.multi) t += ' <span style="color:#e06c5f" title="the cue names ' +
+      f.multi + ' data files; the emulator follows a single one">' +
+      'multi-file cue</span>';
+    else if (f.cue_mismatch) t += ' <span style="color:#e06c5f" title="' +
+      esc(f.cue) + ' does not share the data file\'s name; the emulator ' +
+      'looks for the same stem">cue name differs</span>';
+  }
+  return t;
+}
 function storageCard(kind, files) {
   const rows = files.map(f => {
     const used = f.used_by.join(', ');
     const targets = CONVERT_TARGETS[kind + ':' + extOf(f.name)] || [];
     return '<tr><td><a href="#/disk/' + kind + '/' +
       encodeURIComponent(f.name) + '">' + esc(f.name) + '</a></td><td>' +
-      fmtBytes(f.size) +
+      diskTypeCell(f) + '</td><td>' + fmtBytes(f.size) +
       '</td><td class="note">' + fmtDate(f.mtime) + '</td><td>' +
       esc(used || '-') + '</td><td style="text-align:right">' +
       '<button type="button" onclick="showTree(\'' + kind + '\',\'' +
@@ -1130,11 +1162,12 @@ function storageCard(kind, files) {
       extraNotes + '</div>';
   return '<div class="card"><h3>disks/' + kind + '/</h3>' +
     '<h4>Images</h4><table>' +
-    '<tr><th>Name</th><th>Size</th><th>Modified</th><th>Used by</th>' +
-    '<th></th></tr>' +
-    (rows || '<tr><td colspan="5" class="note">(empty)</td></tr>') +
+    '<tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th>' +
+    '<th>Used by</th><th></th></tr>' +
+    (rows || '<tr><td colspan="6" class="note">(empty)</td></tr>') +
     '</table>' +
-    '<h4>Add an image</h4><div class="body"><div class="row">' +
+    '<h4>Add an image</h4><div class="body" ondragover="event.preventDefault()"' +
+    ' ondrop="dropUpload(event,\'' + kind + '\')"><div class="row">' +
     '<button type="button" onclick="pickUpload(\'' + kind +
     '\')">Upload from this computer...</button>' +
     '<button type="button" onclick="fetchDisk(\'' + kind +
@@ -1143,7 +1176,12 @@ function storageCard(kind, files) {
     '\')">Import a server path...</button>' +
     '<button type="button" onclick="readFromDrive(\'' + kind +
     '\')">Read a host drive...</button></div>' +
-    '<div id="jobs-' + kind + '" class="note"></div></div>' +
+    '<div id="jobs-' + kind + '" class="note"></div>' +
+    (kind === 'cdrom'
+     ? '<div class="note">Several files may be chosen (or dropped here) at ' +
+       'once: a .cue and its .bin/.img travel as one disc, the sheet is ' +
+       'pointed at the stored names, and the pair is listed as one entry.' +
+       '</div>' : '') + '</div>' +
     create + '</div>';
 }
 
@@ -1459,9 +1497,9 @@ window.importDisk = kind => {
 const CHUNK = 16 << 20;
 let uploadStop = false;
 
-function uploadBox(file, kind) {
+function uploadBox(file, kind, label) {
   document.getElementById('upload-name').textContent =
-    file.name + ' → disks/' + kind + '/';
+    (label || file.name) + ' → disks/' + kind + '/';
   document.getElementById('upload-veil').classList.add('open');
   document.getElementById('upload-bar').value = 0;
   document.getElementById('upload-stat').textContent = '';
@@ -1488,27 +1526,96 @@ function sendSlice(url, blob) {
   });
 }
 
+// the name a file is stored under: what the server's SAFE_NAME allows,
+// anything else becoming '_' (the server sanitises the same way)
+function safeDiskName(name) {
+  let out = name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_')
+                .replace(/^[_.]+|[_.]+$/g, '') || 'disk';
+  if (!/^[A-Za-z0-9]/.test(out)) out = 'x' + out;
+  return out.slice(0, 64);
+}
+window.dropUpload = (ev, kind) => {
+  ev.preventDefault();
+  if (ev.dataTransfer && ev.dataTransfer.files.length)
+    uploadFiles(kind, [...ev.dataTransfer.files]);
+};
 window.pickUpload = kind => {
   const input = document.createElement('input');
   input.type = 'file';
-  input.onchange = async () => {
-    const file = input.files[0];
-    if (!file) return;
-    let overwrite = '';
-    if (catalog[kind].some(f => f.name === file.name)) {
-      if (!confirm(file.name + ' exists. Overwrite?')) return;
-      overwrite = '&overwrite=1';
+  input.multiple = true;
+  input.onchange = () => { if (input.files.length) uploadFiles(kind, [...input.files]); };
+  input.click();
+};
+// Several files at once.  For CD dumps a .cue and the data files it names
+// form a set: the sheet is checked against the selection first, all files
+// go up under safe names, then the server points the sheet at them.
+async function uploadFiles(kind, files) {
+  const plan = files.map(f => ({ file: f, name: safeDiskName(f.name) }));
+  const cues = plan.filter(p => /\.cue$/i.test(p.name));
+  if (kind === 'cdrom' && cues.length) {
+    const have = new Set(plan.map(p => p.file.name.toLowerCase()));
+    const haveSafe = new Set(plan.map(p => p.name.toLowerCase()));
+    for (const c of cues) {
+      const text = await c.file.text().catch(() => '');
+      const refs = [...text.matchAll(/^\s*FILE\s+(?:"([^"]*)"|(\S+))/gim)]
+        .map(m => (m[1] || m[2]).replace(/\\/g, '/').split('/').pop());
+      const missing = refs.filter(r => !have.has(r.toLowerCase()) &&
+        !haveSafe.has(safeDiskName(r).toLowerCase()) &&
+        !(catalog[kind] || []).some(f => f.name.toLowerCase() === r.toLowerCase()));
+      if (!refs.length) {
+        if (!confirm(c.file.name + ' has no FILE line. Upload it anyway?')) return;
+      } else if (missing.length) {
+        if (!confirm(c.file.name + ' names ' + missing.join(', ') +
+                     ', which is not among the chosen files (nor already ' +
+                     'in disks/cdrom/). Upload anyway?')) return;
+      }
     }
+  }
+  const dupes = plan.filter(p => (catalog[kind] || []).some(f => f.name === p.name));
+  let overwrite = '';
+  if (dupes.length) {
+    if (!confirm(dupes.map(p => p.name).join(', ') + ' exist(s). Overwrite?')) return;
+    overwrite = '&overwrite=1';
+  }
+  const stored = [];
+  for (let n = 0; n < plan.length; n++) {
+    const p = plan[n];
+    const done = await uploadOne(kind, p.file, p.name, overwrite,
+                                 plan.length > 1 ? (n + 1) + '/' + plan.length + ' ' : '');
+    if (!done) return;
+    stored.push(done);
+  }
+  if (kind === 'cdrom' && cues.length) {
+    const stat = document.getElementById('upload-stat');
+    for (const c of cues) {
+      stat.textContent = 'settling ' + c.name + '...';
+      const r = await api('/api/disks/cdrom/set',
+        {method: 'POST', body: JSON.stringify(
+          {cue: c.name, files: stored.filter(s => !/\.cue$/i.test(s))})});
+      if (r) {
+        stat.textContent = 'disc set ' + r.cue + ': ' + r.files.join(' + ') +
+          ' — ' + r.tracks + ' track(s)' + (r.audio ? ', ' + r.audio + ' audio' : '') +
+          (r.multi ? ' (multi-file cue: not playable by the emulator yet)' : '');
+        toast('disc set ' + r.cue + ' ready');
+        task('Disc ' + r.cue + ' - set', 'OK');
+      } else {
+        stat.textContent = 'the disc set could not be settled: see the toast';
+      }
+    }
+  }
+  render();
+}
+// one file, in slices; resolves to the stored name or null when it failed
+async function uploadOne(kind, file, name, overwrite, prefix) {
     const base = '/api/disks/' + kind;
-    const q = 'name=' + encodeURIComponent(file.name) + '&total=' +
-              file.size;
-    uploadBox(file, kind);
+    const q = 'name=' + encodeURIComponent(name) + '&total=' + file.size;
+    uploadBox(file, kind, prefix + name);
     const bar = document.getElementById('upload-bar');
     const stat = document.getElementById('upload-stat');
     const started = Date.now();
     let sent = 0, tries = 0;
     while (sent < file.size) {
-      if (uploadStop) { toast('upload cancelled'); return; }
+      if (uploadStop) { toast('upload cancelled'); return null; }
       const end = Math.min(sent + CHUNK, file.size);
       try {
         const r = await sendSlice(
@@ -1522,7 +1629,7 @@ window.pickUpload = kind => {
           document.getElementById('upload-close').textContent = 'Close';
           toast('upload failed: ' + err.message);
           task('Disk ' + file.name + ' - upload', err.message);
-          return;
+          return null;
         }
         stat.textContent = 'retrying after ' + err.message + ' (' + tries +
                            '/3)';
@@ -1541,21 +1648,20 @@ window.pickUpload = kind => {
     stat.textContent = 'finishing...';
     try {
       const done = await sendSlice(base + '/finish?' + q, null);
-      const named = done.name || file.name;
+      const named = done.name || name;
       stat.textContent = 'uploaded ' + named +
-        (named !== file.name ? ' (converted on the way in)' : '');
+        (named !== file.name ? ' (stored as ' + named + ')' : '');
       document.getElementById('upload-close').textContent = 'Close';
       toast('uploaded ' + named);
       task('Disk ' + named + ' - upload', 'OK');
-      render();
+      return named;
     } catch (err) {
       stat.textContent = 'failed: ' + err.message;
       document.getElementById('upload-close').textContent = 'Close';
       task('Disk ' + file.name + ' - upload', err.message);
+      return null;
     }
-  };
-  input.click();
-};
+}
 
 // ------------------------------------------------------ create wizard
 window.memSlide = el => {

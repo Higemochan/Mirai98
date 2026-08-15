@@ -364,6 +364,16 @@ DISK_KINDS = ("hdd", "fdd", "cdrom")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+def safe_disk_name(name):
+    """The name a file is stored under: what SAFE_NAME allows, with
+    anything else turned into '_' (the browser does the same)."""
+    out = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    out = re.sub(r"_+", "_", out).strip("_.") or "disk"
+    if not out[0].isalnum():
+        out = "x" + out
+    return out[:64]
+
+
 def disk_contents(kind, name):
     """What is inside an image, read through virtpc98's FAT reader."""
     import virtpc98
@@ -461,8 +471,102 @@ def rom_catalog():
     return out
 
 
+# ------------------------------------------------------- CD cue sheets
+# A CD dump often comes as a data file (.bin/.img) plus a .cue sheet that
+# names it and lays out the tracks (CD-DA audio ones included).  The
+# emulator is given the data file and finds the sheet beside it, so the
+# pair is one disc in the tree: the data file is the entry, the .cue its
+# sidecar, and a .cue whose data file is missing is an orphan nothing can
+# use.
+
+CUE_FILE_RE = re.compile(r'^\s*FILE\s+(?:"([^"]*)"|(\S+))\s+(\S+)',
+                         re.IGNORECASE)
+CUE_TRACK_RE = re.compile(r'^\s*TRACK\s+(\d+)\s+(\S+)', re.IGNORECASE)
+
+
+def read_cue(path):
+    """The sheet's lines, decoded losslessly (sheets are ASCII/Shift-JIS)."""
+    with open(path, "rb") as f:
+        return f.read().decode("latin-1").splitlines(keepends=True)
+
+
+def cue_summary(path):
+    """(referenced file names, track count, audio track count)."""
+    files, tracks, audio = [], 0, 0
+    try:
+        for line in read_cue(path):
+            m = CUE_FILE_RE.match(line)
+            if m:
+                files.append(os.path.basename((m.group(1) or m.group(2))
+                                              .replace("\\", "/")))
+                continue
+            m = CUE_TRACK_RE.match(line)
+            if m:
+                tracks += 1
+                if m.group(2).upper() == "AUDIO":
+                    audio += 1
+    except OSError:
+        pass
+    return files, tracks, audio
+
+
+def cue_partner(root, name):
+    """The .cue beside a data file (same stem), or None."""
+    stem = os.path.splitext(name)[0]
+    for cand in (stem + ".cue", stem + ".CUE"):
+        if os.path.isfile(os.path.join(root, cand)):
+            return cand
+    return None
+
+
+def cdrom_pairs(root, names):
+    """{data name: cue name} for the sheets whose data file is here, and
+    {cue name: [missing files]} for the orphans."""
+    pairs, orphans = {}, {}
+    lower = {n.lower(): n for n in names}
+    for name in names:
+        if not name.lower().endswith(".cue"):
+            continue
+        files, _, _ = cue_summary(os.path.join(root, name))
+        here = [lower.get(f.lower()) for f in files]
+        missing = [f for f, h in zip(files, here) if h is None]
+        if files and not missing:
+            for h in here:
+                pairs.setdefault(h, name)
+        else:
+            orphans[name] = missing or ["(no FILE line)"]
+    # a data file that is a link into another folder may keep its sheet
+    # there (the emulator resolves the link and looks beside the target)
+    for name in names:
+        if name in pairs or name.lower().endswith(".cue"):
+            continue
+        real = os.path.realpath(os.path.join(root, name))
+        if real != os.path.join(root, name):
+            cue = cue_partner(os.path.dirname(real), os.path.basename(real))
+            if cue:
+                pairs[name] = os.path.join(os.path.dirname(real), cue)
+    return pairs, orphans
+
+
+def fdd_media_label(size):
+    return {1261568: "1.23M", 1474560: "1.44M", 737280: "720K",
+            655360: "640K", 327680: "320K"}.get(size, "")
+
+
+def disk_type(kind, name, size, cue=None):
+    """The short 'what is this' shown in the Storage list."""
+    ext = os.path.splitext(name)[1].lower().lstrip(".") or "-"
+    if kind == "cdrom" and cue:
+        return ext + "/cue"
+    if kind == "fdd" and ext == "raw":
+        label = fdd_media_label(size)
+        return "raw " + label if label else "raw"
+    return ext
+
+
 def disk_catalog():
-    """Every image in the tree, with who is using it."""
+    """Every image in the tree, with who is using it, its type and (for
+    CD dumps) the cue sheet that belongs to it."""
     instances = load_instances()
     out = {}
     for kind in DISK_KINDS:
@@ -472,17 +576,41 @@ def disk_catalog():
             names = sorted(os.listdir(root))
         except OSError:
             names = []
+        names = [n for n in names
+                 if not (n.startswith(".") or n.endswith(".part")
+                         or not os.path.isfile(os.path.join(root, n)))]
+        pairs, orphans = ({}, {})
+        if kind == "cdrom":
+            pairs, orphans = cdrom_pairs(root, names)
         for name in names:
             full = os.path.join(root, name)
-            if (name.startswith(".") or name.endswith(".part")
-                    or not os.path.isfile(full)):
-                continue
+            if kind == "cdrom" and name.lower().endswith(".cue") \
+                    and name not in orphans:
+                continue                    # a sidecar rides with its data
             st = os.stat(full)
             used = sorted(i["name"] for i in instances
                           if any(disk_path(i, k) == full
                                  for k in DISK_KEYS))
-            entries.append({"name": name, "size": st.st_size,
-                            "mtime": int(st.st_mtime), "used_by": used})
+            entry = {"name": name, "size": st.st_size,
+                     "mtime": int(st.st_mtime), "used_by": used,
+                     "type": disk_type(kind, name, st.st_size,
+                                       pairs.get(name))}
+            if name in pairs:
+                cue_path = os.path.join(root, pairs[name])   # abs stays abs
+                refs, tracks, audio = cue_summary(cue_path)
+                entry.update({"cue": os.path.basename(pairs[name]),
+                              "tracks": tracks, "audio": audio})
+                # the emulator looks for <data stem>.cue: a sheet named
+                # differently, or one spread over several data files, is
+                # not something it can follow yet
+                if os.path.splitext(os.path.basename(pairs[name]))[0] != \
+                        os.path.splitext(name)[0]:
+                    entry["cue_mismatch"] = True
+                if len(refs) > 1:
+                    entry["multi"] = len(refs)
+            elif name in orphans:
+                entry.update({"orphan": True, "missing": orphans[name]})
+            entries.append(entry)
         out[kind] = entries
     return out
 
@@ -3134,6 +3262,9 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self.import_disk(m.group(1))
             return
+        if path == "/api/disks/cdrom/set":
+            self.settle_cue_set()
+            return
         m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/fetch$", path)
         if m:
             self.fetch(m.group(1))
@@ -3588,8 +3719,97 @@ class Handler(BaseHTTPRequestHandler):
         say("rom %s uploaded (%d bytes)" % (name, size), "system")
         self.reply(200, {"result": "uploaded", "name": name, "size": size})
 
+    def settle_cue_set(self):
+        """A cue sheet and its data files have all arrived: point the
+        sheet's FILE lines at the names they were stored under (uploads
+        get safe names, and sheets often name the file with a path or a
+        different case) and check the set is complete."""
+        data = self.body_json() or {}
+        cue = str(data.get("cue") or "")
+        files = [str(f) for f in (data.get("files") or [])]
+        root = disks_root("cdrom")
+        if not SAFE_NAME.match(cue) or not cue.lower().endswith(".cue"):
+            self.fail(400, "bad cue name")
+            return
+        cue_path = os.path.join(root, cue)
+        if not os.path.isfile(cue_path):
+            self.fail(404, "no such cue sheet")
+            return
+        present = {n.lower(): n for n in os.listdir(root)
+                   if os.path.isfile(os.path.join(root, n))}
+        given = [f for f in files if f.lower() in present]
+        try:
+            lines = read_cue(cue_path)
+        except OSError as err:
+            self.fail(400, "cannot read the cue: %s" % err)
+            return
+        refs = [m for m in (CUE_FILE_RE.match(l) for l in lines) if m]
+        if not refs:
+            self.fail(400, "%s has no FILE line" % cue)
+            return
+        rewritten, missing, chosen = [], [], []
+        pending = list(given)
+        for line in lines:
+            m = CUE_FILE_RE.match(line)
+            if not m:
+                rewritten.append(line)
+                continue
+            ref = os.path.basename((m.group(1) or m.group(2))
+                                   .replace("\\", "/"))
+            key = ref.lower()
+            safe = safe_disk_name(ref).lower()
+            pick = None
+            for cand in (key, safe):
+                if cand in present:
+                    pick = present[cand]
+                    break
+            if pick is None and pending:
+                pick = pending[0]         # the uploaded files, in order
+            if pick is None:
+                missing.append(ref)
+                rewritten.append(line)
+                continue
+            if pick in pending:
+                pending.remove(pick)
+            chosen.append(pick)
+            nl = "\r\n" if line.endswith("\r\n") else "\n"
+            rewritten.append('FILE "%s" %s%s' % (pick, m.group(3), nl))
+        if missing:
+            self.fail(400, "the cue names %s, which was not uploaded"
+                      % ", ".join(missing))
+            return
+        with open(cue_path, "wb") as f:
+            f.write("".join(rewritten).encode("latin-1"))
+        _, tracks, audio = cue_summary(cue_path)
+        # the disc takes the sheet's stem: data.bin + data.cue is one set
+        # the emulator finds without help; rename a lone data file to match
+        stem = os.path.splitext(cue)[0]
+        if len(chosen) == 1:
+            data_name = chosen[0]
+            want = stem + os.path.splitext(data_name)[1]
+            if data_name != want and not os.path.exists(
+                    os.path.join(root, want)):
+                os.replace(os.path.join(root, data_name),
+                           os.path.join(root, want))
+                lines = read_cue(cue_path)
+                with open(cue_path, "wb") as f:
+                    f.write("".join(
+                        'FILE "%s" %s%s' % (want, CUE_FILE_RE.match(l).group(3),
+                                            "\r\n" if l.endswith("\r\n")
+                                            else "\n")
+                        if CUE_FILE_RE.match(l) else l
+                        for l in lines).encode("latin-1"))
+                chosen = [want]
+        say("cue set %s: %d track(s), %d audio" % (cue, tracks, audio),
+            "disk")
+        self.reply(200, {"result": "set", "cue": cue, "files": chosen,
+                         "tracks": tracks, "audio": audio,
+                         "multi": len(chosen) > 1})
+
     def import_disk(self, kind):
-        """Adopt a file already on the server, without moving it."""
+        """Adopt a file already on the server, without moving it.  A CD
+        cue sheet brings the data files it names along, and a data file
+        its sheet, so the disc arrives whole."""
         data = self.body_json()
         path = os.path.expanduser(str((data or {}).get("path", "")))
         if not os.path.isfile(path):
@@ -3599,15 +3819,38 @@ class Handler(BaseHTTPRequestHandler):
         if not SAFE_NAME.match(name):
             self.fail(400, "file name %s is too strange to adopt" % name)
             return
-        dest = os.path.join(disks_root(kind), name)
-        if os.path.exists(dest):
-            self.fail(409, "%s already exists" % name)
-            return
-        try:
-            os.link(path, dest)            # instant on the same filesystem
-        except OSError:
-            shutil.copy2(path, dest)
-        self.reply(200, {"result": "imported", "name": name})
+        group = [path]
+        if kind == "cdrom":
+            folder = os.path.dirname(path)
+            if name.lower().endswith(".cue"):
+                refs, _, _ = cue_summary(path)
+                for ref in refs:
+                    cand = os.path.join(folder, ref)
+                    if not os.path.isfile(cand):
+                        self.fail(400, "the cue names %s, which is not "
+                                  "beside it" % ref)
+                        return
+                    group.append(cand)
+            else:
+                cue = cue_partner(folder, name)
+                if cue:
+                    group.append(os.path.join(folder, cue))
+        for src in group:
+            base = os.path.basename(src)
+            if not SAFE_NAME.match(base):
+                self.fail(400, "file name %s is too strange to adopt" % base)
+                return
+            if os.path.exists(os.path.join(disks_root(kind), base)):
+                self.fail(409, "%s already exists" % base)
+                return
+        for src in group:
+            dest = os.path.join(disks_root(kind), os.path.basename(src))
+            try:
+                os.link(src, dest)         # instant on the same filesystem
+            except OSError:
+                shutil.copy2(src, dest)
+        self.reply(200, {"result": "imported", "name": name,
+                         "files": [os.path.basename(g) for g in group]})
 
     def fetch(self, kind):
         data = self.body_json() or {}
@@ -3777,6 +4020,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(409, "in use by: %s" % ", ".join(used))
                 return
             os.remove(full)
+            if kind == "cdrom" and not name.lower().endswith(".cue"):
+                cue = cue_partner(os.path.dirname(full), name)
+                if cue:
+                    try:
+                        os.remove(os.path.join(os.path.dirname(full), cue))
+                    except OSError:
+                        pass
         self.reply(200, {"result": "deleted"})
 
     def do_PUT(self):
@@ -3792,7 +4042,8 @@ class Handler(BaseHTTPRequestHandler):
         if data is None:
             self.fail(400, "bad JSON")
             return
-        data["name"] = name
+        # the URL says which machine; the body may carry a new name
+        data["name"] = str(data.get("name") or name)
         with _lock:
             instances = load_instances()
             inst = find_instance(instances, name)
@@ -3802,7 +4053,8 @@ class Handler(BaseHTTPRequestHandler):
             if is_running(inst):
                 self.fail(409, "shut it down first")
                 return
-            record, complaint = sanitize(data)
+            record, complaint = sanitize(
+                data, {i["name"] for i in instances} - {name})
             if record is None:
                 self.fail(400, complaint)
                 return
