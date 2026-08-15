@@ -2383,6 +2383,29 @@ def stop_instance(inst):
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+    else:
+        # A machine from an earlier server run has no subprocess handle,
+        # and a wedged QEMU may never answer the QMP quit; escalate
+        # through its recorded pid so the ports actually come free.
+        pid = pid_of(inst)
+        for _ in range(20):
+            if not pid or not is_running(inst):
+                break
+            time.sleep(0.25)
+        if pid and is_running(inst):
+            try:
+                os.kill(pid, 15)                    # SIGTERM
+            except OSError:
+                pid = None
+            for _ in range(12):
+                if not pid or not is_running(inst):
+                    break
+                time.sleep(0.25)
+            if pid and is_running(inst):
+                try:
+                    os.kill(pid, 9)                 # SIGKILL
+                except OSError:
+                    pass
     for _ in range(20):
         if not is_running(inst):
             forget_pid(inst)
