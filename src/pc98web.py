@@ -163,6 +163,10 @@ MACHINES = ("pc9821", "pc9801")
 # register(api) may add a machine name and a builder returning its QEMU argv;
 # everything else (create/start/console/snapshot) is the unchanged PC-98 flow.
 MACHINE_ARGV = {}
+# instance fields a plugin adds (name -> validator(value) -> complaint|None);
+# they ride through sanitize()/save_instance()/load_instance() untouched
+# otherwise, so a machine type may keep settings of its own in vm.xml
+PLUGIN_FIELDS = {}
 
 
 class PluginAPI:
@@ -193,6 +197,13 @@ class PluginAPI:
 
     def machine_argv(self, name, builder):
         MACHINE_ARGV[name] = builder
+
+    def add_field(self, name, validator=None):
+        """Declare an instance field of the plugin's own (kept in vm.xml)."""
+        PLUGIN_FIELDS[name] = validator
+
+    def inst_dir(self, inst):
+        return inst_dir(inst["index"])
 
 
 def load_plugins():
@@ -489,6 +500,8 @@ def load_instance(index):
             "gpib": root.findtext("gpib") or "",
             "mount": root.findtext("mount") or "",
             "extra": root.findtext("extra") or ""}
+    for key in PLUGIN_FIELDS:
+        inst[key] = root.findtext(key) or ""
     for key in DISK_KEYS:
         inst[key] = ""
     for disk in root.findall("disk"):
@@ -519,6 +532,9 @@ def save_instance(inst):
         ET.SubElement(root, "mount").text = inst["mount"]
     if inst.get("extra"):
         ET.SubElement(root, "extra").text = inst["extra"]
+    for key in PLUGIN_FIELDS:
+        if inst.get(key):
+            ET.SubElement(root, key).text = str(inst[key])
     for key in DISK_KEYS:
         if inst.get(key):
             ET.SubElement(root, "disk", dev=key, ref=inst[key])
@@ -621,6 +637,12 @@ def sanitize(data, taken_names=()):
             path = disk_path(record, key)
             if not os.path.exists(path):
                 return None, "%s: %s does not exist" % (key, path)
+    for key, validator in PLUGIN_FIELDS.items():
+        record[key] = str(data.get(key) or "").strip()
+        if validator:
+            complaint = validator(record[key])
+            if complaint:
+                return None, complaint
     # a machine with no disks at all is fine: it lands in N88 BASIC,
     # which lives in ROM
     return record, None

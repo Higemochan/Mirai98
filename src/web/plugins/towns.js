@@ -7,9 +7,9 @@
 
 // ---- Towns hardware form --------------------------------------------------
 // The stock form is PC-98 shaped (IDE HDD, PC-98 SCSI, board sound, compat
-// BIOS).  For FM TOWNS the machine wires only the built-in CD drive, the
-// built-in sound (FM, PCM and CD-DA playback) and the real ROM set, so we
-// show just those.  SCSI HDD is not emulated yet, so it is absent.
+// BIOS).  For FM TOWNS the machine wires the built-in CD drive, the two
+// internal floppy drives, the SCSI hard disks, the built-in sound (FM, PCM
+// and CD-DA playback) and the real ROM set, so we show just those.
 function townsEditForm(i, h) {
   const note = (t) => ' <span class="note">' + t + '</span>';
   const memOpts = h.MEMS.map(m =>
@@ -18,11 +18,29 @@ function townsEditForm(i, h) {
   const machineOpts = h.machineList().map(m =>
     '<option' + ((i.machine || 'towns') === m ? ' selected' : '') + '>' + m +
     '</option>').join('');
+  const bootOpts = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
+                    ['cd', 'CD-ROM'], ['fd', 'floppy drive A'],
+                    ['hd', 'SCSI hard disk 0']].map(([v, label]) =>
+    '<option value="' + v + '"' + ((i.boot || '') === v ? ' selected' : '') +
+    '>' + label + '</option>').join('');
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', i.cd) +
       note('built-in FM TOWNS CD drive; use a .cue/.bin set (or a .img with ' +
            'a sibling .cue) so the CD-DA audio tracks are kept') + '</div>' +
+    '<div class="row"><label>Floppy A</label>' +
+      h.diskSelect('fdd1', 'fdd', i.fdd1) +
+      note('internal 3-mode drive; raw dump or D77/D88 image') + '</div>' +
+    '<div class="row"><label>Floppy B</label>' +
+      h.diskSelect('fdd2', 'fdd', i.fdd2) + '</div>' +
+    ['scsi1', 'scsi2', 'scsi3', 'scsi4'].map((k, n) =>
+      '<div class="row"><label>SCSI HDD ' + n + '</label>' +
+      h.diskSelect(k, 'hdd', i[k]) +
+      (n === 0 ? note('SCSI ID ' + n + '; a raw image (e.g. a Tsugaru .h0)')
+               : note('SCSI ID ' + n)) + '</div>').join('') +
+    '<div class="row"><label>Boot from</label>' +
+      '<select name="boot">' + bootOpts + '</select>' +
+      note('the key held at power-on for the system ROM') + '</div>' +
     '<div class="row"><label>Machine type</label>' +
       '<select name="machine">' + machineOpts + '</select></div>' +
     '<div class="row"><label>Memory</label>' +
@@ -68,6 +86,16 @@ function townsHardware(i, h) {
   if (i.cd) rows.push(['&#9707; CD-ROM', h.esc(i.cd) +
     ' <span class="note">(built-in FM TOWNS drive, read-only; a .cue ' +
     'beside the image carries the audio tracks)</span>']);
+  if (i.fdd1) rows.push(['&#9707; Floppy A', h.esc(i.fdd1)]);
+  if (i.fdd2) rows.push(['&#9707; Floppy B', h.esc(i.fdd2)]);
+  ['scsi1', 'scsi2', 'scsi3', 'scsi4'].forEach((k, n) => {
+    if (i[k]) rows.push(['&#9707; SCSI HDD ' + n, h.esc(i[k]) +
+      ' <span class="note">(SCSI ID ' + n + ')</span>']);
+  });
+  rows.push(['&#9654; Boot from',
+    {cd: 'CD-ROM', fd: 'floppy drive A', hd: 'SCSI hard disk 0'}[i.boot] ||
+    'ROM order (floppy, CD-ROM, hard disk)']);
+  rows.push(['&#9881; CMOS', 'per-machine towns.cmos (kept beside vm.xml)']);
   if (i.snapshot)
     rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
   if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
