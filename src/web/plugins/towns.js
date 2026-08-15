@@ -107,30 +107,23 @@ function captureRelativePointer(rfb, target) {
     RFB.messages.pointerEvent(rfb._sock,
       (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
   };
-  // With the Keyboard Lock API (Chrome/Edge, secure context) the console
-  // goes fullscreen and locks the Escape key: a SHORT Esc press reaches
-  // the guest (Towns software uses it), and the browser itself turns
-  // press-and-hold Esc into the exit gesture.  Elsewhere a single Esc
-  // still releases the pointer (browser-mandated).
-  const kbLock = !!(navigator.keyboard && navigator.keyboard.lock);
+  // Towns software uses the Escape key, but the browser unconditionally
+  // releases a (non-fullscreen) pointer lock on Esc and swallows the
+  // keydown.  Approximate the intent by press length: on an Esc-forced
+  // release, an Esc KEYUP arriving quickly means a short tap -- forward
+  // an Escape to the guest, the user clicks to recapture -- while a held
+  // Esc (late keyup) just leaves the capture, sending nothing.
+  const HOLD_MS = 700;
+  let intentional = false;   // released by our own cleanup, not by Esc
+  const sendEscToVM = () => {
+    try {
+      rfb.sendKey(0xff1b, 'Escape', true);
+      rfb.sendKey(0xff1b, 'Escape', false);
+    } catch (e) {}
+  };
   const engage = () => {
     const c = canvas();
-    if (!c) return;
-    // Fullscreen and pointer lock must BOTH be requested inside the same
-    // user gesture -- awaiting the fullscreen promise first consumes the
-    // activation and the pointer-lock request is then denied.  Lock the
-    // Escape key once the fullscreen transition has settled.
-    if (kbLock && !document.fullscreenElement) {
-      target.requestFullscreen()
-        .then(() => navigator.keyboard.lock(['Escape']))
-        .catch((e) => console.warn('towns console: fullscreen/kb-lock', e));
-    }
-    c.requestPointerLock();
-  };
-  const onFsChange = () => {
-    if (!document.fullscreenElement && document.pointerLockElement) {
-      document.exitPointerLock();     // Esc held: leave capture entirely
-    }
+    if (c) c.requestPointerLock();
   };
   const onDown = (ev) => {
     if (!locked) {
@@ -155,8 +148,8 @@ function captureRelativePointer(rfb, target) {
     }
   };
   const hint = document.createElement('div');
-  hint.textContent = kbLock ? 'クリックでマウス操作を開始（ESC長押しで解除）'
-                            : 'クリックでマウス操作を開始（Escで解除）';
+  hint.textContent =
+    'クリックでマウス操作（ESC短押し=ゲストへ送信・クリックで再開／ESC長押し=解除）';
   hint.style.cssText = 'position:absolute;left:50%;bottom:8px;' +
     'transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;' +
     'font:12px sans-serif;padding:4px 10px;border-radius:4px;' +
@@ -172,24 +165,35 @@ function captureRelativePointer(rfb, target) {
       // cursor:none; bring a visible host cursor back after Esc.
       const c = canvas();
       if (c) c.style.cursor = 'default';
-      if (kbLock && navigator.keyboard.unlock) navigator.keyboard.unlock();
-      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      if (!intentional) {
+        // Esc released the lock: decide tap vs hold by when the keyup
+        // lands (a held key keeps the keyup away past HOLD_MS).
+        const t0 = performance.now();
+        const onEscUp = (ev) => {
+          if (ev.key !== 'Escape') return;
+          document.removeEventListener('keyup', onEscUp, true);
+          if (performance.now() - t0 < HOLD_MS) {
+            sendEscToVM();
+          }
+        };
+        document.addEventListener('keyup', onEscUp, true);
+        setTimeout(() => {
+          document.removeEventListener('keyup', onEscUp, true);
+        }, 3000);
+      }
     }
   };
   document.addEventListener('mousedown', onDown, true);
   document.addEventListener('mouseup', onUp, true);
   document.addEventListener('mousemove', onMove, true);
   document.addEventListener('pointerlockchange', onLock);
-  document.addEventListener('fullscreenchange', onFsChange);
   return () => {
     document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('mouseup', onUp, true);
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('pointerlockchange', onLock);
-    document.removeEventListener('fullscreenchange', onFsChange);
+    intentional = true;
     if (document.pointerLockElement) document.exitPointerLock();
-    if (kbLock && navigator.keyboard.unlock) navigator.keyboard.unlock();
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     hint.remove();
   };
 }
