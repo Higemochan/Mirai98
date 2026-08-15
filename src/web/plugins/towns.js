@@ -107,9 +107,31 @@ function captureRelativePointer(rfb, target) {
     RFB.messages.pointerEvent(rfb._sock,
       (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
   };
+  // With the Keyboard Lock API (Chrome/Edge, secure context) the console
+  // goes fullscreen and locks the Escape key: a SHORT Esc press reaches
+  // the guest (Towns software uses it), and the browser itself turns
+  // press-and-hold Esc into the exit gesture.  Elsewhere a single Esc
+  // still releases the pointer (browser-mandated).
+  const kbLock = !!(navigator.keyboard && navigator.keyboard.lock);
+  const engage = async () => {
+    const c = canvas();
+    if (!c) return;
+    if (kbLock && !document.fullscreenElement) {
+      try {
+        await target.requestFullscreen();
+        await navigator.keyboard.lock(['Escape']);
+      } catch (e) { /* fall back to plain pointer lock */ }
+    }
+    c.requestPointerLock();
+  };
+  const onFsChange = () => {
+    if (!document.fullscreenElement && document.pointerLockElement) {
+      document.exitPointerLock();     // Esc held: leave capture entirely
+    }
+  };
   const onDown = (ev) => {
     if (!locked) {
-      if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
+      if (target.contains(ev.target)) { engage(); }
       return;
     }
     mask |= (1 << ev.button); send(0, 0, mask); ev.preventDefault(); ev.stopPropagation();
@@ -130,7 +152,8 @@ function captureRelativePointer(rfb, target) {
     }
   };
   const hint = document.createElement('div');
-  hint.textContent = 'クリックでマウス操作を開始（Escで解除）';
+  hint.textContent = kbLock ? 'クリックでマウス操作を開始（ESC長押しで解除）'
+                            : 'クリックでマウス操作を開始（Escで解除）';
   hint.style.cssText = 'position:absolute;left:50%;bottom:8px;' +
     'transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;' +
     'font:12px sans-serif;padding:4px 10px;border-radius:4px;' +
@@ -146,18 +169,24 @@ function captureRelativePointer(rfb, target) {
       // cursor:none; bring a visible host cursor back after Esc.
       const c = canvas();
       if (c) c.style.cursor = 'default';
+      if (kbLock && navigator.keyboard.unlock) navigator.keyboard.unlock();
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     }
   };
   document.addEventListener('mousedown', onDown, true);
   document.addEventListener('mouseup', onUp, true);
   document.addEventListener('mousemove', onMove, true);
   document.addEventListener('pointerlockchange', onLock);
+  document.addEventListener('fullscreenchange', onFsChange);
   return () => {
     document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('mouseup', onUp, true);
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('pointerlockchange', onLock);
+    document.removeEventListener('fullscreenchange', onFsChange);
     if (document.pointerLockElement) document.exitPointerLock();
+    if (kbLock && navigator.keyboard.unlock) navigator.keyboard.unlock();
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     hint.remove();
   };
 }
