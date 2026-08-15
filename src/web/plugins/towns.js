@@ -47,28 +47,6 @@ function townsEditForm(i, h) {
       (i.running ? ' disabled' : '') + '>Delete</button></div></form>';
 }
 
-// ---- Towns hardware view --------------------------------------------------
-// The read-only "Hardware configuration" table.  The stock rows describe a
-// PC-98 (compat/real BIOS, a sound board, an IDE CD-ROM); the Towns machine
-// ignores the bios/sound fields altogether -- it always boots the real ROM
-// set with the on-board sound -- so say what really runs.
-function townsHardware(i, h) {
-  const rows = [
-    ['&#9636; Memory', h.esc(i.memory)],
-    ['&#9881; Machine', h.esc(i.machine || 'towns') + ' (TCG)'],
-    ['&#9750; BIOS', 'FM TOWNS real ROM set'],
-    ['&#9834; Sound', 'built-in YM2612 FM + RF5C68 PCM, CD-DA'],
-    ['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
-     ', websocket ' + i.ports[1]]];
-  if (i.cd) rows.push(['&#9707; CD-ROM', h.esc(i.cd) +
-    ' <span class="note">(built-in FM TOWNS drive, read-only; a .cue ' +
-    'beside the image carries the audio tracks)</span>']);
-  if (i.snapshot)
-    rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
-  if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
-  return { rows, bios: 'FM TOWNS real ROM set' };
-}
-
 // ---- relative-pointer capture (only for a Towns console) ------------------
 // QEMU's VNC turns each absolute pointer event into a delta from the last
 // one, which stalls at the canvas edge; instead we ask for QEMU's relative
@@ -129,27 +107,9 @@ function captureRelativePointer(rfb, target) {
     RFB.messages.pointerEvent(rfb._sock,
       (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
   };
-  // Towns software uses the Escape key, but the browser unconditionally
-  // releases a (non-fullscreen) pointer lock on Esc and swallows the
-  // keydown.  Approximate the intent by press length: on an Esc-forced
-  // release, an Esc KEYUP arriving quickly means a short tap -- forward
-  // an Escape to the guest, the user clicks to recapture -- while a held
-  // Esc (late keyup) just leaves the capture, sending nothing.
-  const HOLD_MS = 700;
-  let intentional = false;   // released by our own cleanup, not by Esc
-  const sendEscToVM = () => {
-    try {
-      rfb.sendKey(0xff1b, 'Escape', true);
-      rfb.sendKey(0xff1b, 'Escape', false);
-    } catch (e) {}
-  };
-  const engage = () => {
-    const c = canvas();
-    if (c) c.requestPointerLock();
-  };
   const onDown = (ev) => {
     if (!locked) {
-      if (target.contains(ev.target)) { engage(); }
+      if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
       return;
     }
     mask |= (1 << ev.button); send(0, 0, mask); ev.preventDefault(); ev.stopPropagation();
@@ -170,8 +130,7 @@ function captureRelativePointer(rfb, target) {
     }
   };
   const hint = document.createElement('div');
-  hint.textContent =
-    'クリックでマウス操作（ESC短押し=ゲストへ送信・クリックで再開／ESC長押し=解除）';
+  hint.textContent = 'クリックでマウス操作を開始（Escで解除）';
   hint.style.cssText = 'position:absolute;left:50%;bottom:8px;' +
     'transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;' +
     'font:12px sans-serif;padding:4px 10px;border-radius:4px;' +
@@ -187,22 +146,6 @@ function captureRelativePointer(rfb, target) {
       // cursor:none; bring a visible host cursor back after Esc.
       const c = canvas();
       if (c) c.style.cursor = 'default';
-      if (!intentional) {
-        // Esc released the lock: decide tap vs hold by when the keyup
-        // lands (a held key keeps the keyup away past HOLD_MS).
-        const t0 = performance.now();
-        const onEscUp = (ev) => {
-          if (ev.key !== 'Escape') return;
-          document.removeEventListener('keyup', onEscUp, true);
-          if (performance.now() - t0 < HOLD_MS) {
-            sendEscToVM();
-          }
-        };
-        document.addEventListener('keyup', onEscUp, true);
-        setTimeout(() => {
-          document.removeEventListener('keyup', onEscUp, true);
-        }, 3000);
-      }
     }
   };
   document.addEventListener('mousedown', onDown, true);
@@ -214,7 +157,6 @@ function captureRelativePointer(rfb, target) {
     document.removeEventListener('mouseup', onUp, true);
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('pointerlockchange', onLock);
-    intentional = true;
     if (document.pointerLockElement) document.exitPointerLock();
     hint.remove();
   };
@@ -228,7 +170,6 @@ window.registerMachinePlugin({
   },
   badge: { towns: 'TOWNS' },
   editForm: { towns: townsEditForm },
-  hardware: { towns: townsHardware },
   // decided synchronously from the consolePrep result: by the time the
   // console hook runs the machine kind is already known, so the capture
   // is in place before the first pointer event (the old fetch-here-async
