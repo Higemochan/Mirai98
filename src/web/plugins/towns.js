@@ -18,8 +18,9 @@ function townsEditForm(i, h) {
     '<option' + (i.memory === m ? ' selected' : '') + '>' + m + '</option>'
   ).join('');
   const machineOpts = h.machineList().map(m =>
-    '<option' + ((i.machine || 'towns') === m ? ' selected' : '') + '>' + m +
-    '</option>').join('');
+    '<option value="' + m + '"' +
+    ((i.machine || 'towns') === m ? ' selected' : '') + '>' +
+    h.esc(h.machineLabel ? h.machineLabel(m) : m) + '</option>').join('');
   const bootOpts = TOWNS_BOOTS.map(([v, label]) =>
     '<option value="' + v + '"' + ((i.boot || '') === v ? ' selected' : '') +
     '>' + label + '</option>').join('');
@@ -294,6 +295,8 @@ window.registerMachinePlugin({
              lockSound: true, lockBios: true }
   },
   badge: { towns: 'TOWNS' },
+  // the model the machine reports (ID 0x0c/0x02 = TOWNS II MX, i486)
+  labels: { towns: 'FM TOWNS II MX (i486)' },
   editForm: { towns: townsEditForm },
   hardware: { towns: townsHardware },
   // Storage "Create": FM TOWNS floppy layouts (empty FAT12, as the Towns

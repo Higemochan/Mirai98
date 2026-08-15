@@ -12,7 +12,7 @@ const loadRFB = async () => RFB ||
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
-    hardware: {}, wizard: {}, diskFormats: {} };
+    hardware: {}, wizard: {}, diskFormats: {}, labels: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -24,6 +24,8 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.hardware, p.hardware || {});   // per-machine hardware view
   P.wizard = P.wizard || {};
   Object.assign(P.wizard, p.wizard || {});       // per-machine create wizard
+  P.labels = P.labels || {};
+  Object.assign(P.labels, p.labels || {});       // machine id -> shown name
   P.diskFormats = P.diskFormats || {};           // Storage "Create" formats
   for (const kind of Object.keys(p.diskFormats || {})) {
     P.diskFormats[kind] = (P.diskFormats[kind] || []).concat(p.diskFormats[kind]);
@@ -34,6 +36,10 @@ window.registerMachinePlugin = (p) => {
 };
 // the machine ids offered in the create form: core PC-98 plus any plugin
 const machineList = () => ['pc9821', 'pc9801'].concat(window.MiraiPlugins.machines);
+// how a machine id reads in a select, at the PC-98 entries' grain
+const MACHINE_LABELS = { pc9821: 'PC-9821 (386 and later)',
+                         pc9801: 'PC-9801 (the older line)' };
+const machineLabel = m => window.MiraiPlugins.labels[m] || MACHINE_LABELS[m] || m;
 // a machine's cell in the list, with a plugin badge if it registered one
 const machineBadge = (m) => {
   const b = window.MiraiPlugins.badge[m || 'pc9821'];
@@ -685,7 +691,7 @@ function editForm(i) {
   // needs); otherwise the stock PC-98 form below is used
   const custom = window.MiraiPlugins.editForm[i.machine];
   if (custom) {
-    return custom(i, { esc, diskSelect, machineList, MEMS });
+    return custom(i, { esc, diskSelect, machineList, machineLabel, MEMS });
   }
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     DISK_ROWS.map(([k, label, kind]) =>
@@ -693,9 +699,9 @@ function editForm(i) {
       diskSelect(k, kind, i[k]) + '</div>').join('') +
     '<div class="row"><label>Machine type</label>' +
     '<select name="machine" onchange="applyMachineDefaults(this)">' +
-    machineList().map(m => '<option' +
-      ((i.machine || 'pc9821') === m ? ' selected' : '') + '>' + m +
-      '</option>').join('') + '</select></div>' +
+    machineList().map(m => '<option value="' + m + '"' +
+      ((i.machine || 'pc9821') === m ? ' selected' : '') + '>' +
+      esc(machineLabel(m)) + '</option>').join('') + '</select></div>' +
     '<div class="row"><label>Shared folder</label>' +
     '<input type="text" name="mount" value="' + esc(i.mount || '') +
     '" placeholder="/data/share"> <span class="note">appears as an IDE ' +
@@ -1681,6 +1687,10 @@ function wizardHelpers() {
   return { esc, diskSelect, MEMS,
            note: t => ' <span class="note">' + t + '</span>' };
 }
+// which panes currently show a plugin's HTML (only those are put back:
+// redrawing a stock pane would reset its inputs - the machine select in
+// General among them)
+const customPanes = new Set();
 function applyWizardMachine(machine) {
   const w = window.MiraiPlugins.wizard[machine];
   hiddenTabs = new Set();
@@ -1689,11 +1699,16 @@ function applyWizardMachine(machine) {
     const custom = w && w.panes ? w.panes[name] : undefined;
     if (custom === null) {
       hiddenTabs.add(name);
-      p.innerHTML = stockPanes[name] || '';
+      if (customPanes.has(name)) {
+        p.innerHTML = stockPanes[name] || '';
+        customPanes.delete(name);
+      }
     } else if (typeof custom === 'function') {
       p.innerHTML = custom(wizardHelpers());
-    } else if (name in stockPanes) {
-      p.innerHTML = stockPanes[name];
+      customPanes.add(name);
+    } else if (customPanes.has(name)) {
+      p.innerHTML = stockPanes[name] || '';
+      customPanes.delete(name);
     }
   });
   drawTabs();
@@ -1770,8 +1785,10 @@ window.openCreate = () => {
   // back to the stock panes first: the ids below must exist even if the
   // wizard was last shown for a plugin machine
   document.querySelectorAll('#wizard .pane').forEach(p => {
-    if (p.dataset.pane in stockPanes) p.innerHTML = stockPanes[p.dataset.pane];
+    if (customPanes.has(p.dataset.pane))
+      p.innerHTML = stockPanes[p.dataset.pane];
   });
+  customPanes.clear();
   hiddenTabs = new Set();
   document.getElementById('pane-disks').innerHTML = DISK_ROWS.map(
     ([k, label, kind]) => '<div class="row"><label>' + label + '</label>' +
@@ -1795,7 +1812,7 @@ window.openCreate = () => {
     window.MiraiPlugins.machines.forEach(m => {
       if (![...msel.options].some(o => o.value === m)) {
         const o = document.createElement('option');
-        o.value = m; o.textContent = m;
+        o.value = m; o.textContent = machineLabel(m);
         msel.appendChild(o);
       }
     });
