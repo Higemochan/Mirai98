@@ -177,7 +177,14 @@ function townsWizardMemory(h) {
     'and most titles: 4M to 8M; Windows 3.1: 16M or more.</div>';
 }
 function townsWizardOptions(h) {
-  return '<div class="row"><label>Boot from</label><select name="boot">' +
+  return '<div class="row"><label>MIDI</label><select name="midi">' +
+    TOWNS_MIDI.map(([v, label]) => '<option value="' + v + '"' +
+      (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
+    '</select>' +
+    h.note('the MT-402/403 card; its music is mixed into the machine sound. ' +
+           'A few titles will not run with a card fitted, so it is left out ' +
+           'unless asked for') + '</div>' +
+    '<div class="row"><label>Boot from</label><select name="boot">' +
     TOWNS_BOOTS.map(([v, label]) => '<option value="' + v + '"' +
       (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
     '</select>' + h.note('the key held at power-on for the system ROM') +
@@ -197,6 +204,7 @@ function townsWizardConfirm(v, h) {
                 ['BIOS', TOWNS_BIOS],
                 ['Memory', h.esc(v.memory)],
                 ['Sound', TOWNS_SOUND],
+                ['MIDI', townsMidiLabel(v.midi)],
                 ['Boot from', townsBootLabel(v.boot)],
                 ['CMOS seed', townsCmosLabel(v.cmos)],
                 ['Snapshot', v.snapshot ? 'yes' : 'no']];
