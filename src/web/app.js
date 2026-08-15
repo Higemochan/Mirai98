@@ -35,13 +35,13 @@ window.registerMachinePlugin = (p) => {
 // the machine ids offered in the create form: core PC-98 plus any plugin
 const machineList = () => ['pc9821', 'pc9801'].concat(window.MiraiPlugins.machines);
 // a machine's cell in the list, with a plugin badge if it registered one
-const machineCell = (m) => {
-  m = m || 'pc9821';
-  const b = window.MiraiPlugins.badge[m];
-  return esc(m) + (b ? ' <span style="display:inline-block;padding:0 .4em;' +
+const machineBadge = (m) => {
+  const b = window.MiraiPlugins.badge[m || 'pc9821'];
+  return b ? ' <span style="display:inline-block;padding:0 .4em;' +
     'border-radius:.3em;background:#7a3cff;color:#fff;font-size:.8em;' +
-    'vertical-align:middle">' + esc(b) + '</span>' : '');
+    'vertical-align:middle">' + esc(b) + '</span>' : '';
 };
+const machineCell = (m) => esc(m || 'pc9821') + machineBadge(m);
 // apply a plugin machine's create defaults when the type changes (a core
 // PC-98 machine just re-enables the board and BIOS choices)
 window.applyMachineDefaults = (sel) => {
@@ -422,8 +422,9 @@ function drawTree() {
     '<div class="group">Virtual machines <span class="count">(' +
     instances.length + ', ' + running + ' on)</span></div>' +
     link('#/vms', '&#9776; All machines') +
+    // a plugin machine carries its badge here too, as in the list
     instances.map(i => link('#/vm/' + i.name,
-        '<span class="dot"></span>' + esc(i.name),
+        '<span class="dot"></span>' + esc(i.name) + machineBadge(i.machine),
         i.running ? 'run' : '')).join('');
 }
 
