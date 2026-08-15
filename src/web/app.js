@@ -11,7 +11,8 @@ const loadRFB = async () => RFB ||
 // the create form, per-machine create defaults, a list badge, and an optional
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
-  { machines: [], defaults: {}, badge: {}, console: [], editForm: {} };
+  { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
+    hardware: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -19,6 +20,8 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
+  P.hardware = P.hardware || {};
+  Object.assign(P.hardware, p.hardware || {});   // per-machine hardware view
   if (p.console) P.console.push(p.console);
   if (p.consolePrep) P.consolePrep.push(p.consolePrep);
   lastList = '';   // a new machine/badge must invalidate the cached VM list
@@ -601,6 +604,10 @@ function portRows(i) {
 // Proxmox lays hardware out as a table of what the machine actually has;
 // the same rows become a form once Edit is pressed
 function hardwareTable(i) {
+  // a machine plugin may describe its own hardware (what its emulation
+  // actually wires); otherwise the stock PC-98 rows below are shown
+  const custom = window.MiraiPlugins.hardware[i.machine];
+  if (custom) return hardwareRows(custom(i, { esc }).rows);
   const rows = [['&#9636; Memory', esc(i.memory)],
                 ['&#9881; Machine', esc(i.machine || 'pc9821') + ' (' +
                  (i.accel === 'tcg' ? 'TCG'
@@ -629,9 +636,18 @@ function hardwareTable(i) {
   if (i.snapshot)
     rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
   if (i.extra) rows.push(['&#9656; Extra args', esc(i.extra)]);
+  return hardwareRows(rows);
+}
+function hardwareRows(rows) {
   return '<table>' + rows.map(([k, v]) =>
     '<tr><td style="width:13em;color:#8b9298">' + k + '</td><td>' + v +
     '</td></tr>').join('') + '</table>';
+}
+// the one-line BIOS summary; a machine plugin may name its own ROM set
+function biosLabel(i) {
+  const custom = window.MiraiPlugins.hardware[i.machine];
+  const b = custom && custom(i, { esc }).bios;
+  return b || (i.bios === 'real' ? 'real machine ROMs' : 'compatible');
 }
 
 function editForm(i) {
@@ -916,8 +932,7 @@ async function detailView(name) {
         'powered off</div>') + '</div>' +
     '<div style="flex:1;min-width:18em"><dl>' +
     '<dt>Machine type</dt><dd>' + esc(i.machine || 'pc9821') + '</dd>' +
-    '<dt>BIOS</dt><dd>' + (i.bios === 'real' ? 'real machine ROMs'
-                                             : 'compatible') + '</dd>' +
+    '<dt>BIOS</dt><dd>' + biosLabel(i) + '</dd>' +
     '<dt>Acceleration</dt><dd>' + (i.accel === 'tcg' ? 'TCG'
                      : 'KVM (Experimental)') + '</dd>' +
     '<dt>Memory</dt><dd>' + esc(i.memory) + '</dd>' +
