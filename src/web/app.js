@@ -12,7 +12,7 @@ const loadRFB = async () => RFB ||
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
-    hardware: {} };
+    hardware: {}, wizard: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -22,6 +22,8 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
   P.hardware = P.hardware || {};
   Object.assign(P.hardware, p.hardware || {});   // per-machine hardware view
+  P.wizard = P.wizard || {};
+  Object.assign(P.wizard, p.wizard || {});       // per-machine create wizard
   if (p.console) P.console.push(p.console);
   if (p.consolePrep) P.consolePrep.push(p.consolePrep);
   lastList = '';   // a new machine/badge must invalidate the cached VM list
@@ -41,6 +43,8 @@ const machineCell = (m) => {
 window.applyMachineDefaults = (sel) => {
   const form = sel.form;
   const d = window.MiraiPlugins.defaults[sel.value];
+  // in the create wizard a plugin machine may replace or hide whole tabs
+  if (form.id === 'wizard') applyWizardMachine(sel.value);
   if (form.sound) form.sound.disabled = !!(d && d.lockSound);
   if (form.bios) form.bios.disabled = !!(d && d.lockBios);
   // a locked choice says what the machine really has instead (the plugin's
@@ -1546,20 +1550,49 @@ window.memType = el => {
   const i = MEMS.indexOf(el.value.trim().toUpperCase());
   if (i >= 0) document.getElementById('mem-range').value = i;
 };
+// A plugin machine may hand the wizard its own panes (wizard.panes[name]:
+// a function returning the pane's HTML, or null to hide the tab) and its
+// own confirmation rows; the stock PC-98 panes are kept to swap back.
+let hiddenTabs = new Set();
+const stockPanes = {};
+const visibleTabs = () => TABS.filter(t => !hiddenTabs.has(t));
+function wizardHelpers() {
+  return { esc, diskSelect, MEMS,
+           note: t => ' <span class="note">' + t + '</span>' };
+}
+function applyWizardMachine(machine) {
+  const w = window.MiraiPlugins.wizard[machine];
+  hiddenTabs = new Set();
+  document.querySelectorAll('#wizard .pane').forEach(p => {
+    const name = p.dataset.pane;
+    const custom = w && w.panes ? w.panes[name] : undefined;
+    if (custom === null) {
+      hiddenTabs.add(name);
+      p.innerHTML = stockPanes[name] || '';
+    } else if (typeof custom === 'function') {
+      p.innerHTML = custom(wizardHelpers());
+    } else if (name in stockPanes) {
+      p.innerHTML = stockPanes[name];
+    }
+  });
+  drawTabs();
+}
 function drawTabs() {
-  document.getElementById('tabs').innerHTML = TABS.map((t, n) =>
+  const tabs = visibleTabs();
+  if (tab >= tabs.length) tab = tabs.length - 1;
+  document.getElementById('tabs').innerHTML = tabs.map((t, n) =>
     '<span class="' + (n === tab ? 'on' : '') + '" onclick="tabGo(' + n +
     ')">' + t + '</span>').join('');
-  document.querySelectorAll('#wizard .pane').forEach((p, n) =>
-    p.classList.toggle('on', n === tab));
+  document.querySelectorAll('#wizard .pane').forEach(p =>
+    p.classList.toggle('on', p.dataset.pane === tabs[tab]));
   document.getElementById('btn-back').disabled = tab === 0;
-  const last = tab === TABS.length - 1;
+  const last = tab === tabs.length - 1;
   document.getElementById('btn-next').style.display = last ? 'none' : '';
   document.getElementById('btn-finish').style.display = last ? '' : 'none';
   if (last) drawConfirm();
 }
 window.tabGo = n => { tab = n; drawTabs(); };
-window.tabStep = d => { tab = Math.max(0, Math.min(TABS.length - 1,
+window.tabStep = d => { tab = Math.max(0, Math.min(visibleTabs().length - 1,
                                                    tab + d));
                         drawTabs(); };
 function wizardValues() {
@@ -1568,13 +1601,21 @@ function wizardValues() {
   for (const el of form.elements)
     if (el.name) out[el.name] = el.type === 'checkbox' ? el.checked
                                                        : el.value.trim();
-  out.accel = out.kvm === false ? 'tcg' : 'kvm';
+  out.accel = out.kvm ? 'kvm' : 'tcg';   // no checkbox (plugin pane): TCG
   delete out.kvm;
   return out;
 }
 function drawConfirm() {
   const v = wizardValues();
   const anyDisk = DISK_ROWS.some(([k]) => v[k]);
+  const w = window.MiraiPlugins.wizard[v.machine];
+  if (w && w.confirm) {
+    document.getElementById('confirm-table').innerHTML = '<table>' +
+      w.confirm(v, wizardHelpers()).map(([k, val]) =>
+        '<tr><td style="width:11em;color:#8b9298">' + k + '</td><td>' +
+        val + '</td></tr>').join('') + '</table>';
+    return;
+  }
   const hw = window.MiraiPlugins.hardware[v.machine];
   const desc = hw ? hw(v, { esc }) : {};
   const rows = [['Name', v.name || '(unnamed)'],
@@ -1605,6 +1646,12 @@ function drawConfirm() {
       '</td><td>' + esc(x) + '</td></tr>').join('') + '</table>';
 }
 window.openCreate = () => {
+  // back to the stock panes first: the ids below must exist even if the
+  // wizard was last shown for a plugin machine
+  document.querySelectorAll('#wizard .pane').forEach(p => {
+    if (p.dataset.pane in stockPanes) p.innerHTML = stockPanes[p.dataset.pane];
+  });
+  hiddenTabs = new Set();
   document.getElementById('pane-disks').innerHTML = DISK_ROWS.map(
     ([k, label, kind]) => '<div class="row"><label>' + label + '</label>' +
     diskSelect(k, kind, '') + '</div>').join('') +
@@ -1617,6 +1664,10 @@ window.openCreate = () => {
   document.getElementById('mem-text').value = '64M';
   document.getElementById('wizard').reset();
   document.getElementById('mem-text').value = '64M';
+  // remember the stock panes as freshly drawn (the disk lists are live)
+  document.querySelectorAll('#wizard .pane').forEach(p => {
+    stockPanes[p.dataset.pane] = p.innerHTML;
+  });
   // let plugins add their machine types to the (static) create form select
   const msel = document.querySelector('#wizard select[name="machine"]');
   if (msel) {

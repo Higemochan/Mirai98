@@ -30,6 +30,26 @@ def register(api):
     api.machine_argv("towns", lambda inst: towns_argv(api, inst))
     api.add_field("boot", lambda v: None if v in BOOT_KEYS
                   else "boot must be empty, cd, fd or hd")
+    api.machine_sanitize("towns", towns_sanitize)
+
+
+def towns_sanitize(record):
+    """What a TOWNS record may hold: the PC-98-only settings are dropped
+    (they would be stored but never used), memory must suit the machine
+    (2 MiB or more, whole MiB) and it always runs under TCG."""
+    for key in ("hdd1", "hdd2", "mount", "net", "serial", "parallel", "gpib"):
+        record[key] = ""
+    record["bios"] = "real"
+    record["sound"] = "none"
+    record["accel"] = "tcg"
+    mem = record["memory"].upper()
+    units = {"K": 1, "M": 1024, "G": 1024 * 1024}
+    if not mem or mem[-1] not in units or not mem[:-1].isdigit():
+        return "memory must be like 4M or 16M"
+    kib = int(mem[:-1]) * units[mem[-1]]
+    if kib < 2048 or kib % 1024:
+        return "FM TOWNS memory must be 2M or more, in whole megabytes"
+    return None
 
 
 def towns_cmos(api, inst, towns_roms):
@@ -78,8 +98,12 @@ def towns_argv(api, inst):
             "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
     if inst.get("snapshot"):
         argv.append("-snapshot")
+    # the built-in CD-ROM drive always exists (empty tray without an image)
+    # so a disc can be put in from the Media row while the machine runs
+    cd = "if=ide,index=2,media=cdrom"
     if inst.get("cd"):
-        argv += ["-cdrom", api.win_short(api.disk_path(inst, "cd"))]
+        cd += ",format=raw,file=%s" % api.win_short(api.disk_path(inst, "cd"))
+    argv += ["-drive", cd]
     # both internal floppy drives always exist (so a disk can be put in
     # from the Media row while the machine runs); an image is a raw dump
     # or a D77/D88 file, told apart by the emulated controller

@@ -12,15 +12,15 @@
 // and CD-DA playback) and the real ROM set, so we show just those.
 function townsEditForm(i, h) {
   const note = (t) => ' <span class="note">' + t + '</span>';
-  const memOpts = h.MEMS.map(m =>
+  const mems = TOWNS_MEMS.includes(i.memory) ? TOWNS_MEMS
+                                              : TOWNS_MEMS.concat([i.memory]);
+  const memOpts = mems.map(m =>
     '<option' + (i.memory === m ? ' selected' : '') + '>' + m + '</option>'
   ).join('');
   const machineOpts = h.machineList().map(m =>
     '<option' + ((i.machine || 'towns') === m ? ' selected' : '') + '>' + m +
     '</option>').join('');
-  const bootOpts = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
-                    ['cd', 'CD-ROM'], ['fd', 'floppy drive A'],
-                    ['hd', 'SCSI hard disk 0']].map(([v, label]) =>
+  const bootOpts = TOWNS_BOOTS.map(([v, label]) =>
     '<option value="' + v + '"' + ((i.boot || '') === v ? ' selected' : '') +
     '>' + label + '</option>').join('');
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
@@ -92,14 +92,84 @@ function townsHardware(i, h) {
     if (i[k]) rows.push(['&#9707; SCSI HDD ' + n, h.esc(i[k]) +
       ' <span class="note">(SCSI ID ' + n + ')</span>']);
   });
-  rows.push(['&#9654; Boot from',
-    {cd: 'CD-ROM', fd: 'floppy drive A', hd: 'SCSI hard disk 0'}[i.boot] ||
-    'ROM order (floppy, CD-ROM, hard disk)']);
+  rows.push(['&#9654; Boot from', townsBootLabel(i.boot)]);
   rows.push(['&#9881; CMOS', 'per-machine towns.cmos (kept beside vm.xml)']);
   if (i.snapshot)
     rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
   if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
   return { rows, bios: TOWNS_BIOS, sound: TOWNS_SOUND };
+}
+
+// ---- Towns create wizard --------------------------------------------------
+// What the emulation actually wires, and nothing PC-98 shaped: the disks
+// tab lists the built-in CD drive, the two floppy drives and the SCSI
+// disks; Host (fat98 share, serial, parallel, GP-IB) and Network (LGY-98)
+// have no TOWNS counterpart and are hidden; memory is the MX range; the
+// options tab carries the boot device instead of KVM (TCG only).
+const TOWNS_MEMS = ['2M', '4M', '6M', '8M', '16M', '32M', '64M'];
+const TOWNS_BOOTS = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
+                     ['cd', 'CD-ROM'], ['fd', 'floppy drive A'],
+                     ['hd', 'SCSI hard disk 0']];
+const townsBootLabel = v =>
+  (TOWNS_BOOTS.find(([k]) => k === (v || '')) || TOWNS_BOOTS[0])[1];
+
+function townsWizardDisks(h) {
+  return '<div class="row"><label>CD-ROM</label>' +
+      h.diskSelect('cd', 'cdrom', '') +
+      h.note('built-in drive; a .cue/.bin set (or a .img with a sibling ' +
+             '.cue) keeps the CD-DA tracks') + '</div>' +
+    '<div class="row"><label>Floppy A</label>' +
+      h.diskSelect('fdd1', 'fdd', '') +
+      h.note('internal 3-mode drive; raw dump or D77/D88 image') + '</div>' +
+    '<div class="row"><label>Floppy B</label>' +
+      h.diskSelect('fdd2', 'fdd', '') + '</div>' +
+    ['scsi1', 'scsi2', 'scsi3', 'scsi4'].map((k, n) =>
+      '<div class="row"><label>SCSI HDD ' + n + '</label>' +
+      h.diskSelect(k, 'hdd', '') +
+      (n === 0 ? h.note('SCSI ID 0; a raw image (e.g. a Tsugaru .h0)')
+               : h.note('SCSI ID ' + n)) + '</div>').join('') +
+    '<div class="note">Images live in Storage. Disks can be changed while ' +
+    'the machine runs from its Media row. With no disk the system ROM ' +
+    'waits for one (システムをセットしてください).</div>';
+}
+function townsWizardMemory(h) {
+  return '<div class="row"><label>Memory</label><select name="memory">' +
+    TOWNS_MEMS.map(m => '<option' + (m === '16M' ? ' selected' : '') + '>' +
+                   m + '</option>').join('') + '</select></div>' +
+    '<div class="note">FM TOWNS II MX: 4M as shipped, up to 64M. Towns OS ' +
+    'and most titles: 4M to 8M; Windows 3.1: 16M or more.</div>';
+}
+function townsWizardOptions(h) {
+  return '<div class="row"><label>Boot from</label><select name="boot">' +
+    TOWNS_BOOTS.map(([v, label]) => '<option value="' + v + '"' +
+      (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
+    '</select>' + h.note('the key held at power-on for the system ROM') +
+    '</div>' +
+    '<div class="row"><label>Extra QEMU args</label>' +
+    '<input type="text" name="extra" style="min-width:24em"></div>' +
+    '<div class="note">Appended to the command line as typed. The machine ' +
+    'runs under TCG; its CMOS (SETUP settings) is kept per machine.</div>';
+}
+function townsWizardConfirm(v, h) {
+  const rows = [['Name', h.esc(v.name || '(unnamed)')],
+                ['Machine type', 'towns (FM TOWNS II MX)'],
+                ['BIOS', TOWNS_BIOS],
+                ['Memory', h.esc(v.memory)],
+                ['Sound', TOWNS_SOUND],
+                ['Boot from', townsBootLabel(v.boot)],
+                ['Snapshot', v.snapshot ? 'yes' : 'no']];
+  if (v.cd) rows.push(['CD-ROM', h.esc(v.cd)]);
+  if (v.fdd1) rows.push(['Floppy A', h.esc(v.fdd1)]);
+  if (v.fdd2) rows.push(['Floppy B', h.esc(v.fdd2)]);
+  ['scsi1', 'scsi2', 'scsi3', 'scsi4'].forEach((k, n) => {
+    if (v[k]) rows.push(['SCSI HDD ' + n, h.esc(v[k])]);
+  });
+  if (v.extra) rows.push(['Extra args', h.esc(v.extra)]);
+  if (!v.cd && !v.fdd1 && !v.fdd2 && !v.scsi1 && !v.scsi2 && !v.scsi3 &&
+      !v.scsi4) {
+    rows.push(['Disks', 'none - the system ROM will wait for a disk']);
+  }
+  return rows;
 }
 
 // ---- relative-pointer capture (only for a Towns console) ------------------
@@ -226,6 +296,10 @@ window.registerMachinePlugin({
   badge: { towns: 'TOWNS' },
   editForm: { towns: townsEditForm },
   hardware: { towns: townsHardware },
+  wizard: { towns: { panes: { Disks: townsWizardDisks, Host: null,
+                              Memory: townsWizardMemory, Network: null,
+                              Options: townsWizardOptions },
+                     confirm: townsWizardConfirm } },
   // decided synchronously from the consolePrep result: by the time the
   // console hook runs the machine kind is already known, so the capture
   // is in place before the first pointer event (the old fetch-here-async

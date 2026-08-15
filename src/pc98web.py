@@ -167,6 +167,9 @@ MACHINE_ARGV = {}
 # they ride through sanitize()/save_instance()/load_instance() untouched
 # otherwise, so a machine type may keep settings of its own in vm.xml
 PLUGIN_FIELDS = {}
+# machine name -> fn(record) -> complaint | None; runs last in sanitize() and
+# may trim or refuse what makes no sense for that machine
+MACHINE_SANITIZE = {}
 
 
 class PluginAPI:
@@ -197,6 +200,10 @@ class PluginAPI:
 
     def machine_argv(self, name, builder):
         MACHINE_ARGV[name] = builder
+
+    def machine_sanitize(self, name, fn):
+        """A final check/trim of an instance record for this machine."""
+        MACHINE_SANITIZE[name] = fn
 
     def add_field(self, name, validator=None):
         """Declare an instance field of the plugin's own (kept in vm.xml)."""
@@ -643,6 +650,10 @@ def sanitize(data, taken_names=()):
             complaint = validator(record[key])
             if complaint:
                 return None, complaint
+    if record["machine"] in MACHINE_SANITIZE:
+        complaint = MACHINE_SANITIZE[record["machine"]](record)
+        if complaint:
+            return None, complaint
     # a machine with no disks at all is fine: it lands in N88 BASIC,
     # which lives in ROM
     return record, None
