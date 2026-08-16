@@ -27,7 +27,8 @@ BOOT_KEYS = {"": None, "cd": "CD", "fd": "F0", "hd": "H0"}
 # the MIDI card is off unless asked for: a few titles will not run with
 # one fitted.  "synth" renders what the card is sent with a SoundFont
 # and mixes it into the machine's sound, which is what reaches the
-# browser over the console connection.
+# browser over the console connection.  The field itself is the core's
+# (pc98web.MIDI_MODES); what a machine fits for it is its own business.
 MIDI_MODES = {"": None, "synth": "on"}
 
 # How fast the emulated CPU is allowed to run.  Left empty the
@@ -50,8 +51,6 @@ def register(api):
                   else "boot must be empty, cd, fd or hd")
     api.add_field("cmos", lambda v: None if v in CMOS_SEEDS
                   else "cmos must be empty or real")
-    api.add_field("midi", lambda v: None if v in MIDI_MODES
-                  else "midi must be empty or synth")
     api.add_field("cpu", lambda v: None if v in CPU_SPEEDS
                   else "cpu must be empty, high, mid or low")
     api.machine_sanitize("towns", towns_sanitize)

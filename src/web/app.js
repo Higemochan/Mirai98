@@ -106,6 +106,9 @@ const SOUND_LABEL = {"86": "PC-9801-86", "wss": "WSS", "none": "None"};
 const SOUND_ALIAS = {"opna+wss": "86", "opna": "86"};
 const soundKey = v => SOUND_ALIAS[v] || (SOUND_LABEL[v] ? v : '86');
 const soundName = v => SOUND_LABEL[soundKey(v)];
+// the MIDI board, and what plays what it is sent (see pc98web.py)
+const MIDI_LABEL = {"": "None", "synth": "MPU-PC98II + SoundFont"};
+const midiName = v => MIDI_LABEL[v] || MIDI_LABEL[""];
 const DISK_ROWS = [["hdd1","IDE HDD 1","hdd"], ["hdd2","IDE HDD 2","hdd"],
                    ["cd","IDE CD-ROM","cdrom"], ["fdd1","FDD 1","fdd"],
                    ["fdd2","FDD 2","fdd"], ["scsi1","SCSI 1","hdd"],
@@ -652,6 +655,7 @@ function hardwareTable(i) {
                  ? 'real machine ROMs, compatible for the rest'
                  : 'compatible'],
                 ['&#9834; Sound', soundName(i.sound)],
+                ['&#9834; MIDI', midiName(i.midi)],
                 ['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
                  ', websocket ' + i.ports[1]]];
   for (const [k, label] of DISK_ROWS)
@@ -719,6 +723,12 @@ function editForm(i) {
     ['86','wss','none'].map(s => '<option value="' + s + '"' +
       (soundKey(i.sound) === s ? ' selected' : '') + '>' +
       soundName(s) + '</option>').join('') + '</select></div>' +
+    '<div class="row"><label>MIDI</label><select name="midi">' +
+    ['', 'synth'].map(v => '<option value="' + v + '"' +
+      ((i.midi || '') === v ? ' selected' : '') + '>' + midiName(v) +
+      '</option>').join('') + '</select> <span class="note">a board at ' +
+    'I/O E0D0h; what it is sent is played through a SoundFont and mixed ' +
+    'into the machine sound</span></div>' +
     '<div class="row"><label>Acceleration</label>' +
     '<label class="check"><input type="checkbox" name="kvm"' +
     (i.accel === 'tcg' ? '' : ' checked') +
@@ -1760,6 +1770,7 @@ function drawConfirm() {
                                                          : 'compatible')],
                 ['Memory', v.memory],
                 ['Sound', desc.sound || soundName(v.sound)],
+                ['MIDI', midiName(v.midi)],
                 ['Acceleration', v.accel === 'kvm'
                                 ? 'KVM (Experimental)'
                                                    : 'TCG only'],

@@ -266,6 +266,11 @@ SOUNDS = {"86": (True, False), "wss": (False, True),
 DEFAULT_SOUND = "86"
 # what the earlier two-board settings become
 SOUND_ALIASES = {"opna+wss": "86", "opna": "86", "": DEFAULT_SOUND}
+# a MIDI board is a second card, fitted or not whatever the sound board
+# is.  "synth" renders what the board is sent with a SoundFont and mixes
+# it into the machine's sound, which is what reaches the browser over the
+# console connection.  A machine plugin may read this field too.
+MIDI_MODES = {"": False, "synth": True}
 
 
 def sound_of(inst):
@@ -647,6 +652,7 @@ def load_instance(index):
             "bios": root.findtext("bios") or "compat",
             "accel": root.findtext("accel") or "tcg",
             "sound": root.findtext("sound") or DEFAULT_SOUND,
+            "midi": root.findtext("midi") or "",
             "serial": root.findtext("serial") or "",
             "parallel": root.findtext("parallel") or "",
             "gpib": root.findtext("gpib") or "",
@@ -673,6 +679,8 @@ def save_instance(inst):
     ET.SubElement(root, "accel").text = inst.get("accel") or "tcg"
     ET.SubElement(root, "memory").text = inst.get("memory") or "64M"
     ET.SubElement(root, "sound").text = sound_of(inst)
+    if inst.get("midi"):
+        ET.SubElement(root, "midi").text = inst["midi"]
     ET.SubElement(root, "snapshot").text = ("yes" if inst.get("snapshot")
                                             else "no")
     if inst.get("net"):
@@ -759,6 +767,7 @@ def sanitize(data, taken_names=()):
               "accel": str(data.get("accel") or "tcg"),
               "sound": SOUND_ALIASES.get(str(data.get("sound") or ""),
                                          str(data.get("sound") or "")),
+              "midi": str(data.get("midi") or "").strip(),
               "extra": str(data.get("extra") or "")}
     if record["net"] not in NETWORKS:
         return None, "net must be empty, nat or bridge"
@@ -770,6 +779,8 @@ def sanitize(data, taken_names=()):
         return None, "accel must be kvm or tcg"
     if record["sound"] not in SOUNDS:
         return None, "sound must be one of %s" % "/".join(SOUNDS)
+    if record["midi"] not in MIDI_MODES:
+        return None, "midi must be empty or synth"
     # ports that hang off a real device node: RS-232C, the parallel port
     # driven through an FT245RL in bit-bang mode, and GP-IB
     for key, label in (("serial", "serial port"),
@@ -2408,10 +2419,14 @@ def qemu_argv(inst):
     vnc, ws, qmp_port = ports_of(inst)
     display = vnc - 5900
     accel = "kvm:tcg" if inst.get("accel", "tcg") == "kvm" else "tcg"
+    # the boards this machine has anything to play through
+    fm, pcm = SOUNDS[sound_of(inst)]
+    midi = MIDI_MODES.get(inst.get("midi") or "")
+    sound = fm or pcm or midi
     argv = [CONFIG["qemu"],
             "-M", "%s,accel=%s%s" % (
                 inst.get("machine") or "pc9821", accel,
-                ",pcspk-audiodev=snd" if any(SOUNDS[sound_of(inst)]) else ""),
+                ",pcspk-audiodev=snd" if sound else ""),
             "-m", inst.get("memory") or "64M",
             "-k", "ja"]   # PC-98 is a JIS keyboard; use the Japanese VNC keymap
     # QEMU searches -L paths in order, so putting the uploaded ROMs first
@@ -2420,22 +2435,28 @@ def qemu_argv(inst):
         argv += ["-L", win_short(CONFIG["roms"])]
     # the boards play into a null backend; the VNC server captures that
     # mix and hands it to any client that asks, so the browser hears them
-    fm, pcm = SOUNDS[sound_of(inst)]
     vnc = "%s:%d,websocket=%d" % ("127.0.0.1" if LOOPBACK else "0.0.0.0",
                                   display, ws)
-    if fm or pcm:
+    if sound:
         vnc += ",audiodev=snd"
     argv += ["-L", win_short(CONFIG["datadir"]),
             "-display", "none",
             "-vnc", vnc,
             "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
-    if fm or pcm:
+    if sound:
         argv += ["-audiodev", "none,id=snd"]
         # the boards are ISA devices of their own, not part of the machine
         if fm:
             argv += ["-device", "pc98-opna,audiodev=snd"]
         if pcm:
             argv += ["-device", "pc98-wss,audiodev=snd"]
+        if midi:
+            # the board's synthesiser opens on the same audiodev as the
+            # rest, so its music arrives in step with the FM and PCM
+            board = "pc98-midi,audiodev=snd"
+            if CONFIG.get("soundfont"):
+                board += ",soundfont=%s" % win_short(CONFIG["soundfont"])
+            argv += ["-device", board]
     if inst.get("snapshot"):
         argv.append("-snapshot")
     # a shared folder takes an IDE unit of its own, after the disks;

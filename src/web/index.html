@@ -106,6 +106,14 @@
      </select></div>
     <div class="note">PC-9801-86: FM and PCM. WSS: the Mate-X built-in.
      The console plays whichever one is fitted.</div>
+    <div class="row"><label>MIDI board</label>
+     <select name="midi">
+      <option value="" selected>None</option>
+      <option value="synth">MPU-PC98II + SoundFont</option>
+     </select></div>
+    <div class="note">An MPU-PC98II at I/O E0D0h, for software that plays
+     to a MIDI module. What it is sent is played through a SoundFont and
+     mixed into the machine sound.</div>
    </div>
    <div class="pane" data-pane="Network">
     <div class="row"><label>Network</label>
