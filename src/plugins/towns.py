@@ -141,13 +141,14 @@ def towns_new_hard_disk(dest, data):
 
 def towns_sanitize(record):
     """What a TOWNS record may hold: the PC-98-only settings are dropped
-    (they would be stored but never used), memory must suit the machine
-    (2 MiB or more, whole MiB) and it always runs under TCG."""
+    (they would be stored but never used) and memory must suit the machine
+    (2 MiB or more, whole MiB).  Either accelerator is allowed, though KVM
+    pays for every device access with a trip out of the guest, so it is
+    not automatically the faster of the two here."""
     for key in ("hdd1", "hdd2", "mount", "net", "serial", "parallel", "gpib"):
         record[key] = ""
     record["bios"] = "real"
     record["sound"] = "none"
-    record["accel"] = "tcg"
     mem = record["memory"].upper()
     units = {"K": 1, "M": 1024, "G": 1024 * 1024}
     if not mem or mem[-1] not in units or not mem[:-1].isdigit():

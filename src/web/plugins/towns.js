@@ -74,8 +74,14 @@ function townsEditForm(i, h) {
       '<input type="hidden" name="bios" value="real"></div>' +
     '<div class="row"><label>Sound</label>' + note(TOWNS_SOUND) +
       '<input type="hidden" name="sound" value="none"></div>' +
-    // unchecked, hidden: the Towns machine runs under TCG (icount needs it)
-    '<input type="checkbox" name="kvm" hidden>' +
+    '<div class="row"><label>Execution</label>' +
+      '<label class="check"><input type="checkbox" name="kvm"' +
+      (i.accel === 'kvm' ? ' checked' : '') +
+      '> run the guest on the host CPU (KVM)</label>' +
+      note('left off, the instructions are translated: the tested path, ' +
+           'and the only one that can be speed-limited. KVM runs them on ' +
+           'the host CPU, but each device access then leaves the guest, ' +
+           'and the measured boot to the desktop was no faster') + '</div>' +
     '<div class="row"><label>Snapshot</label>' +
       '<label class="check"><input type="checkbox" name="snapshot"' +
       (i.snapshot ? ' checked' : '') + '> discard changes</label></div>' +
@@ -103,7 +109,8 @@ if (typeof JA === 'object') {          // the core's phrase table, if present
 function townsHardware(i, h) {
   const rows = [
     ['&#9636; Memory', h.esc(i.memory || '')],
-    ['&#9881; Machine', h.esc(i.machine || 'towns') + ' (TCG)'],
+    ['&#9881; Machine', h.esc(i.machine || 'towns') +
+     (i.accel === 'kvm' ? ' (KVM)' : ' (TCG)')],
     ['&#9750; BIOS', TOWNS_BIOS],
     ['&#9834; Sound', TOWNS_SOUND]];
   if (i.ports) rows.push(['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
@@ -131,7 +138,7 @@ function townsHardware(i, h) {
 // tab lists the built-in CD drive, the two floppy drives and the SCSI
 // disks; Host (fat98 share, serial, parallel, GP-IB) and Network (LGY-98)
 // have no TOWNS counterpart and are hidden; memory is the MX range; the
-// options tab carries the boot device instead of KVM (TCG only).
+// options tab carries the boot device and how the guest is executed.
 const TOWNS_MEMS = ['2M', '4M', '6M', '8M', '16M', '32M', '64M'];
 const TOWNS_BOOTS = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
                      ['cd', 'CD-ROM'], ['fd', 'floppy drive A'],
@@ -193,7 +200,12 @@ function townsWizardMemory(h) {
     'and most titles: 4M to 8M; Windows 3.1: 16M or more.</div>';
 }
 function townsWizardOptions(h) {
-  return '<div class="row"><label>CPU speed</label><select name="cpu">' +
+  return '<div class="row"><label>Execution</label>' +
+    '<label class="check"><input type="checkbox" name="kvm">' +
+    ' run the guest on the host CPU (KVM)</label>' +
+    h.note('left off, the instructions are translated: the tested path, ' +
+           'and the only one the CPU speed below applies to') + '</div>' +
+    '<div class="row"><label>CPU speed</label><select name="cpu">' +
     TOWNS_CPUS.map(([v, label]) => '<option value="' + v + '"' +
       (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
     '</select>' +
@@ -220,7 +232,7 @@ function townsWizardOptions(h) {
     '<div class="row"><label>Extra QEMU args</label>' +
     '<input type="text" name="extra" style="min-width:24em"></div>' +
     '<div class="note">Appended to the command line as typed. The machine ' +
-    'runs under TCG; its CMOS (SETUP settings) is kept per machine.</div>';
+    'keeps its own CMOS (SETUP settings).</div>';
 }
 function townsWizardConfirm(v, h) {
   const rows = [['Name', h.esc(v.name || '(unnamed)')],
@@ -228,6 +240,8 @@ function townsWizardConfirm(v, h) {
                 ['BIOS', TOWNS_BIOS],
                 ['Memory', h.esc(v.memory)],
                 ['Sound', TOWNS_SOUND],
+                ['Execution', v.accel === 'kvm' ? 'KVM (host CPU)'
+                                                 : 'translated (TCG)'],
                 ['CPU speed', townsCpuLabel(v.cpu)],
                 ['MIDI', townsMidiLabel(v.midi)],
                 ['Boot from', townsBootLabel(v.boot)],
