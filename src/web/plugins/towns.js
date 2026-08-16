@@ -282,16 +282,30 @@ function captureRelativePointer(rfb, target) {
     RFB.messages.pointerEvent(rfb._sock,
       (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
   };
+  // The FM TOWNS mouse has two buttons, so the middle one is free: while
+  // the pointer is captured it leaves the capture, for people who would
+  // rather not reach for Esc.  It is swallowed either way (it would
+  // otherwise start the browser's autoscroll) and never reaches the guest.
+  const MIDDLE = 1;
   const onDown = (ev) => {
     if (!locked) {
       if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
       return;
     }
-    mask |= (1 << ev.button); send(0, 0, mask); ev.preventDefault(); ev.stopPropagation();
+    ev.preventDefault(); ev.stopPropagation();
+    if (ev.button === MIDDLE) {
+      document.exitPointerLock();
+      return;
+    }
+    mask |= (1 << ev.button); send(0, 0, mask);
   };
   const onUp = (ev) => {
     if (!locked) return;
-    mask &= ~(1 << ev.button); send(0, 0, mask); ev.preventDefault(); ev.stopPropagation();
+    ev.preventDefault(); ev.stopPropagation();
+    if (ev.button === MIDDLE) {
+      return;
+    }
+    mask &= ~(1 << ev.button); send(0, 0, mask);
   };
   const onMove = (ev) => {
     if (!locked) return;
@@ -305,7 +319,7 @@ function captureRelativePointer(rfb, target) {
     }
   };
   const hint = document.createElement('div');
-  hint.textContent = 'クリックでマウス操作を開始（Escで解除）';
+  hint.textContent = 'クリックでマウス操作を開始（Escまたは中ボタンで解除）';
   hint.style.cssText = 'position:absolute;left:50%;bottom:8px;' +
     'transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;' +
     'font:12px sans-serif;padding:4px 10px;border-radius:4px;' +
