@@ -30,6 +30,18 @@ BOOT_KEYS = {"": None, "cd": "CD", "fd": "F0", "hd": "H0"}
 # browser over the console connection.
 MIDI_MODES = {"": None, "synth": "on"}
 
+# How fast the emulated CPU is allowed to run.  Left empty the
+# translator runs flat out, which on this hardware lands somewhere near
+# 50 MIPS and keeps a host core busy the whole time the machine is on -
+# an FM TOWNS guest never idles, it polls.  A shift pins the CPU to
+# 2**-shift instructions per nanosecond and lets the host sleep for the
+# rest of each slice, so the wall clock (and everything the guest times
+# against it) stays right while the host does proportionally less work.
+# Measured here: shift 5 ~31 MIPS at ~72% of a core, 6 ~16 MIPS at ~41%,
+# 7 ~8 MIPS at ~24%.  Below shift 5 the host cannot keep the pace up and
+# the machine falls into slow motion, which is audible.
+CPU_SPEEDS = {"": None, "high": 5, "mid": 6, "low": 7}
+
 
 def register(api):
     api.add_machine("towns")
@@ -40,6 +52,8 @@ def register(api):
                   else "cmos must be empty or real")
     api.add_field("midi", lambda v: None if v in MIDI_MODES
                   else "midi must be empty or synth")
+    api.add_field("cpu", lambda v: None if v in CPU_SPEEDS
+                  else "cpu must be empty, high, mid or low")
     api.machine_sanitize("towns", towns_sanitize)
     api.instance_action("towns", "reset-cmos",
                         lambda inst, data: towns_reset_cmos(api, inst))
@@ -195,6 +209,11 @@ def towns_argv(api, inst):
             "-audiodev", "none,id=snd",
             "-vnc", vncarg,
             "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
+    # Pinning the instruction rate needs the translator, so a machine
+    # asking for KVM keeps host speed and its full core.
+    shift = CPU_SPEEDS.get(inst.get("cpu") or "")
+    if shift and accel == "tcg":
+        argv += ["-icount", "shift=%d,sleep=on,align=on" % shift]
     if inst.get("snapshot"):
         argv.append("-snapshot")
     # the built-in CD-ROM drive always exists (empty tray without an image)

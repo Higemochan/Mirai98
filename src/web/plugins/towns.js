@@ -27,6 +27,9 @@ function townsEditForm(i, h) {
   const midiOpts = TOWNS_MIDI.map(([v, label]) =>
     '<option value="' + v + '"' + ((i.midi || '') === v ? ' selected' : '') +
     '>' + label + '</option>').join('');
+  const cpuOpts = TOWNS_CPUS.map(([v, label]) =>
+    '<option value="' + v + '"' + ((i.cpu || '') === v ? ' selected' : '') +
+    '>' + label + '</option>').join('');
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', i.cd) +
@@ -42,6 +45,12 @@ function townsEditForm(i, h) {
       h.diskSelect(k, 'hdd', i[k]) +
       (n === 0 ? note('SCSI ID ' + n + '; a raw image (e.g. a Tsugaru .h0)')
                : note('SCSI ID ' + n)) + '</div>').join('') +
+    '<div class="row"><label>CPU speed</label>' +
+      '<select name="cpu">' + cpuOpts + '</select>' +
+      note('the machine polls instead of idling, so left unrestricted it ' +
+           'keeps a host core busy the whole time it is on. Pinning the ' +
+           'speed keeps the clock and the sound right and gives most ' +
+           'of that core back') + '</div>' +
     '<div class="row"><label>MIDI</label>' +
       '<select name="midi">' + midiOpts + '</select>' +
       note('the MT-402/403 card; its music is mixed into the machine sound ' +
@@ -134,6 +143,13 @@ const TOWNS_MIDI = [['', 'No MIDI card'],
                     ['synth', 'MIDI card + SoundFont synthesiser']];
 const townsMidiLabel = v =>
   (TOWNS_MIDI.find(([k]) => k === (v || '')) || TOWNS_MIDI[0])[1];
+// what the emulated CPU is pinned to (see plugins/towns.py CPU_SPEEDS)
+const TOWNS_CPUS = [['', 'Unrestricted - as fast as the host translates'],
+                    ['high', 'High - about 31 MIPS, ~70% of a host core'],
+                    ['mid', 'Balanced - about 16 MIPS, ~40% of a host core'],
+                    ['low', 'Low - about 8 MIPS, ~25% of a host core']];
+const townsCpuLabel = v =>
+  (TOWNS_CPUS.find(([k]) => k === (v || '')) || TOWNS_CPUS[0])[1];
 // where a machine's CMOS starts from (see plugins/towns.py CMOS_SEEDS)
 const TOWNS_CMOS = [['', 'standard (nothing registered; SETUP registers disks)'],
                     ['real', 'real machine copy (towns.cmos.hdd)']];
@@ -177,7 +193,15 @@ function townsWizardMemory(h) {
     'and most titles: 4M to 8M; Windows 3.1: 16M or more.</div>';
 }
 function townsWizardOptions(h) {
-  return '<div class="row"><label>MIDI</label><select name="midi">' +
+  return '<div class="row"><label>CPU speed</label><select name="cpu">' +
+    TOWNS_CPUS.map(([v, label]) => '<option value="' + v + '"' +
+      (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
+    '</select>' +
+    h.note('an FM TOWNS guest polls instead of idling, so unrestricted it ' +
+           'keeps a host core busy; pinning the speed keeps the clock and ' +
+           'the sound right and costs the host proportionally less') +
+    '</div>' +
+    '<div class="row"><label>MIDI</label><select name="midi">' +
     TOWNS_MIDI.map(([v, label]) => '<option value="' + v + '"' +
       (v === '' ? ' selected' : '') + '>' + label + '</option>').join('') +
     '</select>' +
@@ -204,6 +228,7 @@ function townsWizardConfirm(v, h) {
                 ['BIOS', TOWNS_BIOS],
                 ['Memory', h.esc(v.memory)],
                 ['Sound', TOWNS_SOUND],
+                ['CPU speed', townsCpuLabel(v.cpu)],
                 ['MIDI', townsMidiLabel(v.midi)],
                 ['Boot from', townsBootLabel(v.boot)],
                 ['CMOS seed', townsCmosLabel(v.cmos)],
