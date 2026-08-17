@@ -78,6 +78,7 @@ CMOS_SEEDS = {"": "towns.cmos", "real": "towns.cmos.hdd"}
 
 def towns_boot_reset(api, inst, data):
     """Restart with a boot-key combination held down."""
+    import threading
     import time
 
     key = str((data or {}).get("key") or "").upper()
@@ -91,11 +92,17 @@ def towns_boot_reset(api, inst, data):
                                  "value": key}) is None:
         return 502, "the machine did not answer"
     api.qmp(inst, "system_reset")
-    # the keys are only held for this one start, as they would be by a hand
-    time.sleep(1.5)
-    api.qmp(inst, "qom-set", {"path": "/machine", "property": "bootkey",
-                              "value": BOOT_KEYS.get(inst.get("boot") or "")
-                              or ""})
+
+    # The keys are held for this one start only, as a hand would hold them.
+    # Letting go happens off to the side: the caller is holding the server's
+    # instance lock, and the machine needs a moment to take the reset.
+    def let_go():
+        time.sleep(1.5)
+        api.qmp(inst, "qom-set",
+                {"path": "/machine", "property": "bootkey",
+                 "value": BOOT_KEYS.get(inst.get("boot") or "") or ""})
+
+    threading.Thread(target=let_go, daemon=True).start()
     return {"result": "restarting", "key": key}
 
 

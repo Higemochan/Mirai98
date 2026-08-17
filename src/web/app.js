@@ -385,6 +385,14 @@ async function api(path, opts) {
   if (!r.ok) { toast(data.error || r.statusText); return null; }
   return data;
 }
+/*
+ * A machine plugin is loaded as its own module and its buttons call back
+ * through onclick, i.e. from the global scope.  These two are the verbs
+ * they need; everything else they are handed.
+ */
+window.api = (path, opts) => api(path, opts);
+window.task = (what, status) => task(what, status);
+
 window.act = async (name, verb) => {
   toast(verb + ' ' + name + '...');
   const data = await api('/api/instances/' + name + '/' + verb,
