@@ -12,7 +12,7 @@ const loadRFB = async () => RFB ||
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
-    hardware: {}, wizard: {}, diskFormats: {}, labels: {} };
+    hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -24,6 +24,8 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.hardware, p.hardware || {});   // per-machine hardware view
   P.wizard = P.wizard || {};
   Object.assign(P.wizard, p.wizard || {});       // per-machine create wizard
+  P.actions = P.actions || {};
+  Object.assign(P.actions, p.actions || {});     // extra verbs on the detail
   P.labels = P.labels || {};
   Object.assign(P.labels, p.labels || {});       // machine id -> shown name
   P.diskFormats = P.diskFormats || {};           // Storage "Create" formats
@@ -965,6 +967,9 @@ async function detailView(name) {
       i.running
         ? '<button onclick="act(\'' + name + '\',\'reset\')">Restart' +
           '</button>' : '',
+      // a machine plugin may put its own verbs beside the stock ones
+      ...(window.MiraiPlugins.actions[i.machine]
+          ? window.MiraiPlugins.actions[i.machine](i, { esc }) : []),
       '<button onclick="toggleEdit()"' +
       (i.running ? ' disabled title="power it off first"' : '') +
       '>Edit</button>',

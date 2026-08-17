@@ -214,6 +214,10 @@ class PluginAPI:
     def is_running(self, inst):
         return is_running(inst)
 
+    def qmp(self, inst, command, arguments=None):
+        """One QMP command against a running instance; None if unreachable."""
+        return qmp(inst, command, arguments)
+
     def disk_builder(self, kind, fmt, fn):
         """Offer a disk image format of the plugin's own in Storage."""
         DISK_BUILDERS[(kind, fmt)] = fn

@@ -145,6 +145,50 @@ const TOWNS_BOOTS = [['', 'ROM order (floppy, CD-ROM, hard disk)'],
                      ['hd', 'SCSI hard disk 0']];
 const townsBootLabel = v =>
   (TOWNS_BOOTS.find(([k]) => k === (v || '')) || TOWNS_BOOTS[0])[1];
+// the key combinations the system ROM reads while it starts; offered on
+// Restart because that is when it looks (see plugins/towns.py RESET_KEYS)
+const TOWNS_RESET_KEYS = [
+  ['', 'Restart: as configured'],
+  ['CD', 'Restart: CD-ROM (C+D)'],
+  ['F0', 'Restart: floppy A (F+0)'],
+  ['F1', 'Restart: floppy B (F+1)'],
+  ['H0', 'Restart: SCSI ID 0 (H+0)'],
+  ['H1', 'Restart: SCSI ID 1 (H+1)'],
+  ['H2', 'Restart: SCSI ID 2 (H+2)'],
+  ['H3', 'Restart: SCSI ID 3 (H+3)'],
+  ['H4', 'Restart: SCSI ID 4 (H+4)'],
+  ['ICM', 'Restart: IC memory card (I+C+M)'],
+  ['DEBUG', 'Restart: ROM debug menu (D+E+B+U+G)'],
+  ['FAST', 'Restart: fast mode (T)'],
+  ['SLOW', 'Restart: slow mode (N)']];
+
+function townsActions(i) {
+  if (!i.running) {
+    return [];
+  }
+  return ['<select id="towns-bootkey" title="keys held down while it starts">' +
+          TOWNS_RESET_KEYS.map(([v, label]) =>
+            '<option value="' + v + '">' + label + '</option>').join('') +
+          '</select>',
+          '<button onclick="townsBootReset(\'' + i.name + '\')">Go</button>'];
+}
+
+window.townsBootReset = async (name) => {
+  const sel = document.getElementById('towns-bootkey');
+  const key = sel ? sel.value : '';
+  if (key === 'DEBUG' &&
+      !confirm('The ROM debug menu dumps memory to a floppy and does not ' +
+               'start the system. Restart into it?')) {
+    return;
+  }
+  const r = await api('/api/instances/' + encodeURIComponent(name) +
+                      '/x/boot-reset', {method: 'POST',
+                                        body: JSON.stringify({key})});
+  if (r) {
+    toast(key ? 'restarting with ' + key + ' held' : 'restarting');
+    task('VM ' + name + ' - restart', key || 'as configured');
+  }
+};
 // the MIDI card, and what plays what it is sent (see plugins/towns.py)
 const TOWNS_MIDI = [['', 'No MIDI card'],
                     ['synth', 'MIDI card + SoundFont synthesiser']];
@@ -400,6 +444,7 @@ window.registerMachinePlugin({
   // the model the machine reports (ID 0x0c/0x02 = TOWNS II MX, i486)
   labels: { towns: 'FM TOWNS II MX (i486)' },
   editForm: { towns: townsEditForm },
+  actions: { towns: townsActions },
   hardware: { towns: townsHardware },
   // Storage "Create": FM TOWNS floppy layouts (empty FAT12, as the Towns
   // FORMAT command lays them out) and a blank SCSI hard disk to be

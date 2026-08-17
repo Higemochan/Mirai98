@@ -24,6 +24,14 @@ import shutil
 # ("" = the ROM's own order: floppy, CD-ROM, then hard disk)
 BOOT_KEYS = {"": None, "cd": "CD", "fd": "F0", "hd": "H0"}
 
+# On the real machine you hold a key combination down while it starts
+# and the system ROM reads it to pick where to boot from.  A reset is
+# where the ROM looks, so the same thing is offered on Restart: the
+# machine keeps the choice in a property, and it applies to the reset
+# that follows and to that one only.
+RESET_KEYS = ("", "CD", "F0", "F1", "H0", "H1", "H2", "H3", "H4",
+              "ICM", "DEBUG", "FAST", "SLOW")
+
 # the MIDI card is off unless asked for: a few titles will not run with
 # one fitted.  "synth" renders what the card is sent with a SoundFont
 # and mixes it into the machine's sound, which is what reaches the
@@ -56,6 +64,8 @@ def register(api):
     api.machine_sanitize("towns", towns_sanitize)
     api.instance_action("towns", "reset-cmos",
                         lambda inst, data: towns_reset_cmos(api, inst))
+    api.instance_action("towns", "boot-reset",
+                        lambda inst, data: towns_boot_reset(api, inst, data))
 
 
 # where a machine's CMOS starts from when it has none yet: "" = the ROM
@@ -64,6 +74,29 @@ def register(api):
 # a real machine's CMOS with its own disks registered - only for images
 # taken from that machine
 CMOS_SEEDS = {"": "towns.cmos", "real": "towns.cmos.hdd"}
+
+
+def towns_boot_reset(api, inst, data):
+    """Restart with a boot-key combination held down."""
+    import time
+
+    key = str((data or {}).get("key") or "").upper()
+    if key not in RESET_KEYS:
+        return 400, "boot key must be one of %s" % ", ".join(
+            k or "(none)" for k in RESET_KEYS)
+    if not api.is_running(inst):
+        return 409, "start it first"
+    if api.qmp(inst, "qom-set", {"path": "/machine",
+                                 "property": "bootkey",
+                                 "value": key}) is None:
+        return 502, "the machine did not answer"
+    api.qmp(inst, "system_reset")
+    # the keys are only held for this one start, as they would be by a hand
+    time.sleep(1.5)
+    api.qmp(inst, "qom-set", {"path": "/machine", "property": "bootkey",
+                              "value": BOOT_KEYS.get(inst.get("boot") or "")
+                              or ""})
+    return {"result": "restarting", "key": key}
 
 
 def towns_reset_cmos(api, inst):
