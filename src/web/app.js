@@ -392,6 +392,8 @@ async function api(path, opts) {
  */
 window.api = (path, opts) => api(path, opts);
 window.task = (what, status) => task(what, status);
+// plugins add their own phrases to this; it is theirs to reach as well
+window.JA = JA;
 
 window.act = async (name, verb) => {
   toast(verb + ' ' + name + '...');
@@ -445,6 +447,21 @@ function drawTree() {
     instances.map(i => link('#/vm/' + i.name,
         '<span class="dot"></span>' + esc(i.name) + machineBadge(i.machine),
         i.running ? 'run' : '')).join('');
+}
+
+// extra verbs from a machine plugin, and never an exception from one
+function pluginActions(i) {
+  const fn = window.MiraiPlugins.actions[i.machine];
+  if (!fn) {
+    return [];
+  }
+  try {
+    const out = fn(i, { esc });
+    return Array.isArray(out) ? out.filter(b => typeof b === 'string') : [];
+  } catch (err) {
+    console.error('machine plugin actions failed', err);
+    return [];
+  }
 }
 
 // VMware puts the same row of verbs above every object it shows
@@ -975,9 +992,10 @@ async function detailView(name) {
       i.running
         ? '<button onclick="act(\'' + name + '\',\'reset\')">Restart' +
           '</button>' : '',
-      // a machine plugin may put its own verbs beside the stock ones
-      ...(window.MiraiPlugins.actions[i.machine]
-          ? window.MiraiPlugins.actions[i.machine](i, { esc }) : []),
+      // a machine plugin may put its own verbs beside the stock ones;
+      // a plugin that throws or hands back something else must not take
+      // the page down with it, as the console hooks below also guard
+      ...pluginActions(i),
       '<button onclick="toggleEdit()"' +
       (i.running ? ' disabled title="power it off first"' : '') +
       '>Edit</button>',

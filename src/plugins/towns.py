@@ -76,33 +76,42 @@ def register(api):
 CMOS_SEEDS = {"": "towns.cmos", "real": "towns.cmos.hdd"}
 
 
-def towns_boot_reset(api, inst, data):
-    """Restart with a boot-key combination held down."""
-    import threading
-    import time
+def _qmp_ok(reply):
+    """QMP answers with either a return or an error; no answer at all is a
+    machine that could not be reached."""
+    return isinstance(reply, dict) and "return" in reply
 
-    key = str((data or {}).get("key") or "").upper()
+
+def towns_boot_reset(api, inst, data):
+    """Restart with a boot-key combination held down.
+
+    The machine holds the keys for exactly one reset and forgets them
+    itself (its bootkey-once property), so nothing here has to time a
+    release, and a machine left holding a key is not a state we can end
+    up in.
+    """
+    if not isinstance(data, dict):
+        return 400, "expected a JSON object"
+    key = data.get("key")
+    key = key.upper() if isinstance(key, str) else "" if key is None else None
     if key not in RESET_KEYS:
         return 400, "boot key must be one of %s" % ", ".join(
             k or "(none)" for k in RESET_KEYS)
     if not api.is_running(inst):
         return 409, "start it first"
-    if api.qmp(inst, "qom-set", {"path": "/machine",
-                                 "property": "bootkey",
-                                 "value": key}) is None:
+
+    reply = api.qmp(inst, "qom-set", {"path": "/machine",
+                                      "property": "bootkey-once",
+                                      "value": key})
+    if reply is None:
         return 502, "the machine did not answer"
-    api.qmp(inst, "system_reset")
-
-    # The keys are held for this one start only, as a hand would hold them.
-    # Letting go happens off to the side: the caller is holding the server's
-    # instance lock, and the machine needs a moment to take the reset.
-    def let_go():
-        time.sleep(1.5)
-        api.qmp(inst, "qom-set",
-                {"path": "/machine", "property": "bootkey",
-                 "value": BOOT_KEYS.get(inst.get("boot") or "") or ""})
-
-    threading.Thread(target=let_go, daemon=True).start()
+    if not _qmp_ok(reply):
+        detail = (reply.get("error") or {}).get("desc", "refused")
+        return 502, ("the machine would not take the boot key (%s); if it "
+                     "was started before the emulator was updated, stop and "
+                     "start it again" % detail)
+    if not _qmp_ok(api.qmp(inst, "system_reset")):
+        return 502, "the machine took the boot key but would not restart"
     return {"result": "restarting", "key": key}
 
 

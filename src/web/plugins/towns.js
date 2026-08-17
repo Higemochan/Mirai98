@@ -166,7 +166,10 @@ function townsActions(i) {
   if (!i.running) {
     return [];
   }
-  return ['<select id="towns-bootkey" title="keys held down while it starts">' +
+  return ['<select id="towns-bootkey" title="Keys held down while the ' +
+          'machine starts, as on the real one. This ROM acts on DEBUG; ' +
+          'the device keys are delivered but it boots from its configured ' +
+          'device anyway - the reference emulator does the same.">' +
           TOWNS_RESET_KEYS.map(([v, label]) =>
             '<option value="' + v + '">' + label + '</option>').join('') +
           '</select>',

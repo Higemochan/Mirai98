@@ -3314,7 +3314,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         m = re.match(r"^/api/instances/([^/]+)/x/([a-z0-9_-]+)$", path)
         if m:
-            data = self.body_json() or {}
+            data = self.body_json()
+            if data is None or not isinstance(data, dict):
+                self.fail(400, "expected a JSON object")
+                return
             with _lock:
                 inst = find_instance(load_instances(), m.group(1))
                 if inst is None:
@@ -3324,7 +3327,13 @@ class Handler(BaseHTTPRequestHandler):
                 if fn is None:
                     self.fail(404, "no such action for this machine")
                     return
-                result = fn(inst, data)
+                try:
+                    result = fn(inst, data)
+                except Exception as err:
+                    say("plugin action %s failed: %s" % (m.group(2), err),
+                        "web")
+                    self.fail(500, "the action failed: %s" % err)
+                    return
             if isinstance(result, tuple):
                 self.fail(result[0], result[1])
             else:
