@@ -167,9 +167,9 @@ function townsActions(i) {
     return [];
   }
   return ['<select id="towns-bootkey" title="Keys held down while the ' +
-          'machine starts, as on the real one. This ROM acts on DEBUG; ' +
-          'the device keys are delivered but it boots from its configured ' +
-          'device anyway - the reference emulator does the same.">' +
+          'machine starts, as on the real one: CD boots the disc, F0-F3 a ' +
+          'floppy drive, H0-H4 a SCSI id, and the machine falls through to ' +
+          'the next device if that one has nothing to boot.">' +
           TOWNS_RESET_KEYS.map(([v, label]) =>
             '<option value="' + v + '">' + label + '</option>').join('') +
           '</select>',
