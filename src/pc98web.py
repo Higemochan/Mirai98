@@ -67,6 +67,7 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -529,24 +530,77 @@ def cue_summary(path):
     return files, tracks, audio
 
 
-def cue_partner(root, name):
-    """The .cue beside a data file (same stem), or None."""
+# The other shape the same pair comes in: Alcohol writes a binary .mds
+# beside its .mdf and names the data file inside it with a wildcard --
+# "*.mdf" is the one sharing the descriptor's stem, which is also how the
+# emulator finds it.  Only the fields this listing needs are read here.
+MDS_SIGNATURE = b"MEDIA DESCRIPTOR"
+MDS_MODE_AUDIO = 0xa9
+
+
+def mds_summary(path):
+    """(referenced file names, track count, audio track count)."""
+    tracks = audio = 0
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x58)
+            if len(head) < 0x58 or not head.startswith(MDS_SIGNATURE):
+                return [], 0, 0
+            if struct.unpack_from("<H", head, 0x14)[0] != 1:
+                return [], 0, 0             # one session, as the drive reads
+            f.seek(struct.unpack_from("<I", head, 0x50)[0])
+            session = f.read(0x18)
+            if len(session) < 0x18:
+                return [], 0, 0
+            blocks = session[0x0a]
+            f.seek(struct.unpack_from("<I", session, 0x14)[0])
+            for _ in range(blocks):
+                block = f.read(0x50)
+                if len(block) < 0x50:
+                    return [], 0, 0
+                if not 1 <= block[0x04] <= 99:
+                    continue                # A0/A1/A2 describe the disc
+                tracks += 1
+                if block[0x00] == MDS_MODE_AUDIO:
+                    audio += 1
+    except (OSError, struct.error):
+        return [], 0, 0
+    return [os.path.splitext(os.path.basename(path))[0] + ".mdf"], tracks, audio
+
+
+SIDECAR_EXTS = (".cue", ".mds")
+
+
+def is_sidecar(name):
+    return name.lower().endswith(SIDECAR_EXTS)
+
+
+def sidecar_summary(path):
+    """(referenced file names, track count, audio count), either kind."""
+    if path.lower().endswith(".mds"):
+        return mds_summary(path)
+    return cue_summary(path)
+
+
+def sidecar_partner(root, name):
+    """The .cue or .mds beside a data file (same stem), or None."""
     stem = os.path.splitext(name)[0]
-    for cand in (stem + ".cue", stem + ".CUE"):
-        if os.path.isfile(os.path.join(root, cand)):
-            return cand
+    for ext in SIDECAR_EXTS:
+        for cand in (stem + ext, stem + ext.upper()):
+            if os.path.isfile(os.path.join(root, cand)):
+                return cand
     return None
 
 
 def cdrom_pairs(root, names):
-    """{data name: cue name} for the sheets whose data file is here, and
-    {cue name: [missing files]} for the orphans."""
+    """{data name: sidecar name} for the sheets whose data file is here,
+    and {sidecar name: [missing files]} for the orphans."""
     pairs, orphans = {}, {}
     lower = {n.lower(): n for n in names}
     for name in names:
-        if not name.lower().endswith(".cue"):
+        if not is_sidecar(name):
             continue
-        files, _, _ = cue_summary(os.path.join(root, name))
+        files, _, _ = sidecar_summary(os.path.join(root, name))
         here = [lower.get(f.lower()) for f in files]
         missing = [f for f, h in zip(files, here) if h is None]
         if files and not missing:
@@ -557,11 +611,12 @@ def cdrom_pairs(root, names):
     # a data file that is a link into another folder may keep its sheet
     # there (the emulator resolves the link and looks beside the target)
     for name in names:
-        if name in pairs or name.lower().endswith(".cue"):
+        if name in pairs or is_sidecar(name):
             continue
         real = os.path.realpath(os.path.join(root, name))
         if real != os.path.join(root, name):
-            cue = cue_partner(os.path.dirname(real), os.path.basename(real))
+            cue = sidecar_partner(os.path.dirname(real),
+                                  os.path.basename(real))
             if cue:
                 pairs[name] = os.path.join(os.path.dirname(real), cue)
     return pairs, orphans
@@ -576,7 +631,7 @@ def disk_type(kind, name, size, cue=None):
     """The short 'what is this' shown in the Storage list."""
     ext = os.path.splitext(name)[1].lower().lstrip(".") or "-"
     if kind == "cdrom" and cue:
-        return ext + "/cue"
+        return ext + "/" + os.path.splitext(cue)[1].lower().lstrip(".")
     if kind == "fdd" and ext == "raw":
         label = fdd_media_label(size)
         return "raw " + label if label else "raw"
@@ -603,7 +658,7 @@ def disk_catalog():
             pairs, orphans = cdrom_pairs(root, names)
         for name in names:
             full = os.path.join(root, name)
-            if kind == "cdrom" and name.lower().endswith(".cue") \
+            if kind == "cdrom" and is_sidecar(name) \
                     and name not in orphans:
                 continue                    # a sidecar rides with its data
             st = os.stat(full)
@@ -616,7 +671,7 @@ def disk_catalog():
                                        pairs.get(name))}
             if name in pairs:
                 cue_path = os.path.join(root, pairs[name])   # abs stays abs
-                refs, tracks, audio = cue_summary(cue_path)
+                refs, tracks, audio = sidecar_summary(cue_path)
                 entry.update({"cue": os.path.basename(pairs[name]),
                               "tracks": tracks, "audio": audio})
                 # the emulator looks for <data stem>.cue: a sheet named
@@ -3781,21 +3836,50 @@ class Handler(BaseHTTPRequestHandler):
         say("rom %s uploaded (%d bytes)" % (name, size), "system")
         self.reply(200, {"result": "uploaded", "name": name, "size": size})
 
+    def settle_mds_set(self, root, mds, files):
+        """A descriptor names its data file by wildcard -- "*.mdf" is the
+        one sharing its stem -- so there are no names in it to point at
+        what was stored.  The stem is the whole of the pairing, and the
+        lone data file that came up with it takes it."""
+        present = {n.lower(): n for n in os.listdir(root)
+                   if os.path.isfile(os.path.join(root, n))}
+        chosen = [present[f.lower()] for f in files if f.lower() in present]
+        if not chosen:
+            self.fail(400, "%s came without its data file" % mds)
+            return
+        if len(chosen) == 1:
+            want = os.path.splitext(mds)[0] + os.path.splitext(chosen[0])[1]
+            if chosen[0] != want and not os.path.exists(
+                    os.path.join(root, want)):
+                os.replace(os.path.join(root, chosen[0]),
+                           os.path.join(root, want))
+                chosen = [want]
+        _, tracks, audio = mds_summary(os.path.join(root, mds))
+        say("disc set %s: %d track(s), %d audio" % (mds, tracks, audio),
+            "disk")
+        self.reply(200, {"result": "set", "cue": mds, "files": chosen,
+                         "tracks": tracks, "audio": audio,
+                         "multi": len(chosen) > 1})
+
     def settle_cue_set(self):
         """A cue sheet and its data files have all arrived: point the
         sheet's FILE lines at the names they were stored under (uploads
         get safe names, and sheets often name the file with a path or a
-        different case) and check the set is complete."""
+        different case) and check the set is complete.  A binary .mds
+        carries no such names and is settled by its stem instead."""
         data = self.body_json() or {}
         cue = str(data.get("cue") or "")
         files = [str(f) for f in (data.get("files") or [])]
         root = disks_root("cdrom")
-        if not SAFE_NAME.match(cue) or not cue.lower().endswith(".cue"):
-            self.fail(400, "bad cue name")
+        if not SAFE_NAME.match(cue) or not is_sidecar(cue):
+            self.fail(400, "bad sheet name")
             return
         cue_path = os.path.join(root, cue)
         if not os.path.isfile(cue_path):
             self.fail(404, "no such cue sheet")
+            return
+        if cue.lower().endswith(".mds"):
+            self.settle_mds_set(root, cue, files)
             return
         present = {n.lower(): n for n in os.listdir(root)
                    if os.path.isfile(os.path.join(root, n))}
@@ -3884,8 +3968,8 @@ class Handler(BaseHTTPRequestHandler):
         group = [path]
         if kind == "cdrom":
             folder = os.path.dirname(path)
-            if name.lower().endswith(".cue"):
-                refs, _, _ = cue_summary(path)
+            if is_sidecar(name):
+                refs, _, _ = sidecar_summary(path)
                 for ref in refs:
                     cand = os.path.join(folder, ref)
                     if not os.path.isfile(cand):
@@ -3894,7 +3978,7 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     group.append(cand)
             else:
-                cue = cue_partner(folder, name)
+                cue = sidecar_partner(folder, name)
                 if cue:
                     group.append(os.path.join(folder, cue))
         for src in group:
@@ -4082,8 +4166,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(409, "in use by: %s" % ", ".join(used))
                 return
             os.remove(full)
-            if kind == "cdrom" and not name.lower().endswith(".cue"):
-                cue = cue_partner(os.path.dirname(full), name)
+            if kind == "cdrom" and not is_sidecar(name):
+                cue = sidecar_partner(os.path.dirname(full), name)
                 if cue:
                     try:
                         os.remove(os.path.join(os.path.dirname(full), cue))

@@ -1152,7 +1152,7 @@ function diskTypeCell(f) {
       'multi-file cue</span>';
     else if (f.cue_mismatch) t += ' <span style="color:#e06c5f" title="' +
       esc(f.cue) + ' does not share the data file\'s name; the emulator ' +
-      'looks for the same stem">cue name differs</span>';
+      'looks for the same stem">sheet name differs</span>';
   }
   return t;
 }
@@ -1226,9 +1226,9 @@ function storageCard(kind, files) {
     '<div id="jobs-' + kind + '" class="note"></div>' +
     (kind === 'cdrom'
      ? '<div class="note">Several files may be chosen (or dropped here) at ' +
-       'once: a .cue and its .bin/.img travel as one disc, the sheet is ' +
-       'pointed at the stored names, and the pair is listed as one entry.' +
-       '</div>' : '') + '</div>' +
+       'once: a .cue and its .bin/.img -- or a .mds and its .mdf -- travel ' +
+       'as one disc, the sheet is pointed at the stored names, and the ' +
+       'pair is listed as one entry.</div>' : '') + '</div>' +
     create + '</div>';
 }
 
@@ -1593,19 +1593,26 @@ window.pickUpload = kind => {
   input.onchange = () => { if (input.files.length) uploadFiles(kind, [...input.files]); };
   input.click();
 };
-// Several files at once.  For CD dumps a .cue and the data files it names
-// form a set: the sheet is checked against the selection first, all files
-// go up under safe names, then the server points the sheet at them.
+// Several files at once.  For CD dumps a sheet and the data files it
+// names form a set: the sheet is checked against the selection first, all
+// files go up under safe names, then the server points the sheet at them.
+// A .mds is the same set in binary and names its data by wildcard, so
+// what it wants is the .mdf sharing its stem.
 async function uploadFiles(kind, files) {
   const plan = files.map(f => ({ file: f, name: safeDiskName(f.name) }));
-  const cues = plan.filter(p => /\.cue$/i.test(p.name));
+  const cues = plan.filter(p => /\.(cue|mds)$/i.test(p.name));
   if (kind === 'cdrom' && cues.length) {
     const have = new Set(plan.map(p => p.file.name.toLowerCase()));
     const haveSafe = new Set(plan.map(p => p.name.toLowerCase()));
     for (const c of cues) {
-      const text = await c.file.text().catch(() => '');
-      const refs = [...text.matchAll(/^\s*FILE\s+(?:"([^"]*)"|(\S+))/gim)]
-        .map(m => (m[1] || m[2]).replace(/\\/g, '/').split('/').pop());
+      let refs;
+      if (/\.mds$/i.test(c.name)) {
+        refs = [c.file.name.replace(/\.[^.]*$/, '') + '.mdf'];
+      } else {
+        const text = await c.file.text().catch(() => '');
+        refs = [...text.matchAll(/^\s*FILE\s+(?:"([^"]*)"|(\S+))/gim)]
+          .map(m => (m[1] || m[2]).replace(/\\/g, '/').split('/').pop());
+      }
       const missing = refs.filter(r => !have.has(r.toLowerCase()) &&
         !haveSafe.has(safeDiskName(r).toLowerCase()) &&
         !(catalog[kind] || []).some(f => f.name.toLowerCase() === r.toLowerCase()));
@@ -1638,7 +1645,7 @@ async function uploadFiles(kind, files) {
       stat.textContent = 'settling ' + c.name + '...';
       const r = await api('/api/disks/cdrom/set',
         {method: 'POST', body: JSON.stringify(
-          {cue: c.name, files: stored.filter(s => !/\.cue$/i.test(s))})});
+          {cue: c.name, files: stored.filter(s => !/\.(cue|mds)$/i.test(s))})});
       if (r) {
         stat.textContent = 'disc set ' + r.cue + ': ' + r.files.join(' + ') +
           ' — ' + r.tracks + ' track(s)' + (r.audio ? ', ' + r.audio + ' audio' : '') +
