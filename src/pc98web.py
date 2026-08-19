@@ -2487,7 +2487,13 @@ def qemu_argv(inst):
                 inst.get("machine") or "pc9821", accel,
                 ",pcspk-audiodev=snd" if sound else ""),
             "-m", inst.get("memory") or "64M",
-            "-k", "ja"]   # PC-98 is a JIS keyboard; use the Japanese VNC keymap
+            # PC-98 is a JIS keyboard; use the Japanese VNC keymap
+            "-k", "ja",
+            # The calendar clock reads the host's local time rather than
+            # UTC, so a guest that has no notion of a timezone -- which is
+            # every guest this runs -- shows the same wall clock as the
+            # machine it is running on.
+            "-rtc", "base=localtime"]
     # QEMU searches -L paths in order, so putting the uploaded ROMs first
     # lets a partial real set fall through to the compatible ones
     if inst.get("bios") == "real":

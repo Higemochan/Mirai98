@@ -256,6 +256,9 @@ def towns_argv(api, inst):
             "-L", api.win_short(cfg["datadir"]),
             "-display", "none",
             "-audiodev", "none,id=snd",
+            # the calendar clock follows the host's local time, so Towns OS
+            # shows the wall clock rather than UTC
+            "-rtc", "base=localtime",
             "-vnc", vncarg,
             "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port]
     # Pinning the instruction rate needs the translator, so a machine
