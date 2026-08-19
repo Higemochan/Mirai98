@@ -119,7 +119,8 @@ const DISK_ROWS = [["hdd1","IDE HDD 1","hdd"], ["hdd2","IDE HDD 2","hdd"],
 const TABS = ["General","Disks","Host","Memory","Sound","Network",
               "Options","Confirm"];
 const view = document.getElementById('view');
-let rfb = null, consoleWatch = null, catalog = {hdd:[], fdd:[], cdrom:[]};
+let rfb = null, consoleWatch = null, consoleFbWatch = null;
+let catalog = {hdd:[], fdd:[], cdrom:[]};
 let instances = [], hostFacts = {}, tab = 0;
 let hardware = {drives: [], serial: []}, autoConnect = '', facts = {};
 
@@ -887,6 +888,30 @@ function stopAudio() {
   ringL = ringR = null; wPos = 0; rPos = 0; primed = false;
 }
 
+/*
+ * How tall the console box comes up.  It used to be a flat 480px, which
+ * is a 640x400 screen at 1.2 pixels a line -- fine for a PC-98, but an
+ * FM TOWNS switching to 1024x768 was then squeezed into two thirds of
+ * its own size.  So keep the 1.2 and apply it to whatever the machine is
+ * showing now, and never ask for more height than the pane is wide
+ * enough to use: past that point a taller box only adds black bands
+ * above and below the picture.
+ */
+const CONSOLE_LINE_ZOOM = 480 / 400;
+
+function fitConsoleBox() {
+  const box = document.getElementById('console-box');
+  const canvas = box && box.querySelector('canvas');
+  if (!canvas || !canvas.width || !canvas.height) return;
+  const wide = box.clientWidth;
+  if (!wide) return;                 // a hidden pane has no width to fit to
+  const want = Math.round(Math.min(canvas.height * CONSOLE_LINE_ZOOM,
+                                   canvas.height * wide / canvas.width));
+  if (want > 0 && Math.abs(want - box.clientHeight) > 1) {
+    box.style.height = want + 'px';
+  }
+}
+
 window.connectConsole = async (name, ws) => {
   disconnectConsole();
   window.toggleConsolePane(true);      // a hidden box has no size to scale to
@@ -920,7 +945,21 @@ window.connectConsole = async (name, ws) => {
   consoleWatch = new ResizeObserver(() =>
     window.dispatchEvent(new Event('resize')));
   consoleWatch.observe(target);
-  rfb.addEventListener('connect', () => { toast(name + ': console connected'); enableAudioNow(); });
+  /*
+   * A mode change swaps the canvas's own width and height, and that is
+   * the only announcement noVNC makes of it -- the scaled size it puts in
+   * the style does not say what the guest switched to.  Watching the
+   * element covers the canvas being put there in the first place too.
+   */
+  consoleFbWatch = new MutationObserver(fitConsoleBox);
+  consoleFbWatch.observe(target, {childList: true, subtree: true,
+                                  attributes: true,
+                                  attributeFilter: ['width', 'height']});
+  rfb.addEventListener('connect', () => {
+    toast(name + ': console connected');
+    fitConsoleBox();
+    enableAudioNow();
+  });
   rfb.addEventListener('disconnect',
                        () => toast(name + ': console disconnected'));
   rfb.addEventListener('audiodata', e => audioChunk(e.detail.data));
@@ -932,6 +971,7 @@ window.disconnectConsole = () => {
   (window._pluginConsoleCleanups || []).forEach(c => { try { c(); } catch (e) {} });
   window._pluginConsoleCleanups = [];
   if (consoleWatch) { consoleWatch.disconnect(); consoleWatch = null; }
+  if (consoleFbWatch) { consoleFbWatch.disconnect(); consoleFbWatch = null; }
   if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
   stopAudio();
 };
