@@ -1184,9 +1184,12 @@ function diskTypeCell(f) {
     return '<span style="color:#e06c5f">' + t + ' — no data file: ' +
       esc((f.missing || []).join(', ')) + '</span>';
   }
-  if (f.cue) {
+  // a sheet gives the track count, and a .chd gives it from inside
+  if (f.tracks) {
     t += ' <span class="note">' + f.tracks + ' trk' +
          (f.audio ? ', ' + f.audio + ' audio' : '') + '</span>';
+  }
+  if (f.cue) {
     if (f.multi) t += ' <span style="color:#e06c5f" title="the cue names ' +
       f.multi + ' data files; the emulator follows a single one">' +
       'multi-file cue</span>';
@@ -1268,7 +1271,8 @@ function storageCard(kind, files) {
      ? '<div class="note">Several files may be chosen (or dropped here) at ' +
        'once: a .cue and its .bin/.img -- or a .mds and its .mdf -- travel ' +
        'as one disc, the sheet is pointed at the stored names, and the ' +
-       'pair is listed as one entry.</div>' : '') + '</div>' +
+       'pair is listed as one entry.  A .chd holds its tracks inside it ' +
+       'and comes on its own.</div>' : '') + '</div>' +
     create + '</div>';
 }
 

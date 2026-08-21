@@ -622,6 +622,49 @@ def cdrom_pairs(root, names):
     return pairs, orphans
 
 
+# --------------------------------------------------------- CHD images
+# MAME's CHD packs the whole disc into the one file, tracks and all, so
+# there is no sidecar to pair it with and no way for it to be an orphan:
+# what a .cue names beside the data, a CHD carries inside it.  The
+# descriptors sit uncompressed in a chain at the head of the file, and
+# the track ones are read here for the same count the sheets give.
+CHD_MAGIC = b"MComprHD"
+CHD_META_AT = {3: 36, 4: 36, 5: 48}     # where the chain starts, by version
+CHD_TRACK_TAGS = (b"CHT2", b"CHTR")
+CHD_MAX_META = 200          # entries followed before the chain is given up on
+
+
+def chd_summary(path):
+    """(track count, audio track count) of a CHD, and (0, 0) for anything
+    else -- a file that is not one, or one this cannot follow."""
+    tracks = audio = 0
+    try:
+        with open(path, "rb") as f:
+            head = f.read(56)
+            if len(head) < 56 or not head.startswith(CHD_MAGIC):
+                return 0, 0
+            version = struct.unpack_from(">I", head, 12)[0]
+            if version not in CHD_META_AT:
+                return 0, 0
+            off = struct.unpack_from(">Q", head, CHD_META_AT[version])[0]
+            for _ in range(CHD_MAX_META):
+                if not off:
+                    break
+                f.seek(off)
+                entry = f.read(16)
+                if len(entry) < 16:
+                    break
+                if entry[:4] in CHD_TRACK_TAGS:
+                    tracks += 1
+                    length = int.from_bytes(entry[5:8], "big")
+                    if b"TYPE:AUDIO" in f.read(min(length, 512)):
+                        audio += 1
+                off = struct.unpack_from(">Q", entry, 8)[0]
+    except (OSError, struct.error):
+        return 0, 0
+    return tracks, audio
+
+
 def fdd_media_label(size):
     return {1261568: "1.23M", 1474560: "1.44M", 737280: "720K",
             655360: "640K", 327680: "320K"}.get(size, "")
@@ -684,6 +727,10 @@ def disk_catalog():
                     entry["multi"] = len(refs)
             elif name in orphans:
                 entry.update({"orphan": True, "missing": orphans[name]})
+            elif kind == "cdrom":
+                tracks, audio = chd_summary(full)
+                if tracks:
+                    entry.update({"tracks": tracks, "audio": audio})
             entries.append(entry)
         out[kind] = entries
     return out
