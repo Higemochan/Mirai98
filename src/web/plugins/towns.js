@@ -471,21 +471,23 @@ window.townsPadHeld = townsPadHeld;
 window.townsProDecode = townsProDecode;
 window.townsProHeld = townsProHeld;
 
-async function watchTownsPadHid(send) {
+// The controller is watched for as long as the console is open, not asked
+// for once at the start.  A Bluetooth pad puts itself to sleep after a few
+// idle minutes, and the first version of this called getDevices() a single
+// time at console-open: a sleeping controller answered absent, the fallback
+// was a Gamepad API this browser offers nothing to, and the pad was
+// silently dead for the whole session -- measured, not guessed: the logs
+// showed the last HID report hours before the console opened, and zero
+// keys ever sent.  The connect event fires when a permitted device comes
+// back, so waking the controller mid-session is enough now; and a
+// controller that goes away mid-game lets go of everything and hands the
+// job back to the Gamepad API loop.
+function watchTownsPadHid(send) {
   if (!navigator.hid) {
     return null;
   }
-  let dev;
-  try {
-    dev = (await navigator.hid.getDevices())
-      .find(d => d.vendorId === 0x057e);
-  } catch (err) {
-    return null;
-  }
-  if (!dev) {
-    return null;                      // nothing has been allowed here yet
-  }
-  let centre = null;
+  let dev = null, centre = null, gone = false, saidMissing = false;
+
   const onReport = e => {
     const b = new Uint8Array(e.data.buffer, e.data.byteOffset,
                              e.data.byteLength);
@@ -498,24 +500,87 @@ async function watchTownsPadHid(send) {
     }
     send(townsProHeld(d, centre));
   };
-  dev.addEventListener('inputreport', onReport);
-  try {
-    if (!dev.opened) {
-      await dev.open();
+  const drop = () => {
+    if (!dev) {
+      return;
     }
-  } catch (err) {
-    dev.removeEventListener('inputreport', onReport);
-    townsPadHid = false;
-    window.toast('the controller is held open by another page; close the ' +
-                 'gamepad check and reconnect');
-    return null;
-  }
-  townsPadHid = true;
-  window.toast('gamepad: ' + dev.productName + ' (asked for directly)');
-  return () => {
-    townsPadHid = false;
     dev.removeEventListener('inputreport', onReport);
     try { dev.close(); } catch (err) { /* it may be gone already */ }
+    dev = null;
+    centre = null;
+    townsPadHid = false;
+    send(0);                    // a hand on a vanished pad holds nothing
+  };
+  const acquire = async () => {
+    if (gone || dev) {
+      return;
+    }
+    let found;
+    try {
+      found = (await navigator.hid.getDevices())
+        .find(d => d.vendorId === 0x057e);
+    } catch (err) {
+      return;
+    }
+    if (gone || dev) {
+      return;                   // something else got there while we asked
+    }
+    if (!found) {
+      // Absent may only mean asleep, and "no permission yet" and "press
+      // a button on it" cannot be told apart from here -- so say it
+      // once, because silence helps with neither.  Only when the
+      // Gamepad API has nothing either: a controller visible there is
+      // already driving the other loop.
+      const seen = navigator.getGamepads &&
+        [...navigator.getGamepads()].some(Boolean);
+      if (!saidMissing && !seen) {
+        saidMissing = true;
+        window.toast('no controller yet: press a button on it and it ' +
+                     'will be picked up');
+      }
+      return;
+    }
+    found.addEventListener('inputreport', onReport);
+    try {
+      if (!found.opened) {
+        await found.open();
+      }
+    } catch (err) {
+      found.removeEventListener('inputreport', onReport);
+      window.toast('the controller is held open by another page; close ' +
+                   'the gamepad check tab and press a button on it');
+      return;
+    }
+    if (gone) {                 // the console closed while open() ran
+      found.removeEventListener('inputreport', onReport);
+      try { found.close(); } catch (err) { /* it may be gone already */ }
+      return;
+    }
+    dev = found;
+    centre = null;
+    townsPadHid = true;
+    window.toast('gamepad: ' + found.productName + ' (asked for directly)');
+  };
+  const onConnect = e => {
+    if (e.device && e.device.vendorId === 0x057e) {
+      acquire();
+    }
+  };
+  const onDisconnect = e => {
+    if (dev && e.device === dev) {
+      drop();                   // and the Gamepad API loop takes over
+      window.toast('the controller went away; press a button on it to ' +
+                   'bring it back');
+    }
+  };
+  navigator.hid.addEventListener('connect', onConnect);
+  navigator.hid.addEventListener('disconnect', onDisconnect);
+  acquire();
+  return () => {
+    gone = true;
+    navigator.hid.removeEventListener('connect', onConnect);
+    navigator.hid.removeEventListener('disconnect', onDisconnect);
+    drop();
   };
 }
 
@@ -578,16 +643,8 @@ function watchTownsPad(rfb) {
     frame = requestAnimationFrame(scan);
   };
   frame = requestAnimationFrame(scan);
-  // the device is asked for asynchronously, and the console may be closed
-  // before the answer comes: remember that it was, so what arrives late is
-  // put down again rather than left open with a key held
-  let stopHid = null, gone = false;
-  watchTownsPadHid(send).then(stop => {
-    stopHid = stop;
-    if (gone && stop) { stop(); }
-  });
+  const stopHid = watchTownsPadHid(send);
   return () => {
-    gone = true;
     cancelAnimationFrame(frame);
     if (stopHid) { stopHid(); }
     send(0);

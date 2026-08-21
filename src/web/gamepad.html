@@ -155,7 +155,14 @@ const hidEl = document.getElementById('hid');
 const hidBtn = document.getElementById('hidbtn');
 let hidSaid = 0, hidLast = '';
 
+// The check page must not stand between the controller and the console:
+// a device this page holds open may be unopenable from the console's tab,
+// so it is let go the moment this tab stops being looked at, and taken up
+// again when it is.  Closing the tab lets go too.
+let hidDev = null;
+
 function hidWatch(dev) {
+  hidDev = dev;
   tell('webhid: ' + dev.productName + ' vid=0x' +
        dev.vendorId.toString(16) + ' pid=0x' + dev.productId.toString(16) +
        ' collections=' + dev.collections.map(
@@ -209,6 +216,26 @@ if (!navigator.hid) {
       hidEl.textContent = 'already allowed: ' + mine[0].productName;
       hidWatch(mine[0]);
     }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!hidDev) { return; }
+    if (document.hidden) {
+      try { hidDev.close(); } catch (err) { /* it may be gone */ }
+      hidEl.textContent = 'let go while this tab is in the background, ' +
+                          'so the console can have the controller';
+      tell('webhid: released (tab hidden)', true);
+    } else {
+      hidDev.open().then(() => {
+        hidEl.textContent = 'opened ' + hidDev.productName +
+                            ' again; press buttons on it';
+      }).catch(() => {
+        hidEl.textContent = 'the console has the controller now; close ' +
+                            'its tab to test here again';
+      });
+    }
+  });
+  window.addEventListener('pagehide', () => {
+    if (hidDev) { try { hidDev.close(); } catch (err) { /* gone */ } }
   });
   hidBtn.onclick = async () => {
     tell('webhid: asking for the device', true);
