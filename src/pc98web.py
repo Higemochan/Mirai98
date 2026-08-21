@@ -791,6 +791,24 @@ def disc_set(root, name):
     return [name, partner] if partner else [name]
 
 
+def sheet_left_behind(root, name):
+    """The sheet a rename or a move cannot take along: one that lives
+    beside the file a link points at rather than beside the link itself.
+    The drive resolves the link and finds it there whatever the link is
+    called -- which is why this is said rather than refused -- but it is
+    worth saying, because the shelf is then showing a disc whose sheet is
+    named after something else, and the next person to look wonders what
+    broke."""
+    if is_sidecar(name) or sidecar_partner(root, name):
+        return None
+    here = os.path.join(root, name)
+    real = os.path.realpath(here)
+    if real == here:
+        return None
+    cue = sidecar_partner(os.path.dirname(real), os.path.basename(real))
+    return os.path.join(os.path.dirname(real), cue) if cue else None
+
+
 def point_cue_at(path, was, now):
     """Rewrite the FILE line naming `was` to name `now`, and leave every
     other line of the sheet as it stands -- what is in it beyond the name
@@ -939,11 +957,16 @@ def disk_catalog():
                     refs, tracks, audio = sidecar_summary(cue_path)
                     entry.update({"cue": os.path.basename(pairs[name]),
                                   "tracks": tracks, "audio": audio})
-                    # the emulator looks for <data stem>.cue: a sheet named
-                    # differently, or one spread over several data files, is
-                    # not something it can follow yet
-                    if os.path.splitext(os.path.basename(pairs[name]))[0] != \
-                            os.path.splitext(name)[0]:
+                    # the emulator looks for <data stem>.cue beside the
+                    # file itself: for a link that is the file it points
+                    # at, whose sheet matches its stem however the link is
+                    # named -- so a difference there is worth showing and
+                    # is not a fault.  A sheet in this folder under a
+                    # different stem is one, and the disc will not pair.
+                    if os.path.isabs(pairs[name]):
+                        entry["cue_where"] = os.path.dirname(pairs[name])
+                    elif os.path.splitext(os.path.basename(pairs[name]))[0] \
+                            != os.path.splitext(name)[0]:
                         entry["cue_mismatch"] = True
                     if len(refs) > 1:
                         entry["multi"] = len(refs)
@@ -3835,7 +3858,7 @@ class Handler(BaseHTTPRequestHandler):
         if not names:
             self.fail(400, "nothing to move")
             return
-        done = []
+        done, left = [], []
         with _lock:
             plan = []
             for name in names:
@@ -3850,6 +3873,10 @@ class Handler(BaseHTTPRequestHandler):
                 if was == group:
                     continue            # it is already shelved there
                 here = os.path.dirname(src)
+                if kind == "cdrom":
+                    stays = sheet_left_behind(here, name)
+                    if stays and os.path.basename(stays) not in left:
+                        left.append(os.path.basename(stays))
                 for f in (disc_set(here, name) if kind == "cdrom"
                           else [name]):
                     if (was, f) not in plan:
@@ -3876,7 +3903,7 @@ class Handler(BaseHTTPRequestHandler):
                                  "into %s" % group if group
                                  else "out of its group"), "disk")
         self.reply(200, {"result": "moved", "group": group,
-                         "files": [f for _, f in done]})
+                         "files": [f for _, f in done], "left": left})
 
     def suggest_groups(self, kind):
         """The groups the names themselves suggest: what stands in front
@@ -3940,6 +3967,7 @@ class Handler(BaseHTTPRequestHandler):
                                  "files": [name], "vms": []})
                 return
             files = disc_set(root, name) if kind == "cdrom" else [name]
+            left = sheet_left_behind(root, name) if kind == "cdrom" else None
             stem = os.path.splitext(to)[0]
             moves = [(name, to)] + [(f, stem + os.path.splitext(f)[1])
                                     for f in files if f != name]
@@ -3991,10 +4019,14 @@ class Handler(BaseHTTPRequestHandler):
                     save_instance(inst)
         say("renamed %s to %s" % (", ".join(f for f, _ in moves),
                                   ", ".join(t for _, t in moves)), "disk")
+        if left:
+            say("%s stayed in %s, beside the file %s points at"
+                % (os.path.basename(left), os.path.dirname(left), to), "disk")
         for vm in touched:
             say("vm %s: follows %s to %s" % (vm, name, to), "vm")
         self.reply(200, {"result": "renamed", "name": to,
-                         "files": [t for _, t in moves], "vms": touched})
+                         "files": [t for _, t in moves], "vms": touched,
+                         "left": os.path.basename(left) if left else ""})
 
     def disk_action(self, kind, name, verb):
         """Write a ZIP into an image, or duplicate the image itself."""

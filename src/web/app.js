@@ -1207,6 +1207,11 @@ function diskTypeCell(f) {
     t += ' <span class="note">' + f.tracks + ' trk' +
          (f.audio ? ', ' + f.audio + ' audio' : '') + '</span>';
   }
+  if (f.cue_where) {
+    t += ' <span class="note" title="the drive follows the link and finds ' +
+      'the sheet beside the file it points at, whatever this is called">' +
+      'sheet in ' + esc(f.cue_where) + '</span>';
+  }
   if (f.cue) {
     if (f.multi) t += ' <span style="color:#e06c5f" title="the cue names ' +
       f.multi + ' data files; the emulator follows a single one">' +
@@ -1645,7 +1650,9 @@ function doMove(kind, names, group) {
       {method: 'POST', body: JSON.stringify({names: names, group: group})})
     .then(r => { if (r) {
                    toast(r.files.length + ' moved ' +
-                         (r.group ? 'into ' + r.group : 'out of its group'));
+                         (r.group ? 'into ' + r.group : 'out of its group') +
+                         ((r.left || []).length
+                          ? '; ' + r.left.join(', ') + ' stayed behind' : ''));
                    task('Storage ' + kind + ' - move', 'OK');
                    if (r.group) {
                      openGroups[kind + '/' + r.group] = true;
@@ -1720,7 +1727,9 @@ window.renameDisk = (kind, name, then) => {
       {method: 'POST', body: JSON.stringify({name: name, stem: to})})
     .then(r => { if (r) { toast('renamed to ' + r.files.join(' + ') +
                             (r.vms.length ? ', and ' + r.vms.join(', ') +
-                             ' follows' : ''));
+                             ' follows' : '') +
+                            (r.left ? '; ' + r.left + ' stayed with the file ' +
+                             'this one points at' : ''));
                           task('Disk ' + name + ' - rename to ' + r.name,
                                'OK');
                           if (then) {
