@@ -51,6 +51,15 @@ MIDI_MODES = {"": None, "synth": "on"}
 # the machine falls into slow motion, which is audible.
 CPU_SPEEDS = {"": None, "high": 5, "mid": 6, "low": 7}
 
+# Which game port holds the pad.  The pad takes port A and the mouse port
+# B, as on a real machine: titles read port A for a pad, and one that finds
+# a mouse there steers itself as the mouse moves.  The Towns OS finds its
+# mouse in port B just as well -- measured, once a bug that fed host motion
+# to port A whatever was in it had been fixed.  So there is no trade to
+# make in the usual case, and the other arrangements are here for the
+# titles that want them.
+PAD_PORTS = {"": None, "b": "b", "a": "a", "both": "both", "off": "off"}
+
 
 def register(api):
     api.add_machine("towns")
@@ -61,11 +70,15 @@ def register(api):
                   else "cmos must be empty or real")
     api.add_field("cpu", lambda v: None if v in CPU_SPEEDS
                   else "cpu must be empty, high, mid or low")
+    api.add_field("pad", lambda v: None if v in PAD_PORTS
+                  else "pad must be empty, a, b, both or off")
     api.machine_sanitize("towns", towns_sanitize)
     api.instance_action("towns", "reset-cmos",
                         lambda inst, data: towns_reset_cmos(api, inst))
     api.instance_action("towns", "boot-reset",
                         lambda inst, data: towns_boot_reset(api, inst, data))
+    api.instance_action("towns", "pad-port",
+                        lambda inst, data: towns_pad_port(api, inst, data))
 
 
 # where a machine's CMOS starts from when it has none yet: "" = the ROM
@@ -113,6 +126,39 @@ def towns_boot_reset(api, inst, data):
     if not _qmp_ok(api.qmp(inst, "system_reset")):
         return 502, "the machine took the boot key but would not restart"
     return {"result": "restarting", "key": key}
+
+
+def towns_pad_port(api, inst, data):
+    """Move the pad between the game ports, while the machine runs.
+
+    A pad and the mouse cannot share port A, and which of them wants it
+    depends on the disc in the drive, so this is a thing to change in the
+    middle of playing rather than only before starting.  The machine
+    takes it live; the record keeps it, so the next start begins the same
+    way round.
+    """
+    if not isinstance(data, dict):
+        return 400, "expected a JSON object"
+    port = data.get("port")
+    port = "" if port is None else str(port)
+    if port not in PAD_PORTS:
+        return 400, "the pad goes in port a or b, in both, or nowhere (off)"
+    inst["pad"] = port
+    api.save_instance(inst)
+    if not api.is_running(inst):
+        return {"result": "kept", "port": port}
+    reply = api.qmp(inst, "qom-set", {"path": "/machine/towns-gameport",
+                                      "property": "pad",
+                                      "value": PAD_PORTS[port] or "b"})
+    if reply is None:
+        return 502, "the machine did not answer"
+    if "error" in reply:
+        # a machine started before the emulator learned the trick has no
+        # such property; say which of the two it is
+        return 409, ("%s -- if it was started before the emulator was "
+                     "updated, stop and start it again"
+                     % reply["error"].get("desc", "refused"))
+    return {"result": "moved", "port": port}
 
 
 def towns_reset_cmos(api, inst):
@@ -240,6 +286,9 @@ def towns_argv(api, inst):
     # file keeps the guest's SETUP; a boot key overrides the ROM's order
     machine = "towns,accel=%s,audiodev=snd,cmos=%s" % (
         accel, api.qemu_file(towns_cmos(api, inst, towns_roms)))
+    pad = PAD_PORTS.get(inst.get("pad") or "")
+    if pad:
+        machine += ",pad=%s" % pad
     bootkey = BOOT_KEYS.get(inst.get("boot") or "")
     if bootkey:
         machine += ",bootkey=%s" % bootkey
@@ -272,7 +321,7 @@ def towns_argv(api, inst):
     # so a disc can be put in from the Media row while the machine runs
     cd = "if=ide,index=2,media=cdrom"
     if inst.get("cd"):
-        cd += ",format=raw,file=%s" % api.qemu_file(api.disk_path(inst, "cd"))
+        cd += "," + api.drive_backing(api.disk_path(inst, "cd"))
     argv += ["-drive", cd]
     # both internal floppy drives always exist (so a disk can be put in
     # from the Media row while the machine runs); an image is a raw dump
@@ -280,15 +329,15 @@ def towns_argv(api, inst):
     for index, key in enumerate(("fdd1", "fdd2")):
         drive = "if=floppy,index=%d" % index
         if inst.get(key):
-            drive += ",format=raw,file=%s" % api.qemu_file(
+            drive += "," + api.drive_backing(
                 api.disk_path(inst, key))
         argv += ["-drive", drive]
     # SCSI hard disks: SCSI ID = unit (Towns OS drive letters follow the
     # CMOS registration, D: onwards on the stock towns.cmos.hdd)
     for unit, key in enumerate(("scsi1", "scsi2", "scsi3", "scsi4")):
         if inst.get(key):
-            argv += ["-drive", "if=scsi,bus=0,unit=%d,format=raw,file=%s" % (
-                unit, api.qemu_file(api.disk_path(inst, key)))]
+            argv += ["-drive", "if=scsi,bus=0,unit=%d,%s" % (
+                unit, api.drive_backing(api.disk_path(inst, key)))]
     if inst.get("extra"):
         argv += inst["extra"].split()
     return argv

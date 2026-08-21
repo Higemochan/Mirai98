@@ -1,0 +1,282 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gamepad check</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { padding: 1em 1.4em; display: block !important; }
+  .card { display: block !important; width: auto !important;
+          float: none !important; }
+  #hidbtn { font-size: 1.15em; padding: .5em 1.2em; }
+  .card { margin: .8em 0; padding: .8em 1em; }
+  .lines { display: flex; flex-wrap: wrap; gap: .4em; margin: .4em 0; }
+  .line { border: 1px solid #46505c; border-radius: .3em; padding: .25em .6em;
+          min-width: 4.5em; text-align: center; }
+  .on { background: #2f7d4f; border-color: #57b07c; color: #fff; }
+  .btns { display: flex; flex-wrap: wrap; gap: .25em; }
+  .btn { width: 2.2em; text-align: center; border: 1px solid #46505c;
+         border-radius: .3em; padding: .15em 0; font-size: .85em; }
+  .bad { color: #e06c5f; }
+  .good { color: #7fc98f; }
+  code { background: #222831; padding: .1em .35em; border-radius: .2em; }
+</style>
+
+<h2>Gamepad check</h2>
+<div class="card" style="border:1px solid #57b07c">
+  <h3>If nothing appears under "Controllers", press this</h3>
+  <button type="button" id="hidbtn">Ask for the controller</button>
+  <div id="hid" class="note" style="margin-top:.5em">not asked yet</div>
+  <p class="note">Edge and Chrome will not offer a Bluetooth Switch Pro
+  controller to the Gamepad API on this system, so this asks for the device
+  itself. A prompt appears: pick "Pro Controller" in it, then press buttons
+  on the controller.</p>
+</div>
+<p class="note">Nothing here is sent to a machine: this page only shows what
+this browser makes of a controller plugged into this computer.</p>
+
+
+<div class="card"><h3>Controllers</h3><div id="pads">looking...</div></div>
+<div class="card"><h3>This page</h3><div id="env"></div></div>
+
+<div class="card"><h3>As an FM TOWNS pad</h3>
+  <div class="lines" id="lines"></div>
+  <div class="note" id="byte"></div>
+</div>
+
+<script>
+// if the module below throws, nothing on this page works and the log would
+// go quiet with no reason given; this catches that and says so
+window.addEventListener('error', e => {
+  fetch('/api/note', {method: 'POST', body: JSON.stringify(
+    {text: 'gamepad: the page itself broke: ' + e.message + ' at ' +
+           (e.filename || '') + ':' + e.lineno})}).catch(() => {});
+});
+window.addEventListener('unhandledrejection', e => {
+  fetch('/api/note', {method: 'POST', body: JSON.stringify(
+    {text: 'gamepad: something went wrong on the page: ' + e.reason})})
+    .catch(() => {});
+});
+</script>
+
+<script type="module">
+// The plugin registers a machine when it loads; here it is wanted only for
+// the one function that turns a controller into pad lines, so that this
+// page and the console cannot disagree about what a button means.
+window.registerMachinePlugin = () => {};
+let held = null, why = '';
+try {
+  await import('/plugins/towns.js');
+  held = window.townsPadHeld;
+  if (!held) { why = 'the plugin loaded but does not offer townsPadHeld: ' +
+                     'the console has an older copy of it'; }
+} catch (err) {
+  why = 'the machine plugin would not load: ' + err;
+}
+
+const LINES = ['up', 'down', 'left', 'right', 'A', 'B', 'RUN', 'SELECT'];
+const KEYS = ['F13', 'F14', 'F15', 'F16', 'F17', 'F18', 'F19', 'F20'];
+const env = document.getElementById('env');
+const padsEl = document.getElementById('pads');
+const linesEl = document.getElementById('lines');
+const byteEl = document.getElementById('byte');
+
+const api = !!navigator.getGamepads;
+env.innerHTML =
+  '<div>' + (api ? '<span class="good">the Gamepad API is here</span>'
+                 : '<span class="bad">this page is not being offered the ' +
+                   'Gamepad API</span>') + '</div>' +
+  '<div>secure context: ' +
+  (window.isSecureContext ? '<span class="good">yes</span>'
+                          : '<span class="bad">no</span>') +
+  ' &mdash; a browser only shows gamepads to a page on https or localhost' +
+  '</div>' +
+  '<div>address: <code>' + location.origin + '</code></div>' +
+  (why ? '<div class="bad">' + why + '</div>' : '') +
+  (api ? '<div class="note">A controller stays hidden until a button on it ' +
+         'is pressed with this page in front. Press one now.</div>' : '');
+
+linesEl.innerHTML = LINES.map((n, i) =>
+  '<div class="line" id="l' + i + '">' + n + '<br><span class="note">' +
+  KEYS[i] + '</span></div>').join('');
+
+// What is seen here is only on this screen, and the machine it is being
+// checked against is somewhere else -- so say it into the log as well, on
+// arrival and whenever it changes.  Enough to answer "did anything reach
+// it?" without anybody reading numbers aloud.
+let toldLast = '', toldAt = 0;
+function tell(text, force) {
+  const now = Date.now();
+  if (!force && (text === toldLast || now - toldAt < 400)) { return; }
+  toldLast = text;
+  toldAt = now;
+  fetch('/api/note', {method: 'POST',
+                      body: JSON.stringify({text: 'gamepad: ' + text})})
+    .catch(() => {});
+}
+const slots = () => api ? [...navigator.getGamepads()]
+  .map(g => g ? g.id : '-').join(' | ') : 'no api';
+tell('page open, api=' + api + ' secure=' + window.isSecureContext +
+     ' at ' + location.origin + ' slots=[' + slots() + '] ua=' +
+     navigator.userAgent + (why ? ' (' + why + ')' : ''), true);
+// a browser may hold a controller back until the page has been clicked or
+// a button pressed; say so a few times and then be quiet
+[2000, 6000, 15000].forEach(ms => setTimeout(() => {
+  if (![...(api ? navigator.getGamepads() : [])].some(Boolean)) {
+    tell('after ' + (ms / 1000) + 's still nothing: slots=[' + slots() + ']',
+         true);
+  }
+}, ms));
+document.body.addEventListener('click',
+  () => tell('the page was clicked; slots=[' + slots() + ']', true),
+  {once: true});
+window.addEventListener('gamepadconnected',
+                        e => tell('connected ' + e.gamepad.id, true));
+document.getElementById('byte').insertAdjacentHTML('afterend',
+  '<div style="margin-top:.6em"><button type="button" id="say">' +
+  'Send what is on this page to the log</button></div>');
+document.getElementById('say').onclick = () => {
+  const g = [...(navigator.getGamepads ? navigator.getGamepads() : [])]
+    .filter(Boolean)[0];
+  tell(g ? ('by hand: ' + g.id + ' mapping=' + g.mapping +
+            ' buttons=' + g.buttons.map((b, i) => b.pressed ? i : '')
+              .filter(Boolean).join('/') +
+            ' of ' + g.buttons.length +
+            ' axes=' + [...g.axes].map(a => a.toFixed(2)).join(','))
+          : 'by hand: no gamepad visible to this page', true);
+};
+
+// The controller's own report is decoded by the plugin, so this page and
+// the console cannot come to different conclusions about a button.
+const proDecode = window.townsProDecode;
+const proHeld = window.townsProHeld;
+
+// ---- WebHID: the device itself, when the Gamepad API will not have it ----
+const hidEl = document.getElementById('hid');
+const hidBtn = document.getElementById('hidbtn');
+let hidSaid = 0, hidLast = '';
+
+function hidWatch(dev) {
+  tell('webhid: ' + dev.productName + ' vid=0x' +
+       dev.vendorId.toString(16) + ' pid=0x' + dev.productId.toString(16) +
+       ' collections=' + dev.collections.map(
+         c => c.usagePage + '/' + c.usage).join(','), true);
+  let centre = null;
+  dev.addEventListener('inputreport', e => {
+    const b = new Uint8Array(e.data.buffer);
+    if (e.reportId !== 0x30 || b.length < 12) {
+      hidEl.textContent = 'report 0x' + e.reportId.toString(16) +
+        ' is not the one expected (' + b.length + ' bytes)';
+      return;
+    }
+    const d = proDecode(b);
+    if (!centre && !(b[2] | b[3] | b[4])) {
+      centre = {x: d.lx, y: d.ly};       // where the stick rests, once
+    }
+    const bits = proHeld(d, centre);
+    const down = Object.keys(d).filter(k => d[k] === true);
+    hidEl.textContent = 'buttons: ' + (down.join(' ') || '(none)') +
+      '   stick ' + d.lx + ',' + d.ly +
+      '   →  pad 0x' + bits.toString(16).padStart(2, '0');
+    // the bytes that carry buttons, and what they were read as
+    const key = b[2] + ',' + b[3] + ',' + b[4] + ',' + bits;
+    if (key !== hidLast && hidSaid < 40) {
+      hidLast = key;
+      hidSaid++;
+      tell('webhid 0x30 buttons=' +
+           [b[2], b[3], b[4]].map(x => x.toString(16).padStart(2, '0')).join(' ') +
+           ' stick=' + d.lx + ',' + d.ly +
+           ' -> ' + (down.join('+') || 'none') +
+           ' -> pad 0x' + bits.toString(16).padStart(2, '0'), true);
+    }
+  });
+  return dev.open().then(() => {
+    hidEl.textContent = 'opened ' + dev.productName + '; press buttons on it';
+    tell('webhid: opened=' + dev.opened, true);
+  }).catch(err => {
+    hidEl.textContent = 'could not open it: ' + err;
+    tell('webhid: open failed: ' + err, true);
+  });
+}
+
+tell('webhid: available=' + !!navigator.hid, true);
+if (!navigator.hid) {
+  hidEl.textContent = 'this browser has no WebHID';
+  hidBtn.disabled = true;
+} else {
+  navigator.hid.getDevices().then(list => {
+    const mine = list.filter(d => d.vendorId === 0x057e);
+    if (mine.length) {
+      hidEl.textContent = 'already allowed: ' + mine[0].productName;
+      hidWatch(mine[0]);
+    }
+  });
+  hidBtn.onclick = async () => {
+    tell('webhid: asking for the device', true);
+    hidEl.textContent = 'asking...';
+    try {
+      const got = await navigator.hid.requestDevice(
+        {filters: [{vendorId: 0x057e}]});
+      if (!got.length) {
+        hidEl.textContent = 'nothing was picked';
+        tell('webhid: the prompt came up and nothing was picked (which ' +
+             'also means whether the device was in the list)', true);
+        return;
+      }
+      await hidWatch(got[0]);
+    } catch (err) {
+      hidEl.textContent = 'refused: ' + err;
+      tell('webhid: requestDevice failed: ' + err, true);
+    }
+  };
+}
+
+function draw() {
+  const pads = api ? [...navigator.getGamepads()].filter(Boolean) : [];
+  padsEl.innerHTML = pads.length
+    ? pads.map(g =>
+        '<div><b>' + g.index + ': ' + g.id + '</b>' +
+        ' <span class="note">(' + g.mapping + ', ' + g.buttons.length +
+        ' buttons, ' + g.axes.length + ' axes)</span></div>' +
+        '<div class="btns">' + g.buttons.map((b, i) =>
+          '<div class="btn' + (b.pressed || b.value > 0.5 ? ' on' : '') +
+          '">' + i + '</div>').join('') + '</div>' +
+        '<div class="note">axes ' + [...g.axes].map(a => a.toFixed(2))
+          .join(', ') + '</div>').join('<hr>')
+    : (api ? 'none seen yet &mdash; press a button on the controller'
+           : 'nothing can be seen from here');
+
+  const g = pads[0];
+  const bits = (g && held) ? held(g) : 0;
+  for (let i = 0; i < LINES.length; i++) {
+    document.getElementById('l' + i).className =
+      'line' + ((bits >> i) & 1 ? ' on' : '');
+  }
+  // the byte the game port would report: every line idle high, pulled low
+  // by what is held, with RUN and SELECT pulling two at once
+  let port = 0x3f;
+  if (bits & 0x40) { port &= 0xf3; }
+  if (bits & 0x08) { port &= 0xf7; }
+  if (bits & 0x04) { port &= 0xfb; }
+  if (bits & 0x80) { port &= 0xfc; }
+  if (bits & 0x02) { port &= 0xfd; }
+  if (bits & 0x01) { port &= 0xfe; }
+  if (bits & 0x10) { port &= 0xef; }
+  if (bits & 0x20) { port &= 0xdf; }
+  byteEl.textContent = 'held 0x' + bits.toString(16).padStart(2, '0') +
+    '  →  the port would read 0x' + port.toString(16).padStart(2, '0');
+  if (g) {
+    const down = g.buttons.map((b, i) => (b.pressed || b.value > 0.5) ? i : -1)
+      .filter(i => i >= 0);
+    const tilted = [...g.axes].map((a, i) => Math.abs(a) > 0.5 ? i + ':' +
+      a.toFixed(2) : '').filter(Boolean);
+    tell(g.id + ' mapping=' + (g.mapping || 'none') +
+         ' buttons[' + down.join(',') + '] of ' + g.buttons.length +
+         ' axes[' + tilted.join(' ') + '] of ' + g.axes.length +
+         ' -> held 0x' + bits.toString(16).padStart(2, '0'));
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+window.addEventListener('gamepadconnected', e =>
+  console.log('gamepadconnected', e.gamepad.id));
+</script>

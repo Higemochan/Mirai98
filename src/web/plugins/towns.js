@@ -30,6 +30,9 @@ function townsEditForm(i, h) {
   const cpuOpts = TOWNS_CPUS.map(([v, label]) =>
     '<option value="' + v + '"' + ((i.cpu || '') === v ? ' selected' : '') +
     '>' + label + '</option>').join('');
+  const padOpts = TOWNS_PADS.map(([v, label]) =>
+    '<option value="' + v + '"' + ((i.pad || '') === v ? ' selected' : '') +
+    '>' + label + '</option>').join('');
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', i.cd) +
@@ -59,6 +62,15 @@ function townsEditForm(i, h) {
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + bootOpts + '</select>' +
       note('the key held at power-on for the system ROM') + '</div>' +
+    '<div class="row"><label>Game pad</label>' +
+      '<select name="pad">' + padOpts + '</select>' +
+      note('where the pad is when the machine starts. The pad takes port ' +
+           'A, which is where titles look for one, and the mouse takes ' +
+           'port B, where the Towns OS still finds it -- so both work at ' +
+           'once. Put the pad in port B for anything that wants a mouse ' +
+           'in port A instead. While the machine is running this is on ' +
+           'its own page as well, and takes effect at once') +
+      '</div>' +
     '<div class="row"><label>CMOS seed</label>' +
       '<select name="cmos">' + townsCmosOpts(i.cmos) + '</select>' +
       '<button type="button" onclick="townsResetCmos(\'' + i.name + '\')"' +
@@ -125,6 +137,8 @@ function townsHardware(i, h) {
       ' <span class="note">(SCSI ID ' + n + ')</span>']);
   });
   rows.push(['&#9654; Boot from', townsBootLabel(i.boot)]);
+  rows.push(['Game port', (TOWNS_PADS.find(([v]) => v === (i.pad || ''))
+                           || ['', ''])[1]]);
   rows.push(['&#9881; CMOS', 'per-machine towns.cmos, seeded from ' +
     townsCmosLabel(i.cmos)]);
   if (i.snapshot)
@@ -166,15 +180,50 @@ function townsActions(i) {
   if (!i.running) {
     return [];
   }
-  return ['<select id="towns-bootkey" title="Keys held down while the ' +
+  // The pad and the mouse want the same socket, and which of them should
+  // have it depends on the disc that is in the drive -- so it is here,
+  // beside the machine while it runs, rather than only in the form that
+  // is filled in before it starts.  The machine takes the change live.
+  const padHere = ['<select id="towns-padport" title="The pad takes port ' +
+          'A, where titles look for one, and the mouse takes port B, ' +
+          'where the Towns OS still finds it. A game that steers itself ' +
+          'as the mouse moves is reading port A and wants the pad there. ' +
+          'Changed here it takes effect at once." onchange="townsPadPort(\'' +
+          esc(jsq(i.name)) + '\')">' +
+          TOWNS_PADS.map(([v, label]) =>
+            '<option value="' + v + '"' +
+            ((i.pad || '') === v ? ' selected' : '') + '>' +
+            'pad: ' + label.split(' — ')[0] + '</option>').join('') +
+          '</select>',
+          '<button onclick="townsPadPort(\'' + esc(jsq(i.name)) +
+          '\')">Move the pad</button>'];
+  return padHere.concat(
+         ['<select id="towns-bootkey" title="Keys held down while the ' +
           'machine starts, as on the real one: CD boots the disc, F0-F3 a ' +
           'floppy drive, H0-H4 a SCSI id, and the machine falls through to ' +
           'the next device if that one has nothing to boot.">' +
           TOWNS_RESET_KEYS.map(([v, label]) =>
             '<option value="' + v + '">' + label + '</option>').join('') +
           '</select>',
-          '<button onclick="townsBootReset(\'' + i.name + '\')">Go</button>'];
+          '<button onclick="townsBootReset(\'' + i.name +
+          '\')">Go</button>']);
 }
+
+// Moving the pad between the ports, while it runs.  The machine is told
+// and the record is kept, so the next start begins the same way round.
+window.townsPadPort = async (name) => {
+  const sel = document.getElementById('towns-padport');
+  const port = sel ? sel.value : '';
+  const r = await api('/api/instances/' + encodeURIComponent(name) +
+                      '/x/pad-port', {method: 'POST',
+                                      body: JSON.stringify({port})});
+  if (r) {
+    const label = (TOWNS_PADS.find(([v]) => v === port) || ['', port])[1];
+    toast(r.result === 'moved' ? 'the pad is in ' + label
+                               : 'next start: ' + label);
+    task('VM ' + name + ' - pad port', r.result);
+  }
+};
 
 window.townsBootReset = async (name) => {
   const sel = document.getElementById('towns-bootkey');
@@ -205,6 +254,16 @@ const TOWNS_CPUS = [['', 'Unrestricted - as fast as the host translates'],
 const townsCpuLabel = v =>
   (TOWNS_CPUS.find(([k]) => k === (v || '')) || TOWNS_CPUS[0])[1];
 // where a machine's CMOS starts from (see plugins/towns.py CMOS_SEEDS)
+// Which game port the pad is in.  Port A by default, which is where a
+// title looks for one; the mouse is then in port B, where the Towns OS
+// finds it perfectly well.
+const TOWNS_PADS = [
+  ['', 'port A — where titles look for it (the mouse keeps working, in B)'],
+  ['a', 'port A — the same, said outright'],
+  ['b', 'port B — for anything that wants the mouse in port A'],
+  ['both', 'both ports — two pads, no mouse'],
+  ['off', 'none — no pad at all']];
+
 const TOWNS_CMOS = [['', 'standard (nothing registered; SETUP registers disks)'],
                     ['real', 'real machine copy (towns.cmos.hdd)']];
 const townsCmosLabel = v =>
@@ -338,23 +397,165 @@ function townsPadHeld(g) {
          (on(8) ? 0x80 : 0);           /* back / select */
 }
 
+// what the last console made of the pad, for asking after the fact
+window.townsPadStatus = () => ({
+  api: !!navigator.getGamepads,
+  secureContext: window.isSecureContext,
+  origin: location.origin,
+  watching: townsPadWatching,
+  pads: navigator.getGamepads
+    ? [...navigator.getGamepads()].filter(Boolean).map(g => ({
+        id: g.id, mapping: g.mapping, buttons: g.buttons.length,
+        axes: g.axes.length,
+        held: '0x' + townsPadHeld(g).toString(16).padStart(2, '0')}))
+    : 'this browser is not offering the Gamepad API to this page',
+  held: '0x' + townsPadLast.toString(16).padStart(2, '0'),
+  keysSent: townsPadSent,
+});
+let townsPadWatching = false, townsPadLast = 0, townsPadSent = 0;
+// set while the controller is being read through WebHID: the frame loop
+// then keeps out of the way, because it can see no gamepad (that is the
+// whole reason WebHID is in use) and would spend every frame letting go
+// of what the other one is holding
+let townsPadHid = false;
+
+// ---- the same pad, when the browser will not show it as a gamepad --------
+// Edge and Chrome do not offer a Bluetooth Switch Pro controller to the
+// Gamepad API on macOS, though the machine and Safari both see it.  WebHID
+// asks for the device itself: it streams report 0x30 sixty times a second
+// -- a timer, the battery, three bytes of buttons and two packed 12-bit
+// sticks -- and those bytes say the same thing the Gamepad API would have.
+//
+// The permission belongs to the origin and outlasts the page, so once it
+// has been given (on the gamepad check page, say) the console picks the
+// controller up without asking again.
+function townsProDecode(b) {
+  const right = b[2], shared = b[3], left = b[4];
+  return {
+    Y: !!(right & 0x01), X: !!(right & 0x02),
+    B: !!(right & 0x04), A: !!(right & 0x08),
+    minus: !!(shared & 0x01), plus: !!(shared & 0x02),
+    down: !!(left & 0x01), up: !!(left & 0x02),
+    right: !!(left & 0x04), left: !!(left & 0x08),
+    lx: b[5] | ((b[6] & 0x0f) << 8),
+    ly: (b[6] >> 4) | (b[7] << 4),
+  };
+}
+
+function townsProHeld(d, centre) {
+  const far = 700;                    // half the travel, near enough
+  return (d.up || (centre && d.ly > centre.y + far) ? 0x01 : 0) |
+         (d.down || (centre && d.ly < centre.y - far) ? 0x02 : 0) |
+         (d.left || (centre && d.lx < centre.x - far) ? 0x04 : 0) |
+         (d.right || (centre && d.lx > centre.x + far) ? 0x08 : 0) |
+         (d.B ? 0x10 : 0) |           /* the bottom button is TOWNS A */
+         (d.A ? 0x20 : 0) |           /* the one right of it is TOWNS B */
+         (d.plus ? 0x40 : 0) |
+         (d.minus ? 0x80 : 0);
+}
+
+// the same ones the gamepad check page uses, so what a button means is
+// decided in one place
+window.townsPadHeld = townsPadHeld;
+window.townsProDecode = townsProDecode;
+window.townsProHeld = townsProHeld;
+
+async function watchTownsPadHid(send) {
+  if (!navigator.hid) {
+    return null;
+  }
+  let dev;
+  try {
+    dev = (await navigator.hid.getDevices())
+      .find(d => d.vendorId === 0x057e);
+  } catch (err) {
+    return null;
+  }
+  if (!dev) {
+    return null;                      // nothing has been allowed here yet
+  }
+  let centre = null;
+  const onReport = e => {
+    const b = new Uint8Array(e.data.buffer, e.data.byteOffset,
+                             e.data.byteLength);
+    if (e.reportId !== 0x30 || b.length < 12) {
+      return;
+    }
+    const d = townsProDecode(b);
+    if (!centre && !(b[2] | b[3] | b[4])) {
+      centre = {x: d.lx, y: d.ly};    // where the stick rests, once
+    }
+    send(townsProHeld(d, centre));
+  };
+  dev.addEventListener('inputreport', onReport);
+  try {
+    if (!dev.opened) {
+      await dev.open();
+    }
+  } catch (err) {
+    dev.removeEventListener('inputreport', onReport);
+    townsPadHid = false;
+    window.toast('the controller is held open by another page; close the ' +
+                 'gamepad check and reconnect');
+    return null;
+  }
+  townsPadHid = true;
+  window.toast('gamepad: ' + dev.productName + ' (asked for directly)');
+  return () => {
+    townsPadHid = false;
+    dev.removeEventListener('inputreport', onReport);
+    try { dev.close(); } catch (err) { /* it may be gone already */ }
+  };
+}
+
 function watchTownsPad(rfb) {
-  if (!navigator.getGamepads) return null;
+  // the Gamepad API where it works, the device itself where it does not
+  /*
+   * A browser only hands a page the gamepads when the page is a secure
+   * context -- https, or localhost -- and only after a button has been
+   * pressed while the page has the focus.  Both are quiet about it: the
+   * API is simply absent, or the list is simply empty.  So say which of
+   * the two it is, because silence is the one answer that leaves nowhere
+   * to go from.
+   */
+  if (!navigator.getGamepads) {
+    window.toast('this page cannot see gamepads: a browser only offers ' +
+                 'them to a secure page (https, or localhost -- the ' +
+                 'tunnel counts)');
+    return null;
+  }
   let held = 0, frame = null, announced = '';
+  townsPadWatching = true;
+  if (![...navigator.getGamepads()].some(Boolean)) {
+    window.toast('no gamepad yet: press a button on it with this page in ' +
+                 'front');
+  }
 
   const send = want => {
     for (let i = 0; i < TOWNS_PAD_LINES.length; i++) {
       const bit = 1 << i;
-      if (((want ^ held) & bit) !== 0) {
-        try {
-          rfb.sendKey(TOWNS_PAD_LINES[i][1], TOWNS_PAD_LINES[i][0],
-                      (want & bit) !== 0);
-        } catch (err) { return; }      // the console went away mid-press
+      if (((want ^ held) & bit) === 0) {
+        continue;
       }
+      try {
+        rfb.sendKey(TOWNS_PAD_LINES[i][1], TOWNS_PAD_LINES[i][0],
+                    (want & bit) !== 0);
+      } catch (err) {
+        return;                        // the console went away mid-press
+      }
+      // one key at a time, so a send that stops half way leaves a record
+      // of what did go: the next one then finishes the job rather than
+      // reasoning from a state that was never reached
+      held ^= bit;
+      townsPadLast = held;
+      townsPadSent++;
     }
-    held = want;
   };
   const scan = () => {
+    if (townsPadHid) {
+      frame = requestAnimationFrame(scan);
+      return;                          /* the device itself is driving */
+    }
     const g = [...navigator.getGamepads()].find(p => p && p.connected);
     if (g && g.id !== announced) {
       announced = g.id;
@@ -366,7 +567,21 @@ function watchTownsPad(rfb) {
     frame = requestAnimationFrame(scan);
   };
   frame = requestAnimationFrame(scan);
-  return () => { cancelAnimationFrame(frame); send(0); };
+  // the device is asked for asynchronously, and the console may be closed
+  // before the answer comes: remember that it was, so what arrives late is
+  // put down again rather than left open with a key held
+  let stopHid = null, gone = false;
+  watchTownsPadHid(send).then(stop => {
+    stopHid = stop;
+    if (gone && stop) { stop(); }
+  });
+  return () => {
+    gone = true;
+    cancelAnimationFrame(frame);
+    if (stopHid) { stopHid(); }
+    send(0);
+    townsPadWatching = false;
+  };
 }
 
 // ---- relative-pointer capture (only for a Towns console) ------------------
@@ -537,7 +752,17 @@ window.registerMachinePlugin({
     if (!townsConsoles.has(name)) {
       return null;
     }
-    const stop = [captureRelativePointer(rfb, target), watchTownsPad(rfb)];
+    const stop = [];
+    for (const start of [() => captureRelativePointer(rfb, target),
+                         () => watchTownsPad(rfb)]) {
+      // the pointer and the pad are separate things: one failing to
+      // start is not a reason for the other not to
+      try {
+        stop.push(start());
+      } catch (err) {
+        console.error('towns console', err);
+      }
+    }
     return () => stop.forEach(fn => { if (fn) { fn(); } });
   }
 });

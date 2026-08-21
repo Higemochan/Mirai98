@@ -201,6 +201,13 @@ class PluginAPI:
         """A path for one of QEMU's option strings: commas doubled."""
         return qemu_file(path)
 
+    def drive_backing(self, path):
+        """format= and file= for a drive, with the format read off the
+        name.  Telling QEMU raw about a qcow2 shows the guest the
+        container's own header as its first sector, and the first write
+        eats the image."""
+        return drive_backing(path)
+
     def disk_path(self, inst, kind):
         return disk_path(inst, kind)
 
@@ -222,6 +229,21 @@ class PluginAPI:
     def qmp(self, inst, command, arguments=None):
         """One QMP command against a running instance; None if unreachable."""
         return qmp(inst, command, arguments)
+
+    def save_instance(self, inst):
+        """Write a machine's record back, for a setting changed outside the
+        edit form -- one changed while it runs still has to be the setting
+        it starts with next time.
+
+        Without the lock, and it must stay that way: a plugin action is
+        dispatched with _lock already held, and _lock is not reentrant, so
+        taking it here wedged the whole server on the first click -- every
+        endpoint that wants the lock waits for a thread that is waiting
+        for itself.  What made it hard to see is that the access log is
+        written when a request finishes, so the request that hung left no
+        line at all and looked like one that never arrived.
+        """
+        save_instance(inst)
 
     def disk_builder(self, kind, fmt, fn):
         """Offer a disk image format of the plugin's own in Storage."""
@@ -336,11 +358,17 @@ def group_dir(kind, group):
 
 
 def disk_groups(kind):
-    """The group folders of a kind, in the order they are listed."""
+    """The group folders of a kind, in the order they are listed.
+
+    Lenient about what is found, as everything that reads the tree is: a
+    folder put here by hand under a name this would not have given it is
+    still a folder with images in it, and passing it over hid them from
+    the listing altogether.
+    """
     root = disks_root(kind)
     try:
         return sorted(n for n in os.listdir(root)
-                      if given_name(n)
+                      if listed_name(n)
                       and os.path.isdir(os.path.join(root, n)))
     except OSError:
         return []
@@ -514,9 +542,13 @@ def attachment(name):
     prefer the encoded one."""
     from urllib.parse import quote
 
-    plain = name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    # control bytes out first: a newline in a file name would end the
+    # header block, and everything after it would be read as another
+    # header and then as a body of the page's choosing
+    flat = re.sub(r"[\x00-\x1f\x7f]", "_", name)
+    plain = flat.encode("ascii", "replace").decode("ascii").replace('"', "_")
     return ('attachment; filename="%s"; filename*=UTF-8\'\'%s'
-            % (plain, quote(name, safe="")))
+            % (plain, quote(flat, safe="")))
 
 
 def url_path(raw):
@@ -539,11 +571,26 @@ def listed_name(name):
 
 
 def given_name(name):
-    """Whether this may give a file that name: see above."""
-    return (bool(name) and name == name.strip() and not name.endswith(".")
-            and not name.startswith(".") and not NAME_BAD.search(name)
-            and os.path.splitext(name)[0].upper() not in WIN_DEVICES
-            and len(name.encode("utf-8")) <= NAME_BYTES)
+    """Whether this may give a file that name: see above.
+
+    A name that came off the filesystem may not be text at all: bytes
+    that are not UTF-8 arrive as lone surrogates, and asking such a name
+    how many bytes it is raises.  It is not a name this would give a file
+    -- that is the answer -- but it has to be *an* answer, because this
+    is asked about every entry in a folder while a listing is built, and
+    one Shift-JIS name dropped in by hand took the whole Storage page
+    down with it.
+    """
+    if not name or name != name.strip() or name.endswith("."):
+        return False
+    if name.startswith(".") or NAME_BAD.search(name):
+        return False
+    if os.path.splitext(name)[0].upper() in WIN_DEVICES:
+        return False
+    try:
+        return len(name.encode("utf-8")) <= NAME_BYTES
+    except UnicodeEncodeError:
+        return False
 
 
 def safe_disk_name(name):
@@ -688,13 +735,32 @@ def write_cue(path, lines):
     writes beside the sheet and moves the finished file into place, and
     the name it writes under begins with a dot so a listing taken in the
     middle of it does not show a half-written one."""
-    beside = os.path.join(os.path.dirname(path),
-                          "." + os.path.basename(path) + ".new")
-    with open(beside, "wb") as f:
-        f.write("".join(lines).encode("utf-8", "surrogateescape"))
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(beside, path)
+    # Through a link rather than over it: a sheet may be a link to a
+    # master kept somewhere else, and replacing the link with a file of
+    # our own takes the master quietly out of the arrangement -- the disc
+    # still works and the next person to look at the master finds it
+    # describing a name that no longer exists.
+    real = os.path.realpath(path)
+    folder = os.path.dirname(real) or "."
+    # a name of its own, so a file that happens to be called
+    # ".<sheet>.new" is not eaten, and two writers cannot collide
+    fd, beside = tempfile.mkstemp(prefix="." + os.path.basename(real) + ".",
+                                  suffix=".new", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write("".join(lines).encode("utf-8", "surrogateescape"))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(beside, real)
+    except BaseException:
+        # half a sheet under a hidden name is something the listing cannot
+        # show and nothing in the program can delete: take it away here
+        try:
+            os.remove(beside)
+        except OSError:
+            pass
+        raise
+    sync_file(folder)                   # the rename has to reach the medium
 
 
 def cue_summary(path):
@@ -1057,12 +1123,21 @@ def save_instance(inst):
     # gives: opening the file that is there empties it before a byte is
     # written, and a write that fails after that leaves a machine with no
     # description of itself at all
-    beside = os.path.join(inst_dir(inst["index"]), ".vm.xml.new")
-    with open(beside, "w", encoding="utf-8") as f:
-        tree.write(f, encoding="unicode")
-        f.flush()
-        os.fsync(f.fileno())      # the power may go before the cache does
-    os.replace(beside, path)
+    folder = inst_dir(inst["index"])
+    fd, beside = tempfile.mkstemp(prefix=".vm.xml.", suffix=".new", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            tree.write(f, encoding="unicode")
+            f.flush()
+            os.fsync(f.fileno())  # the power may go before the cache does
+        os.replace(beside, path)
+    except BaseException:
+        try:
+            os.remove(beside)
+        except OSError:
+            pass
+        raise
+    sync_file(folder)
 
 
 def load_instances():
@@ -1451,8 +1526,16 @@ LOG_KINDS = ("system", "vm", "disk", "network", "web")
 
 
 def say(text, kind="system"):
-    """One line in the system log, and on stderr for whoever is watching."""
-    line = "%s [%s] %s" % (time.strftime("%F %T"), kind, text)
+    """One line in the system log, and on stderr for whoever is watching.
+
+    One line, and only one: most of what is said here quotes something
+    the program did not choose -- a file name, a machine name -- and a
+    newline in one of those would start a line of its own, wearing any
+    timestamp and tag it liked.  A log is worth reading only while every
+    line in it came from where it says it did.
+    """
+    flat = re.sub(r"[\x00-\x1f\x7f]", " ", str(text))
+    line = "%s [%s] %s" % (time.strftime("%F %T"), kind, flat)
     try:
         sys.stderr.write(line + "\n")
     except OSError:
@@ -3280,7 +3363,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             self.page("index.html")
-        elif path in ("/app.js", "/style.css"):
+        elif path in ("/app.js", "/style.css", "/gamepad.html"):
+            # gamepad.html answers one question on its own: whether this
+            # browser will show a controller to a page at all.  It talks to
+            # no machine, so it can be opened with none running.
             self.page(path[1:])
         elif (path.startswith("/plugins/") and path.endswith(".js")
               and ".." not in path):
@@ -3660,6 +3746,19 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self.upload(m.group(1))
             return
+        if path == "/api/note":
+            # A page saying what it sees, so that what happens in a browser
+            # can be read from the machine it happened against -- the
+            # gamepad check is unreadable from anywhere else.
+            #
+            # One line, and only ever one: a newline in here would let a
+            # page write a line of its own into the log, wearing whatever
+            # timestamp and tag it liked, and a log worth reading is one
+            # where every line came from where it says it did.
+            data = self.body_json() or {}
+            say(str(data.get("text") or "")[:800], "web")
+            self.reply(200, {"result": "noted"})
+            return
         m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/rename$", path)
         if m:
             self.rename_disk(m.group(1))
@@ -3947,12 +4046,14 @@ class Handler(BaseHTTPRequestHandler):
         checked -- so now the ending is not asked for at all, and the
         file keeps its own."""
         data = self.body_json() or {}
-        name = str(data.get("name") or "").strip()
+        # not trimmed: a file whose name really does begin or end with a
+        # space is a file, and trimming it here made it unreachable
+        name = str(data.get("name") or "")
         stem = str(data.get("stem") or "").strip()
-        root = os.path.dirname(disk_find(kind, name))
         if not listed_name(name):
             self.fail(404, "no such disk")
             return
+        root = os.path.dirname(disk_find(kind, name))
         to = stem + os.path.splitext(name)[1]
         if not stem or not given_name(to):
             self.fail(400, "%s cannot be the name of an image: %s"
@@ -3985,38 +4086,60 @@ class Handler(BaseHTTPRequestHandler):
                           "not find it under another until stopped: %s"
                           % ", ".join(running))
                 return
-            done = []
+            became = {os.path.join(root, f): into for f, into in moves}
+            done, was_named, touched = [], [], []
             try:
                 for f, into in moves:
                     os.replace(os.path.join(root, f),
                                os.path.join(root, into))
                     done.append((f, into))
-            except OSError as err:
-                # half a renamed set is a disc with no sheet: put it back
+                for _, into in moves[1:]:
+                    if into.lower().endswith(".cue"):
+                        point_cue_at(os.path.join(root, into), name, to)
+                for inst in users:
+                    before = {k: inst.get(k) for k in DISK_KEYS}
+                    for key in DISK_KEYS:
+                        old = disk_path(inst, key)
+                        if old not in became:
+                            continue
+                        ref = inst[key]
+                        inst[key] = (os.path.join(os.path.dirname(ref),
+                                                  became[old])
+                                     if "/" in ref or ref.startswith("~")
+                                     else became[old])
+                        if inst["name"] not in touched:
+                            touched.append(inst["name"])
+                    if inst["name"] in touched:
+                        was_named.append((inst, before))
+                        save_instance(inst)
+            except (OSError, ValueError) as err:
+                # Everything, not only the files.  A sheet rewritten
+                # under the new name and machines pointed at it are as
+                # much a half-done rename as a moved file is, and the
+                # earlier version of this put back only the moves -- so a
+                # full disk left a disc whose sheet named a file that was
+                # no longer there and a machine that named it too.
+                for inst, before in reversed(was_named):
+                    for key, value in before.items():
+                        if value is None:
+                            inst.pop(key, None)
+                        else:
+                            inst[key] = value
+                    try:
+                        save_instance(inst)
+                    except OSError:
+                        pass
                 for f, into in reversed(done):
-                    os.replace(os.path.join(root, into),
-                               os.path.join(root, f))
+                    try:
+                        os.replace(os.path.join(root, into),
+                                   os.path.join(root, f))
+                    except OSError:
+                        pass
+                for f, into in done[1:]:
+                    if f.lower().endswith(".cue"):
+                        point_cue_at(os.path.join(root, f), to, name)
                 self.fail(500, "could not rename: %s" % err)
                 return
-            for _, into in moves[1:]:
-                if into.lower().endswith(".cue"):
-                    point_cue_at(os.path.join(root, into), name, to)
-            became = {os.path.join(root, f): into for f, into in moves}
-            touched = []
-            for inst in users:
-                for key in DISK_KEYS:
-                    old = disk_path(inst, key)
-                    if old not in became:
-                        continue
-                    ref = inst[key]
-                    inst[key] = (os.path.join(os.path.dirname(ref),
-                                              became[old])
-                                 if "/" in ref or ref.startswith("~")
-                                 else became[old])
-                    if inst["name"] not in touched:
-                        touched.append(inst["name"])
-                if inst["name"] in touched:
-                    save_instance(inst)
         say("renamed %s to %s" % (", ".join(f for f, _ in moves),
                                   ", ".join(t for _, t in moves)), "disk")
         if left:
@@ -4321,7 +4444,11 @@ class Handler(BaseHTTPRequestHandler):
             target = stem + ".raw"
         else:
             return os.path.basename(dest)
-        if os.path.exists(target):
+        # not just "is it here": a name this kind already holds in a group
+        # would make two files of one name, and everything that looks one
+        # up by name -- including Delete -- would then find whichever comes
+        # first and leave the other
+        if disk_taken(kind, os.path.basename(target)) or os.path.lexists(target):
             return os.path.basename(dest)      # never clobber sideways
         try:
             import virtpc98
@@ -4388,8 +4515,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if len(chosen) == 1:
             want = os.path.splitext(mds)[0] + os.path.splitext(chosen[0])[1]
-            if chosen[0] != want and not os.path.exists(
-                    os.path.join(root, want)):
+            if chosen[0] != want and not disk_taken("cdrom", want):
                 os.replace(os.path.join(root, chosen[0]),
                            os.path.join(root, want))
                 chosen = [want]
@@ -4448,8 +4574,9 @@ class Handler(BaseHTTPRequestHandler):
                 if cand in present:
                     pick = present[cand]
                     break
-            if pick is None and pending:
-                pick = pending[0]         # the uploaded files, in order
+            # No guessing by position: pointing a sheet at whichever
+            # upload came next rewrites the disc into something nobody
+            # asked for, and answers 200 while doing it.
             if pick is None:
                 missing.append(ref)
                 rewritten.append(line)
@@ -4471,8 +4598,7 @@ class Handler(BaseHTTPRequestHandler):
         if len(chosen) == 1:
             data_name = chosen[0]
             want = stem + os.path.splitext(data_name)[1]
-            if data_name != want and not os.path.exists(
-                    os.path.join(root, want)):
+            if data_name != want and not disk_taken("cdrom", want):
                 os.replace(os.path.join(root, data_name),
                            os.path.join(root, want))
                 write_cue(cue_path, [
@@ -4665,14 +4791,23 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isfile(src):
             self.fail(404, "no such disk")
             return
-        if os.path.exists(dest):
+        if disk_taken(kind, os.path.basename(dest)):
             self.fail(409, "%s already exists" % os.path.basename(dest))
+            return
+        if os.path.getsize(src) > free_bytes(os.path.dirname(dest)):
+            self.fail(507, "not enough room to convert it")
             return
         try:
             import virtpc98
             virtpc98.run_command(command, src, dest, {},
                                  log=lambda *a: None)
         except Exception as err:
+            # what it got as far as writing is not an image; a stub left
+            # on the shelf is listed as though it were one
+            try:
+                os.remove(dest)
+            except OSError:
+                pass
             self.fail(400, "convert failed: %s" % err)
             return
         self.reply(200, {"result": "converted",
