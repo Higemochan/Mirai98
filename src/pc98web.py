@@ -3910,23 +3910,26 @@ class Handler(BaseHTTPRequestHandler):
         renamed together and a .cue is pointed at the name its data file
         now has.  A machine that names the image follows it -- which is
         why a running one is refused, its command line having been
-        written with the name as it was."""
+        written with the name as it was.
+
+        What is asked for is the stem alone: the ending says what the
+        image is, to the drives that open it and to this list both, and
+        renaming is not the occasion to change what a file is.  It used
+        to be given the whole name and refuse one whose ending had
+        moved, which asked the typing of something that was then only
+        checked -- so now the ending is not asked for at all, and the
+        file keeps its own."""
         data = self.body_json() or {}
         name = str(data.get("name") or "").strip()
-        to = str(data.get("to") or "").strip()
+        stem = str(data.get("stem") or "").strip()
         root = os.path.dirname(disk_find(kind, name))
         if not listed_name(name):
             self.fail(404, "no such disk")
             return
-        if not given_name(to):
+        to = stem + os.path.splitext(name)[1]
+        if not stem or not given_name(to):
             self.fail(400, "%s cannot be the name of an image: %s"
                       % (to or "that", NAME_RULE))
-            return
-        ext = os.path.splitext(name)[1]
-        if os.path.splitext(to)[1].lower() != ext.lower():
-            self.fail(400, "a rename keeps the extension: %s is what says "
-                      "what the image is, to the drives that open it and to "
-                      "this list both" % (ext or "the ending"))
             return
         with _lock:
             if not os.path.isfile(os.path.join(root, name)):

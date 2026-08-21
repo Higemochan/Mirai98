@@ -1706,10 +1706,18 @@ function uploadGroup(kind) {
 // it and pointed at the new name, and a machine that named the image is
 // pointed at it too -- so the server answers with everything that moved.
 window.renameDisk = (kind, name, then) => {
-  const to = (prompt('rename ' + name + ' to?', name) || '').trim();
-  if (!to || to === name) return;
+  // the ending is the file's own and is not up for typing: what is asked
+  // for is the stem, and the server puts the ending back
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  const typed = prompt('rename ' + name + ' to?' +
+                       (ext ? '\n\n' + ext + ' stays as it is' : ''), stem);
+  if (typed === null) return;
+  const to = typed.trim();
+  if (!to || to === stem) return;
   api('/api/disks/' + kind + '/rename',
-      {method: 'POST', body: JSON.stringify({name: name, to: to})})
+      {method: 'POST', body: JSON.stringify({name: name, stem: to})})
     .then(r => { if (r) { toast('renamed to ' + r.files.join(' + ') +
                             (r.vms.length ? ', and ' + r.vms.join(', ') +
                              ' follows' : ''));
