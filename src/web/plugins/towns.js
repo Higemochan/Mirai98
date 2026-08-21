@@ -308,6 +308,67 @@ function townsWizardConfirm(v, h) {
   return rows;
 }
 
+// ---- a pad on this computer, played on the machine over there -------------
+// The controller is here and the machine is there, with a connection
+// between them that carries keys and little else.  So the browser reads the
+// pad and sends the keys the game port keeps for it -- F13 to F20, which no
+// FM TOWNS keyboard has, so nothing else is listening for them and holding
+// one costs no typing -- and the machine turns them back into lines held on
+// the pad in port B.
+//
+// In the order the machine expects: up, down, left, right, A, B, RUN,
+// SELECT.  Buttons come from the standard layout a browser maps a
+// controller into, and a direction may be given by the pad or by the left
+// stick, since a stick is what many controllers have most of.
+const TOWNS_PAD_LINES = [
+  ['F13', 0xffca], ['F14', 0xffcb], ['F15', 0xffcc], ['F16', 0xffcd],
+  ['F17', 0xffce], ['F18', 0xffcf], ['F19', 0xffd0], ['F20', 0xffd1]];
+
+function townsPadHeld(g) {
+  const ax = g.axes || [], b = g.buttons || [];
+  const on = i => !!(b[i] && (b[i].pressed || b[i].value > 0.5));
+  const tilt = (i, sign) => (ax[i] || 0) * sign > 0.5;
+  return (on(12) || tilt(1, -1) ? 0x01 : 0) |
+         (on(13) || tilt(1, 1) ? 0x02 : 0) |
+         (on(14) || tilt(0, -1) ? 0x04 : 0) |
+         (on(15) || tilt(0, 1) ? 0x08 : 0) |
+         (on(0) ? 0x10 : 0) |          /* the bottom button is A */
+         (on(1) ? 0x20 : 0) |          /* the one right of it is B */
+         (on(9) ? 0x40 : 0) |          /* start */
+         (on(8) ? 0x80 : 0);           /* back / select */
+}
+
+function watchTownsPad(rfb) {
+  if (!navigator.getGamepads) return null;
+  let held = 0, frame = null, announced = '';
+
+  const send = want => {
+    for (let i = 0; i < TOWNS_PAD_LINES.length; i++) {
+      const bit = 1 << i;
+      if (((want ^ held) & bit) !== 0) {
+        try {
+          rfb.sendKey(TOWNS_PAD_LINES[i][1], TOWNS_PAD_LINES[i][0],
+                      (want & bit) !== 0);
+        } catch (err) { return; }      // the console went away mid-press
+      }
+    }
+    held = want;
+  };
+  const scan = () => {
+    const g = [...navigator.getGamepads()].find(p => p && p.connected);
+    if (g && g.id !== announced) {
+      announced = g.id;
+      window.toast('gamepad: ' + g.id.slice(0, 48));
+    }
+    // nothing plugged in means nothing held, which also lets go of
+    // anything that was down when the controller was unplugged
+    send(g ? townsPadHeld(g) : 0);
+    frame = requestAnimationFrame(scan);
+  };
+  frame = requestAnimationFrame(scan);
+  return () => { cancelAnimationFrame(frame); send(0); };
+}
+
 // ---- relative-pointer capture (only for a Towns console) ------------------
 // QEMU's VNC turns each absolute pointer event into a delta from the last
 // one, which stalls at the canvas edge; instead we ask for QEMU's relative
@@ -472,6 +533,11 @@ window.registerMachinePlugin({
   // is in place before the first pointer event (the old fetch-here-async
   // gating raced the VNC handshake and lost the -257 negotiation)
   consolePrep: prepTownsConsole,
-  console: (rfb, target, name) =>
-    townsConsoles.has(name) ? captureRelativePointer(rfb, target) : null
+  console: (rfb, target, name) => {
+    if (!townsConsoles.has(name)) {
+      return null;
+    }
+    const stop = [captureRelativePointer(rfb, target), watchTownsPad(rfb)];
+    return () => stop.forEach(fn => { if (fn) { fn(); } });
+  }
 });
