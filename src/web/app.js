@@ -1188,6 +1188,10 @@ async function updateUsage(name) {
 function fmtDate(t) { return new Date(t * 1000).toLocaleString(); }
 const extOf = n => { const i = n.lastIndexOf('.');
                      return i < 0 ? '' : n.slice(i).toLowerCase(); };
+// what is left of a name once the ending is taken off it: the ending is
+// in the type column already, and the name column is for reading
+const stemOf = n => { const i = n.lastIndexOf('.');
+                      return i > 0 ? n.slice(0, i) : n; };
 const CONVERT_TARGETS = {
   'hdd:.hdi': ['raw'], 'hdd:.raw': ['hdi','qcow2'],
   'hdd:.img': ['hdi','qcow2'], 'hdd:.qcow2': ['raw'],
@@ -1232,6 +1236,11 @@ function groupOpen(kind, group) { return !!openGroups[kind + '/' + group]; }
 function storageCard(kind, files) {
   const groups = [...new Set(files.map(f => f.group || ''))]
     .filter(Boolean).sort();
+  // the ending is shown in the type column, so the name column drops it
+  // -- unless two discs here would then read the same, in which case the
+  // ending is the only thing telling them apart and it stays
+  const stems = {};
+  files.forEach(f => { stems[stemOf(f.name)] = (stems[stemOf(f.name)] || 0) + 1; });
   const fileRow = f => {
     const used = f.used_by.join(', ');
     const targets = CONVERT_TARGETS[kind + ':' + extOf(f.name)] || [];
@@ -1240,8 +1249,10 @@ function storageCard(kind, files) {
       '"' + (g && !groupOpen(kind, g) ? ' style="display:none"' : '') +
       '><td' + (g ? ' style="padding-left:1.6em"' : '') + '>' +
       '<input type="checkbox" class="pick" value="' + esc(f.name) + '"> ' +
-      '<a href="#/disk/' + kind + '/' +
-      encodeURIComponent(f.name) + '">' + esc(f.name) + '</a></td><td>' +
+      '<a href="#/disk/' + kind + '/' + encodeURIComponent(f.name) +
+      '" title="' + esc(f.name) + '">' +
+      esc(stems[stemOf(f.name)] > 1 ? f.name : stemOf(f.name)) +
+      '</a></td><td>' +
       diskTypeCell(f) + '</td><td>' + fmtBytes(f.size) +
       '</td><td class="note">' + fmtDate(f.mtime) + '</td><td>' +
       esc(used || '-') + '</td><td style="text-align:right">' +
