@@ -197,6 +197,10 @@ class PluginAPI:
     def win_short(self, path):
         return win_short(path)
 
+    def qemu_file(self, path):
+        """A path for one of QEMU's option strings: commas doubled."""
+        return qemu_file(path)
+
     def disk_path(self, inst, kind):
         return disk_path(inst, kind)
 
@@ -310,6 +314,88 @@ def disk_dir_of(key):
     return DISK_DIR.get(key, "hdd")            # SCSI units are plain disks
 
 
+# ---------------------------------------------------------- disk groups
+# A kind's images all sit in the one folder, and past a dozen of them the
+# list is hard to read and harder to pick from: eight EVE floppies and
+# eight of MS-DOS bury the one disc someone is after.  A group is a
+# folder a level down -- disks/fdd/EVE/EVE_A.raw -- so the grouping is
+# something the file tree shows as plainly as the list does, and it
+# survives the tree being copied to another machine.
+#
+# A machine still names an image by its file name alone.  The group is
+# how the shelf is arranged and not part of what a disc is called, so an
+# image can be moved into a group, or out of one, without a single vm.xml
+# changing -- and a machine that is running keeps the file it opened,
+# which a move does not disturb.  That holds only while a name means one
+# file, so a name a kind already holds anywhere is refused for a new one.
+
+def group_dir(kind, group):
+    """The folder a group's images sit in; the kind's own for no group."""
+    root = disks_root(kind)
+    return os.path.join(root, group) if group else root
+
+
+def disk_groups(kind):
+    """The group folders of a kind, in the order they are listed."""
+    root = disks_root(kind)
+    try:
+        return sorted(n for n in os.listdir(root)
+                      if given_name(n)
+                      and os.path.isdir(os.path.join(root, n)))
+    except OSError:
+        return []
+
+
+def disk_find(kind, name):
+    """Where the image called `name` is: on the shelf itself, or in one
+    of the groups.  A name that is nowhere answers with where it would go
+    if it arrived without a group, which is what both the callers asking
+    "is this taken?" and the callers about to write want."""
+    root = disks_root(kind)
+    here = os.path.join(root, name)
+    if os.path.lexists(here):
+        return here
+    for group in disk_groups(kind):
+        there = os.path.join(root, group, name)
+        if os.path.lexists(there):
+            return there
+    return here
+
+
+def disk_taken(kind, name):
+    """Whether a kind holds that name already, group or no group.  Two
+    files of one name would leave which of them a machine meant to the
+    order the folders happen to be read in."""
+    return os.path.lexists(disk_find(kind, name))
+
+
+def disk_group_of(kind, name):
+    """The group an image is in, or "" for one in none."""
+    return os.path.dirname(os.path.relpath(disk_find(kind, name),
+                                           disks_root(kind)))
+
+
+def disk_dest(kind, name, group="", make=False):
+    """Where a file that is about to arrive should be written."""
+    if group and not given_name(group):
+        raise ValueError("a group is named like an image: " + NAME_RULE)
+    if group and make:
+        os.makedirs(group_dir(kind, group), exist_ok=True)
+    return os.path.join(group_dir(kind, group), name)
+
+
+def disk_drop_group(kind, group):
+    """Take a group folder away once nothing is left in it: a group is
+    the images in it, and an empty one is only a name in the way."""
+    if not group:
+        return
+    try:
+        if not os.listdir(group_dir(kind, group)):
+            os.rmdir(group_dir(kind, group))
+    except OSError:
+        pass
+
+
 def disk_path(inst, key):
     """A device's image file: a bare name lives in the rule tree, and
     anything with a separator in it is taken as a path of its own,
@@ -319,7 +405,7 @@ def disk_path(inst, key):
         return ""
     if "/" in value or value.startswith("~"):
         return os.path.expanduser(value)
-    return os.path.join(disks_root(disk_dir_of(key)), value)
+    return disk_find(disk_dir_of(key), value)
 
 
 def is_device(path):
@@ -381,23 +467,100 @@ def serial_ports():
 
 
 DISK_KINDS = ("hdd", "fdd", "cdrom")
-SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# Two questions are asked about a name, and they are not the same one.
+#
+# A name that is already there is asked only to name one file in one
+# folder.  A file may have been put on the shelf by hand -- copied in
+# over ssh, carried in on a stick -- under anything its filesystem
+# allowed, and refusing to rename or delete such a file would leave it
+# listed and untouchable, which is worse to be than strict.
+#
+# A name this is about to *give* a file is asked for more, but only for
+# what something downstream would break on.  A disc is called what it is
+# called -- 天晴, "Appare CD Vol. 2 - Houou no Maki (Japan).chd" -- and
+# putting every such name through an ASCII sieve threw away the name the
+# dump came with.  So what is refused is:
+#
+#   /  \               a name is one path component, not two
+#   :  *  ?  "  <  >  |   Windows will not have them, and this tree is
+#                      meant to be carried to another machine on a stick
+#   control bytes      they have no business in a file name
+#   CON, LPT1 and so on   are devices on Windows rather than files
+#   a leading dot      the listing passes those over, so a file named
+#                      that way would not appear in it at all
+#   a trailing space or dot   Windows drops them quietly, and the name
+#                      the shelf shows would stop being the one on disk
+#
+# and a length in bytes rather than characters, because a filesystem
+# counts bytes, one Japanese character is three of them, and ".part"
+# while it uploads and a ".cue" beside it have to fit as well.
+NAME_BAD = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]')
+NAME_BYTES = 240
+WIN_DEVICES = frozenset(["CON", "PRN", "AUX", "NUL"] +
+                        ["COM%d" % n for n in range(1, 10)] +
+                        ["LPT%d" % n for n in range(1, 10)])
+NAME_RULE = ('a name cannot hold / \\ : * ? " < > |, start with a dot, '
+             'end with a space or a dot, or run past %d bytes' % NAME_BYTES)
+
+
+def attachment(name):
+    """The Content-Disposition for a download.  A header is latin-1 on
+    the wire, so a name with a kanji in it cannot go in one as it stands
+    -- sending it raw did not mangle the name, it threw and the download
+    never began.  RFC 6266's filename* carries the real name UTF-8 and
+    percent-encoded; the plain filename beside it is an ASCII stand-in
+    for anything too old to read the other, and browsers that read both
+    prefer the encoded one."""
+    from urllib.parse import quote
+
+    plain = name.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    return ('attachment; filename="%s"; filename*=UTF-8\'\'%s'
+            % (plain, quote(name, safe="")))
+
+
+def url_path(raw):
+    """The path of a request, as the names in it are actually spelt.  A
+    browser percent-encodes what it puts in a URL, so a disc with a space
+    or a kanji in its name is asked for as %20 and %E5%A4%A9 -- and a
+    lookup for the encoded spelling finds nothing, which is how the
+    download and the page for such a disc used to answer 404 while the
+    listing showed it plainly.  The query is cut off first: the ? that
+    starts it is the one character here that is not part of a name."""
+    from urllib.parse import unquote
+
+    return unquote(raw.split("?")[0])
+
+
+def listed_name(name):
+    """Whether a name is one this may act on: see above."""
+    return (bool(name) and len(name) < 256 and "/" not in name
+            and "\\" not in name and not name.startswith("."))
+
+
+def given_name(name):
+    """Whether this may give a file that name: see above."""
+    return (bool(name) and name == name.strip() and not name.endswith(".")
+            and not name.startswith(".") and not NAME_BAD.search(name)
+            and os.path.splitext(name)[0].upper() not in WIN_DEVICES
+            and len(name.encode("utf-8")) <= NAME_BYTES)
 
 
 def safe_disk_name(name):
-    """The name a file is stored under: what SAFE_NAME allows, with
-    anything else turned into '_' (the browser does the same)."""
-    out = re.sub(r"[^A-Za-z0-9._-]", "_", name)
-    out = re.sub(r"_+", "_", out).strip("_.") or "disk"
-    if not out[0].isalnum():
-        out = "x" + out
-    return out[:64]
+    """The name a file is stored under: the name it came with, with what
+    given_name refuses turned into '_' (the browser does the same)."""
+    out = NAME_BAD.sub("_", name).strip().lstrip(".").rstrip(" .")
+    if os.path.splitext(out)[0].upper() in WIN_DEVICES:
+        out = "_" + out
+    # cut to bytes, and drop the character the cut fell inside
+    out = out.encode("utf-8")[:NAME_BYTES].decode("utf-8", "ignore")
+    return out or "disk"
 
 
 def disk_contents(kind, name):
     """What is inside an image, read through virtpc98's FAT reader."""
     import virtpc98
-    path = os.path.join(disks_root(kind), name)
+    path = disk_find(kind, name)
     files = []
     total = 0
 
@@ -437,7 +600,7 @@ def disk_zip(kind, name, log=lambda *a: None):
     """A ZIP of everything inside the image, built in a temp file."""
     import virtpc98
     import zipfile
-    path = os.path.join(disks_root(kind), name)
+    path = disk_find(kind, name)
     folder = tempfile.mkdtemp(prefix="pc98-zip-")
     handle, archive = tempfile.mkstemp(prefix="pc98-zip-", suffix=".zip")
     os.close(handle)
@@ -461,7 +624,7 @@ def zip_into_disk(kind, name, archive, log=lambda *a: None):
     """Unpack a ZIP into an image, replacing files of the same name."""
     import virtpc98
     import zipfile
-    path = os.path.join(disks_root(kind), name)
+    path = disk_find(kind, name)
     folder = tempfile.mkdtemp(prefix="pc98-unzip-")
     try:
         with zipfile.ZipFile(archive) as zf:
@@ -505,9 +668,33 @@ CUE_TRACK_RE = re.compile(r'^\s*TRACK\s+(\d+)\s+(\S+)', re.IGNORECASE)
 
 
 def read_cue(path):
-    """The sheet's lines, decoded losslessly (sheets are ASCII/Shift-JIS)."""
+    """The sheet's lines.  A cue is text of no stated encoding: mostly
+    ASCII, sometimes Shift-JIS in a TITLE, and -- since a disc may be
+    called 天晴 -- sometimes UTF-8 in the name it points at.  Decoded
+    UTF-8 with surrogateescape it reads the ASCII and the UTF-8 as they
+    are and keeps whatever it cannot make sense of as it found it, so the
+    lines written back out again are the same bytes."""
     with open(path, "rb") as f:
-        return f.read().decode("latin-1").splitlines(keepends=True)
+        return f.read().decode("utf-8", "surrogateescape").splitlines(
+            keepends=True)
+
+
+def write_cue(path, lines):
+    """Put a sheet back where it was, without ever leaving less of one
+    than there was.  Opening the sheet itself for writing empties it
+    first, so a rewrite that then fails leaves nothing at all -- which is
+    what happened the first time a name in kanji met an encoder that
+    could not hold it, and a disc lost the sheet that made it one.  This
+    writes beside the sheet and moves the finished file into place, and
+    the name it writes under begins with a dot so a listing taken in the
+    middle of it does not show a half-written one."""
+    beside = os.path.join(os.path.dirname(path),
+                          "." + os.path.basename(path) + ".new")
+    with open(beside, "wb") as f:
+        f.write("".join(lines).encode("utf-8", "surrogateescape"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(beside, path)
 
 
 def cue_summary(path):
@@ -590,6 +777,38 @@ def sidecar_partner(root, name):
             if os.path.isfile(os.path.join(root, cand)):
                 return cand
     return None
+
+
+def disc_set(root, name):
+    """The files an image travels with.  A CD dump is its data file and
+    the .cue or .mds beside it, which the emulator finds by the stem the
+    two share; anything else is the one file.  Moving or copying half of
+    a set leaves a disc that reads as a single data track with its audio
+    gone, so whatever happens to the data file happens to the sheet."""
+    if is_sidecar(name):
+        return [name]
+    partner = sidecar_partner(root, name)
+    return [name, partner] if partner else [name]
+
+
+def point_cue_at(path, was, now):
+    """Rewrite the FILE line naming `was` to name `now`, and leave every
+    other line of the sheet as it stands -- what is in it beyond the name
+    belongs to whoever wrote it.  A sheet naming several data files keeps
+    the names of the ones this did not touch."""
+    try:
+        lines = read_cue(path)
+    except OSError:
+        return
+    out = []
+    for line in lines:
+        m = CUE_FILE_RE.match(line)
+        if m and os.path.basename((m.group(1) or m.group(2))
+                                  .replace("\\", "/")).lower() == was.lower():
+            nl = "\r\n" if line.endswith("\r\n") else "\n"
+            line = 'FILE "%s" %s%s' % (now, m.group(3), nl)
+        out.append(line)
+    write_cue(path, out)
 
 
 def cdrom_pairs(root, names):
@@ -682,56 +901,59 @@ def disk_type(kind, name, size, cue=None):
 
 
 def disk_catalog():
-    """Every image in the tree, with who is using it, its type and (for
-    CD dumps) the cue sheet that belongs to it."""
+    """Every image in the tree, with who is using it, its type, the group
+    it is shelved in and (for CD dumps) the cue sheet that belongs to it.
+    A group is read as its own shelf: a disc and its sheet are in the one
+    folder, so they pair there and nowhere else."""
     instances = load_instances()
     out = {}
     for kind in DISK_KINDS:
         entries = []
-        root = disks_root(kind)
-        try:
-            names = sorted(os.listdir(root))
-        except OSError:
-            names = []
-        names = [n for n in names
-                 if not (n.startswith(".") or n.endswith(".part")
-                         or not os.path.isfile(os.path.join(root, n)))]
-        pairs, orphans = ({}, {})
-        if kind == "cdrom":
-            pairs, orphans = cdrom_pairs(root, names)
-        for name in names:
-            full = os.path.join(root, name)
-            if kind == "cdrom" and is_sidecar(name) \
-                    and name not in orphans:
-                continue                    # a sidecar rides with its data
-            st = os.stat(full)
-            used = sorted(i["name"] for i in instances
-                          if any(disk_path(i, k) == full
-                                 for k in DISK_KEYS))
-            entry = {"name": name, "size": st.st_size,
-                     "mtime": int(st.st_mtime), "used_by": used,
-                     "type": disk_type(kind, name, st.st_size,
-                                       pairs.get(name))}
-            if name in pairs:
-                cue_path = os.path.join(root, pairs[name])   # abs stays abs
-                refs, tracks, audio = sidecar_summary(cue_path)
-                entry.update({"cue": os.path.basename(pairs[name]),
-                              "tracks": tracks, "audio": audio})
-                # the emulator looks for <data stem>.cue: a sheet named
-                # differently, or one spread over several data files, is
-                # not something it can follow yet
-                if os.path.splitext(os.path.basename(pairs[name]))[0] != \
-                        os.path.splitext(name)[0]:
-                    entry["cue_mismatch"] = True
-                if len(refs) > 1:
-                    entry["multi"] = len(refs)
-            elif name in orphans:
-                entry.update({"orphan": True, "missing": orphans[name]})
-            elif kind == "cdrom":
-                tracks, audio = chd_summary(full)
-                if tracks:
-                    entry.update({"tracks": tracks, "audio": audio})
-            entries.append(entry)
+        for group in [""] + disk_groups(kind):
+            root = group_dir(kind, group)
+            try:
+                names = sorted(os.listdir(root))
+            except OSError:
+                continue
+            names = [n for n in names
+                     if not (n.startswith(".") or n.endswith(".part")
+                             or not os.path.isfile(os.path.join(root, n)))]
+            pairs, orphans = ({}, {})
+            if kind == "cdrom":
+                pairs, orphans = cdrom_pairs(root, names)
+            for name in names:
+                full = os.path.join(root, name)
+                if kind == "cdrom" and is_sidecar(name) \
+                        and name not in orphans:
+                    continue                # a sidecar rides with its data
+                st = os.stat(full)
+                used = sorted(i["name"] for i in instances
+                              if any(disk_path(i, k) == full
+                                     for k in DISK_KEYS))
+                entry = {"name": name, "size": st.st_size, "group": group,
+                         "mtime": int(st.st_mtime), "used_by": used,
+                         "type": disk_type(kind, name, st.st_size,
+                                           pairs.get(name))}
+                if name in pairs:
+                    cue_path = os.path.join(root, pairs[name])
+                    refs, tracks, audio = sidecar_summary(cue_path)
+                    entry.update({"cue": os.path.basename(pairs[name]),
+                                  "tracks": tracks, "audio": audio})
+                    # the emulator looks for <data stem>.cue: a sheet named
+                    # differently, or one spread over several data files, is
+                    # not something it can follow yet
+                    if os.path.splitext(os.path.basename(pairs[name]))[0] != \
+                            os.path.splitext(name)[0]:
+                        entry["cue_mismatch"] = True
+                    if len(refs) > 1:
+                        entry["multi"] = len(refs)
+                elif name in orphans:
+                    entry.update({"orphan": True, "missing": orphans[name]})
+                elif kind == "cdrom":
+                    tracks, audio = chd_summary(full)
+                    if tracks:
+                        entry.update({"tracks": tracks, "audio": audio})
+                entries.append(entry)
         out[kind] = entries
     return out
 
@@ -808,10 +1030,16 @@ def save_instance(inst):
     ET.indent(tree)
     os.makedirs(inst_dir(inst["index"]), exist_ok=True)
     path = os.path.join(inst_dir(inst["index"]), "vm.xml")
-    with open(path, "w", encoding="utf-8") as f:
+    # beside itself and then moved into place, for the reason write_cue
+    # gives: opening the file that is there empties it before a byte is
+    # written, and a write that fails after that leaves a machine with no
+    # description of itself at all
+    beside = os.path.join(inst_dir(inst["index"]), ".vm.xml.new")
+    with open(beside, "w", encoding="utf-8") as f:
         tree.write(f, encoding="unicode")
         f.flush()
         os.fsync(f.fileno())      # the power may go before the cache does
+    os.replace(beside, path)
 
 
 def load_instances():
@@ -1067,7 +1295,7 @@ def drive_backing(path):
     """format= and file=, with the format read off the extension; QEMU
     told format=raw would happily show a guest the qcow2 container."""
     fmt = "qcow2" if path.lower().endswith(".qcow2") else "raw"
-    return "format=%s,file=%s" % (fmt, win_short(path))
+    return "format=%s,file=%s" % (fmt, qemu_file(path))
 
 
 _host_cpu = {}                   # last /proc/stat totals, for the delta
@@ -1773,10 +2001,10 @@ def apply_network(conf, log=lambda *a: None):
 _jobs = {}                       # name -> {done, total, state, error}
 
 
-def fetch_disk(kind, name, url):
+def fetch_disk(kind, name, url, group=""):
     """Pull an image off the web into disks/, tracking progress."""
     import urllib.request
-    dest = os.path.join(disks_root(kind), name)
+    dest = disk_dest(kind, name, group, make=True)
     part = dest + ".part"
     job = {"name": name, "kind": kind, "done": 0, "total": 0,
            "state": "running", "error": ""}
@@ -2246,7 +2474,7 @@ def install_to_disk(device, copy_data=False):
 
 
 def drive_job(label, kind, name, device, to_drive, confirm="",
-              allow_internal=False, check=True):
+              allow_internal=False, check=True, group=""):
     """Copy between an image and a real drive.
 
     Every refusal is the drives layer's, so that nothing can be written by
@@ -2255,7 +2483,8 @@ def drive_job(label, kind, name, device, to_drive, confirm="",
     back and comparing, because a write that went nowhere and a write that
     worked look exactly alike until someone tries to boot from it.
     """
-    path = os.path.join(disks_root(kind), name)
+    path = (disk_find(kind, name) if to_drive
+            else disk_dest(kind, name, group, make=True))
     job = {"name": label, "kind": kind, "done": 0, "total": 0,
            "state": "running", "error": "", "verified": "",
            "checking": False}
@@ -2477,6 +2706,15 @@ def host_facts():
     return _facts_cache
 
 
+def qemu_file(path):
+    """A path as it goes into one of QEMU's option strings.  Those are
+    comma-separated lists, and a comma inside a value has to be doubled
+    or the rest of the name is read as another option -- so a disc called
+    "Ys I, II.chd" would otherwise be a syntax error rather than a disc.
+    The Windows short name is taken first, for the reasons below."""
+    return win_short(path).replace(",", ",,")
+
+
 def win_short(path):
     """The 8.3 name of a path, on Windows, when it has one.
 
@@ -2567,7 +2805,7 @@ def qemu_argv(inst):
             # rest, so its music arrives in step with the FM and PCM
             board = "pc98-midi,audiodev=snd"
             if CONFIG.get("soundfont"):
-                board += ",soundfont=%s" % win_short(CONFIG["soundfont"])
+                board += ",soundfont=%s" % qemu_file(CONFIG["soundfont"])
             argv += ["-device", board]
     if inst.get("snapshot"):
         argv.append("-snapshot")
@@ -2580,7 +2818,7 @@ def qemu_argv(inst):
             # files out again, and vvfat refuses rw on a snapshotted drive
             argv += ["-drive", "if=ide,bus=0,unit=%d,format=raw,"
                      "snapshot=off,file=fat98:rw:%s"
-                     % (unit, win_short(os.path.expanduser(inst["mount"])))]
+                     % (unit, qemu_file(os.path.expanduser(inst["mount"])))]
         else:
             argv += ["-drive", "if=ide,bus=0,unit=%d," % unit
                      + drive_backing(disk_path(inst, key))]
@@ -2984,7 +3222,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------- GET
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path = url_path(self.path)
         # A password does not exist until the first run sets one, so the
         # wizard below has to be reachable without it.  A token does exist
         # from the start, and so covers the wizard too.
@@ -3118,9 +3356,9 @@ class Handler(BaseHTTPRequestHandler):
     def disk_ref(self, rest):
         """(kind, name, full path) out of a disks/<kind>/<name> URL."""
         kind, _, name = rest.partition("/")
-        if kind not in DISK_KINDS or not SAFE_NAME.match(name):
+        if kind not in DISK_KINDS or not listed_name(name):
             return None
-        return kind, name, os.path.join(disks_root(kind), name)
+        return kind, name, disk_find(kind, name)
 
     def disk_page(self, rest):
         """One image: its facts, and what is inside it if that can be
@@ -3161,8 +3399,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/zip")
             self.send_header("Content-Length", str(size))
             self.send_header("Content-Disposition",
-                             'attachment; filename="%s.zip"'
-                             % os.path.splitext(name)[0])
+                             attachment(os.path.splitext(name)[0] + ".zip"))
             self.end_headers()
             with open(archive, "rb") as f:
                 shutil.copyfileobj(f, self.wfile, 1 << 20)
@@ -3179,8 +3416,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition",
-                         'attachment; filename="%s"' % name)
+        self.send_header("Content-Disposition", attachment(name))
         self.end_headers()
         with open(full, "rb") as f:
             shutil.copyfileobj(f, self.wfile, 1 << 20)
@@ -3254,7 +3490,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def do_POST(self):
-        path = self.path.split("?")[0]
+        path = url_path(self.path)
         if APP_TOKEN and not self.signed_in():
             self.refuse(401, "no token")
             return
@@ -3401,6 +3637,18 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self.upload(m.group(1))
             return
+        m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/rename$", path)
+        if m:
+            self.rename_disk(m.group(1))
+            return
+        m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/move$", path)
+        if m:
+            self.move_disks(m.group(1))
+            return
+        m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/suggest-groups$", path)
+        if m:
+            self.suggest_groups(m.group(1))
+            return
         m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/import$", path)
         if m:
             self.import_disk(m.group(1))
@@ -3466,8 +3714,7 @@ class Handler(BaseHTTPRequestHandler):
             if drive is None:
                 self.fail(404, "no drive called %s" % device)
                 return
-            path_ = os.path.join(disks_root(drive["kind"]), name) \
-                if name else ""
+            path_ = disk_find(drive["kind"], name) if name else ""
             if name and not os.path.isfile(path_):
                 self.fail(404, "no %s image called %s"
                           % (drive["kind"], name))
@@ -3524,21 +3771,29 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(self.path).query)
         name = (query.get("name") or [""])[0]
+        group = (query.get("group") or [""])[0]
         overwrite = (query.get("overwrite") or ["0"])[0] == "1"
         try:
             size = int(self.headers.get("Content-Length", 0))
         except ValueError:
             size = 0
-        if not SAFE_NAME.match(name):
-            self.refuse_upload(size, 400, "name must be letters, digits, . _ -")
+        if not given_name(name):
+            self.refuse_upload(size, 400, NAME_RULE)
             return
         if size <= 0:
             self.fail(400, "empty upload")
             return
-        dest = os.path.join(disks_root(kind), name)
-        if os.path.exists(dest) and not overwrite:
-            self.refuse_upload(size, 409, "%s already exists" % name)
+        if group and not given_name(group):
+            self.refuse_upload(size, 400, "a group is named like an image: " + NAME_RULE)
             return
+        # an image is replaced where it stands, whatever group it is in
+        if disk_taken(kind, name):
+            if not overwrite:
+                self.refuse_upload(size, 409, "%s already exists" % name)
+                return
+            dest = disk_find(kind, name)
+        else:
+            dest = disk_dest(kind, name, group, make=True)
         if size + (512 << 20) > free_bytes(disks_root(kind)):
             self.refuse_upload(size, 507,
                                "not enough free space for %d bytes" % size)
@@ -3564,12 +3819,186 @@ class Handler(BaseHTTPRequestHandler):
         final = self.auto_convert(kind, dest)
         self.reply(200, {"result": "uploaded", "size": done, "name": final})
 
+    def move_disks(self, kind):
+        """Shelve images in a group, or take them out of one.  A CD dump
+        moves with its sheet, and nothing that names an image is touched:
+        the name is the same wherever it sits, which is the whole reason
+        a group is a folder and not part of the name.  A machine running
+        off one of them keeps the file it opened, and finds it again
+        under the same name next time it starts."""
+        data = self.body_json() or {}
+        names = [str(n) for n in (data.get("names") or [])]
+        group = str(data.get("group") or "").strip()
+        if group and not given_name(group):
+            self.fail(400, "a group is named like an image: " + NAME_RULE)
+            return
+        if not names:
+            self.fail(400, "nothing to move")
+            return
+        done = []
+        with _lock:
+            plan = []
+            for name in names:
+                if not listed_name(name):
+                    self.fail(404, "no such disk: %s" % name)
+                    return
+                src = disk_find(kind, name)
+                if not os.path.isfile(src):
+                    self.fail(404, "no such disk: %s" % name)
+                    return
+                was = disk_group_of(kind, name)
+                if was == group:
+                    continue            # it is already shelved there
+                here = os.path.dirname(src)
+                for f in (disc_set(here, name) if kind == "cdrom"
+                          else [name]):
+                    if (was, f) not in plan:
+                        plan.append((was, f))
+            try:
+                for was, f in plan:
+                    dest = disk_dest(kind, f, group, make=True)
+                    if os.path.lexists(dest):
+                        raise FileExistsError("%s is there already" % f)
+                    os.replace(os.path.join(group_dir(kind, was), f), dest)
+                    done.append((was, f))
+            except OSError as err:
+                # half a moved set is a disc with no sheet: put it back
+                for was, f in reversed(done):
+                    os.replace(disk_dest(kind, f, group),
+                               os.path.join(group_dir(kind, was), f))
+                done = []
+                self.fail(409, "could not move: %s" % err)
+                return
+            for was in {w for w, _ in done}:
+                disk_drop_group(kind, was)
+        if done:
+            say("moved %s %s" % (", ".join(f for _, f in done),
+                                 "into %s" % group if group
+                                 else "out of its group"), "disk")
+        self.reply(200, {"result": "moved", "group": group,
+                         "files": [f for _, f in done]})
+
+    def suggest_groups(self, kind):
+        """The groups the names themselves suggest: what stands in front
+        of a separator, wherever two or more images share it.  Only ever
+        a proposal -- a name is a hint about what a disc belongs to and
+        not a statement of it, so nothing moves until this comes back and
+        is asked for.  The longest prefix takes a tie, so four
+        Towns_A4_* floppies are offered as Towns_A4 rather than as
+        Towns, and only images not already shelved are counted."""
+        loose = [e for e in disk_catalog()[kind] if not e.get("group")]
+        seen = {}
+        for entry in loose:
+            stem = os.path.splitext(entry["name"])[0]
+            for i, ch in enumerate(stem):
+                if i > 0 and ch in "_-. ":
+                    seen.setdefault(stem[:i], []).append(entry["name"])
+        out, spoken = [], set()
+        for prefix in sorted(seen, key=lambda p: (-len(seen[p]), -len(p))):
+            if not given_name(prefix):
+                continue
+            names = [n for n in seen[prefix] if n not in spoken]
+            if len(names) < 2:
+                continue
+            spoken.update(names)
+            out.append({"group": prefix, "names": sorted(names)})
+        self.reply(200, {"result": "suggested", "groups": out})
+
+    def rename_disk(self, kind):
+        """Give an image another name.  A CD dump is not one file: the
+        sheet beside it is found by the stem the two share, so the set is
+        renamed together and a .cue is pointed at the name its data file
+        now has.  A machine that names the image follows it -- which is
+        why a running one is refused, its command line having been
+        written with the name as it was."""
+        data = self.body_json() or {}
+        name = str(data.get("name") or "").strip()
+        to = str(data.get("to") or "").strip()
+        root = os.path.dirname(disk_find(kind, name))
+        if not listed_name(name):
+            self.fail(404, "no such disk")
+            return
+        if not given_name(to):
+            self.fail(400, "%s cannot be the name of an image: %s"
+                      % (to or "that", NAME_RULE))
+            return
+        ext = os.path.splitext(name)[1]
+        if os.path.splitext(to)[1].lower() != ext.lower():
+            self.fail(400, "a rename keeps the extension: %s is what says "
+                      "what the image is, to the drives that open it and to "
+                      "this list both" % (ext or "the ending"))
+            return
+        with _lock:
+            if not os.path.isfile(os.path.join(root, name)):
+                self.fail(404, "no such disk")
+                return
+            if to == name:
+                self.reply(200, {"result": "renamed", "name": name,
+                                 "files": [name], "vms": []})
+                return
+            files = disc_set(root, name) if kind == "cdrom" else [name]
+            stem = os.path.splitext(to)[0]
+            moves = [(name, to)] + [(f, stem + os.path.splitext(f)[1])
+                                    for f in files if f != name]
+            for _, into in moves:
+                if disk_taken(kind, into):
+                    self.fail(409, "%s is there already" % into)
+                    return
+            # a machine names the image, and the name is about to change
+            was = {os.path.join(root, f) for f, _ in moves}
+            users = [i for i in load_instances()
+                     if any(disk_path(i, k) in was for k in DISK_KEYS)]
+            running = [i["name"] for i in users if is_running(i)]
+            if running:
+                self.fail(409, "started with the name as it is, and would "
+                          "not find it under another until stopped: %s"
+                          % ", ".join(running))
+                return
+            done = []
+            try:
+                for f, into in moves:
+                    os.replace(os.path.join(root, f),
+                               os.path.join(root, into))
+                    done.append((f, into))
+            except OSError as err:
+                # half a renamed set is a disc with no sheet: put it back
+                for f, into in reversed(done):
+                    os.replace(os.path.join(root, into),
+                               os.path.join(root, f))
+                self.fail(500, "could not rename: %s" % err)
+                return
+            for _, into in moves[1:]:
+                if into.lower().endswith(".cue"):
+                    point_cue_at(os.path.join(root, into), name, to)
+            became = {os.path.join(root, f): into for f, into in moves}
+            touched = []
+            for inst in users:
+                for key in DISK_KEYS:
+                    old = disk_path(inst, key)
+                    if old not in became:
+                        continue
+                    ref = inst[key]
+                    inst[key] = (os.path.join(os.path.dirname(ref),
+                                              became[old])
+                                 if "/" in ref or ref.startswith("~")
+                                 else became[old])
+                    if inst["name"] not in touched:
+                        touched.append(inst["name"])
+                if inst["name"] in touched:
+                    save_instance(inst)
+        say("renamed %s to %s" % (", ".join(f for f, _ in moves),
+                                  ", ".join(t for _, t in moves)), "disk")
+        for vm in touched:
+            say("vm %s: follows %s to %s" % (vm, name, to), "vm")
+        self.reply(200, {"result": "renamed", "name": to,
+                         "files": [t for _, t in moves], "vms": touched})
+
     def disk_action(self, kind, name, verb):
         """Write a ZIP into an image, or duplicate the image itself."""
-        if not SAFE_NAME.match(name):
+        if not listed_name(name):
             self.fail(400, "bad name")
             return
-        source = os.path.join(disks_root(kind), name)
+        source = disk_find(kind, name)
         if not os.path.isfile(source):
             self.fail(404, "no such disk")
             return
@@ -3591,19 +4020,32 @@ class Handler(BaseHTTPRequestHandler):
         if verb == "copy":
             data = self.body_json() or {}
             target = str(data.get("name") or "").strip()
-            if not SAFE_NAME.match(target):
+            if not given_name(target):
                 self.fail(400, "the copy needs a name")
                 return
-            dest = os.path.join(disks_root(kind), target)
-            if os.path.exists(dest):
-                self.fail(409, "%s already exists" % target)
-                return
-            if os.path.getsize(source) > free_bytes(disks_root(kind)):
+            root = os.path.dirname(source)      # the copy sits beside it
+            files = disc_set(root, name) if kind == "cdrom" else [name]
+            stem = os.path.splitext(target)[0]
+            copies = [(name, target)] + [(f, stem + os.path.splitext(f)[1])
+                                         for f in files if f != name]
+            for _, made in copies:
+                if disk_taken(kind, made):
+                    self.fail(409, "%s already exists" % made)
+                    return
+            if sum(os.path.getsize(os.path.join(root, f))
+                   for f, _ in copies) > free_bytes(root):
                 self.fail(507, "not enough room for a copy")
                 return
-            shutil.copy2(source, dest)
-            say("copied %s to %s" % (name, target), "disk")
-            self.reply(200, {"result": "copied", "name": target})
+            for f, made in copies:
+                shutil.copy2(os.path.join(root, f), os.path.join(root, made))
+            # the copied sheet names the file it was copied beside
+            for _, made in copies[1:]:
+                if made.lower().endswith(".cue"):
+                    point_cue_at(os.path.join(root, made), name, target)
+            say("copied %s to %s" % (", ".join(f for f, _ in copies),
+                                     ", ".join(t for _, t in copies)), "disk")
+            self.reply(200, {"result": "copied", "name": target,
+                             "files": [t for _, t in copies]})
             return
 
         # unzip: the body is the archive itself
@@ -3716,10 +4158,14 @@ class Handler(BaseHTTPRequestHandler):
         data = self.body_json() or {}
         device = str(data.get("device") or "")
         name = str(data.get("name") or "").strip()
-        if not SAFE_NAME.match(name):
+        group = str(data.get("group") or "").strip()
+        if not given_name(name):
             self.fail(400, "the image needs a name")
             return
-        if os.path.exists(os.path.join(disks_root(kind), name)):
+        if group and not given_name(group):
+            self.fail(400, "a group is named like an image: " + NAME_RULE)
+            return
+        if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return
         job = drive_job("%s → %s" % (device, name), kind, name, device,
@@ -3734,9 +4180,14 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(self.path).query)
         name = (query.get("name") or [""])[0]
-        if not SAFE_NAME.match(name):
+        group = (query.get("group") or [""])[0]
+        if not given_name(name) or (group and not given_name(group)):
             return None, None, query
-        return name, os.path.join(disks_root(kind), name + ".part"), query
+        # the part file waits where the image itself will end up, so the
+        # last slice is a rename inside one folder and never a copy
+        if disk_taken(kind, name):
+            return name, disk_find(kind, name) + ".part", query
+        return name, disk_dest(kind, name, group, make=True) + ".part", query
 
     def upload_chunk(self, kind):
         """One slice of a large image.
@@ -3760,7 +4211,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self.refuse_upload(size, 400, "bad offset or total")
             return
-        dest = os.path.join(disks_root(kind), name)
+        dest = part[:-len(".part")]
         overwrite = (query.get("overwrite") or ["0"])[0] == "1"
         if offset == 0:
             if os.path.exists(dest) and not overwrite:
@@ -3817,7 +4268,7 @@ class Handler(BaseHTTPRequestHandler):
         if total and have != total:
             self.fail(409, "got %d bytes of %d; upload again" % (have, total))
             return
-        dest = os.path.join(disks_root(kind), name)
+        dest = part[:-len(".part")]
         os.replace(part, dest)
         final = self.auto_convert(kind, dest)
         say("uploaded %s (%d bytes)" % (final, have), "disk")
@@ -3923,11 +4374,11 @@ class Handler(BaseHTTPRequestHandler):
         data = self.body_json() or {}
         cue = str(data.get("cue") or "")
         files = [str(f) for f in (data.get("files") or [])]
-        root = disks_root("cdrom")
-        if not SAFE_NAME.match(cue) or not is_sidecar(cue):
+        if not given_name(cue) or not is_sidecar(cue):
             self.fail(400, "bad sheet name")
             return
-        cue_path = os.path.join(root, cue)
+        cue_path = disk_find("cdrom", cue)
+        root = os.path.dirname(cue_path)
         if not os.path.isfile(cue_path):
             self.fail(404, "no such cue sheet")
             return
@@ -3977,8 +4428,7 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400, "the cue names %s, which was not uploaded"
                       % ", ".join(missing))
             return
-        with open(cue_path, "wb") as f:
-            f.write("".join(rewritten).encode("latin-1"))
+        write_cue(cue_path, rewritten)
         _, tracks, audio = cue_summary(cue_path)
         # the disc takes the sheet's stem: data.bin + data.cue is one set
         # the emulator finds without help; rename a lone data file to match
@@ -3990,14 +4440,11 @@ class Handler(BaseHTTPRequestHandler):
                     os.path.join(root, want)):
                 os.replace(os.path.join(root, data_name),
                            os.path.join(root, want))
-                lines = read_cue(cue_path)
-                with open(cue_path, "wb") as f:
-                    f.write("".join(
-                        'FILE "%s" %s%s' % (want, CUE_FILE_RE.match(l).group(3),
-                                            "\r\n" if l.endswith("\r\n")
-                                            else "\n")
-                        if CUE_FILE_RE.match(l) else l
-                        for l in lines).encode("latin-1"))
+                write_cue(cue_path, [
+                    'FILE "%s" %s%s' % (want, CUE_FILE_RE.match(l).group(3),
+                                        "\r\n" if l.endswith("\r\n") else "\n")
+                    if CUE_FILE_RE.match(l) else l
+                    for l in read_cue(cue_path)])
                 chosen = [want]
         say("cue set %s: %d track(s), %d audio" % (cue, tracks, audio),
             "disk")
@@ -4015,8 +4462,12 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400, "%s is not a file" % path)
             return
         name = os.path.basename(path)
-        if not SAFE_NAME.match(name):
+        into = str((data or {}).get("group") or "").strip()
+        if not given_name(name):
             self.fail(400, "file name %s is too strange to adopt" % name)
+            return
+        if into and not given_name(into):
+            self.fail(400, "a group is named like an image: " + NAME_RULE)
             return
         group = [path]
         if kind == "cdrom":
@@ -4036,14 +4487,14 @@ class Handler(BaseHTTPRequestHandler):
                     group.append(os.path.join(folder, cue))
         for src in group:
             base = os.path.basename(src)
-            if not SAFE_NAME.match(base):
+            if not given_name(base):
                 self.fail(400, "file name %s is too strange to adopt" % base)
                 return
-            if os.path.exists(os.path.join(disks_root(kind), base)):
+            if disk_taken(kind, base):
                 self.fail(409, "%s already exists" % base)
                 return
         for src in group:
-            dest = os.path.join(disks_root(kind), os.path.basename(src))
+            dest = disk_dest(kind, os.path.basename(src), into, make=True)
             try:
                 os.link(src, dest)         # instant on the same filesystem
             except OSError:
@@ -4058,16 +4509,20 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400, "the URL must start with http:// or https://")
             return
         name = str(data.get("name") or "").strip()
+        group = str(data.get("group") or "").strip()
+        if group and not given_name(group):
+            self.fail(400, "a group is named like an image: " + NAME_RULE)
+            return
         if not name:
             from urllib.parse import unquote, urlparse
             name = os.path.basename(unquote(urlparse(url).path))
-        if not SAFE_NAME.match(name):
+        if not given_name(name):
             self.fail(400, "cannot tell what to call it; give a file name")
             return
-        if os.path.exists(os.path.join(disks_root(kind), name)):
+        if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return
-        fetch_disk(kind, name, url)
+        fetch_disk(kind, name, url, group)
         self.reply(200, {"result": "downloading", "name": name})
 
     def do_PATCH(self):
@@ -4100,13 +4555,17 @@ class Handler(BaseHTTPRequestHandler):
         """A fresh, formatted image, made by virtpc98's builders."""
         data = self.body_json() or {}
         name = str(data.get("name") or "")
-        if not SAFE_NAME.match(name):
-            self.fail(400, "name must be letters, digits, . _ -")
+        if not given_name(name):
+            self.fail(400, NAME_RULE)
             return
-        dest = os.path.join(disks_root(kind), name)
-        if os.path.exists(dest):
+        group = str(data.get("group") or "").strip()
+        if group and not given_name(group):
+            self.fail(400, "a group is named like an image: " + NAME_RULE)
+            return
+        if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return
+        dest = disk_dest(kind, name, group, make=True)
         cap = size_limit(disks_root(kind))
         wanted = int(data.get("size") or 40) << 20
         if kind == "hdd" and cap and wanted > cap:
@@ -4157,7 +4616,7 @@ class Handler(BaseHTTPRequestHandler):
         data = self.body_json() or {}
         source = str(data.get("source") or "")
         target = str(data.get("format") or "")
-        if not SAFE_NAME.match(source):
+        if not listed_name(source):
             self.fail(400, "bad source name")
             return
         stem, ext = os.path.splitext(source)
@@ -4166,8 +4625,8 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400, "cannot make %s out of %s" % (target, source))
             return
         command, out_ext = plan
-        src = os.path.join(disks_root(kind), source)
-        dest = os.path.join(disks_root(kind), stem + out_ext)
+        src = disk_find(kind, source)
+        dest = os.path.join(os.path.dirname(src), stem + out_ext)
         if not os.path.isfile(src):
             self.fail(404, "no such disk")
             return
@@ -4188,7 +4647,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.signed_in():
             self.refuse(401, "sign in first")
             return
-        path = self.path.split("?")[0]
+        path = url_path(self.path)
         if path.startswith("/api/roms/"):
             name = path[len("/api/roms/"):]
             if name not in ROM_FILES:
@@ -4218,6 +4677,7 @@ class Handler(BaseHTTPRequestHandler):
             if used:
                 self.fail(409, "in use by: %s" % ", ".join(used))
                 return
+            was = disk_group_of(kind, name)
             os.remove(full)
             if kind == "cdrom" and not is_sidecar(name):
                 cue = sidecar_partner(os.path.dirname(full), name)
@@ -4226,13 +4686,14 @@ class Handler(BaseHTTPRequestHandler):
                         os.remove(os.path.join(os.path.dirname(full), cue))
                     except OSError:
                         pass
+            disk_drop_group(kind, was)
         self.reply(200, {"result": "deleted"})
 
     def do_PUT(self):
         if not self.signed_in():
             self.refuse(401, "sign in first")
             return
-        m = re.match(r"^/api/instances/([^/]+)$", self.path.split("?")[0])
+        m = re.match(r"^/api/instances/([^/]+)$", url_path(self.path))
         if not m:
             self.fail(404, "no such page")
             return

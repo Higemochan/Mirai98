@@ -354,8 +354,13 @@ window.setLang = value => {
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-// a Windows path is full of backslashes, which a JS string literal eats
-const jsq = s => String(s ?? '').replace(/\\/g, '\\\\');
+// What goes inside a single-quoted JS string in an onclick: a Windows
+// path is full of backslashes, which the string literal would eat, and a
+// name put on the shelf by hand may hold an apostrophe, which would end
+// the literal early.  Wrap this in esc() as well -- the attribute has to
+// survive the HTML parser before the string reaches JS.
+const jsq = s => String(s ?? '').replace(/\\/g, '\\\\')
+                                .replace(/'/g, "\\'");
 const fmtBytes = n => {
   if (n == null) return '-';
   const u = ['B','KB','MB','GB','TB'];
@@ -619,6 +624,21 @@ async function listView(force) {
 }
 
 // ---------------------------------------------------------- detail view
+// The images of a kind as <option>s: the groups first, each in an
+// <optgroup> of its own, then whatever is in none.  Picking one disc out
+// of two dozen is what groups are for, so every place that offers them
+// offers them arranged the same way.
+function diskOptions(files, value) {
+  const groups = [...new Set(files.map(f => f.group || ''))]
+    .filter(Boolean).sort();
+  const opt = f => '<option' + (f.name === value ? ' selected' : '') + '>' +
+                   esc(f.name) + '</option>';
+  return groups.map(g => '<optgroup label="' + esc(g) + '">' +
+      files.filter(f => (f.group || '') === g).map(opt).join('') +
+      '</optgroup>').join('') +
+    files.filter(f => !f.group).map(opt).join('');
+}
+
 function diskSelect(key, kind, value, name) {
   const files = (catalog[kind] || []).filter(f => !f.orphan);
   // real drives of the matching sort come after the images, so a guest
@@ -629,8 +649,7 @@ function diskSelect(key, kind, value, name) {
                 drives.some(d => d.path === value);
   return '<select name="' + (name || key) + '">' +
     '<option value="">(none)</option>' +
-    files.map(f => '<option' + (f.name === value ? ' selected' : '') + '>' +
-      esc(f.name) + '</option>').join('') +
+    diskOptions(files, value) +
     (drives.length
      ? '<optgroup label="host drives">' + drives.map(d =>
          '<option value="' + esc(d.path) + '"' +
@@ -1125,8 +1144,7 @@ async function drawMedia(name) {
       '<span style="width:5.5em">' + esc(drive.device) + '</span>' +
       '<select onchange="swapMedia(\'' + name + '\',\'' + drive.device +
       '\',this.value)"><option value="">(empty)</option>' +
-      files.map(f => '<option' + (f.name === here ? ' selected' : '') + '>' +
-        esc(f.name) + '</option>').join('') +
+      diskOptions(files, here) +
       (here && !files.some(f => f.name === here)
        ? '<option selected>' + esc(here) + '</option>' : '') +
       '</select></div>';
@@ -1199,26 +1217,73 @@ function diskTypeCell(f) {
   }
   return t;
 }
+// Which groups are open, kept per browser: a shelf someone arranged is
+// one they come back to.
+const openGroups = JSON.parse(localStorage.getItem('mirai98.groups') || '{}');
+const diskFilter = {};
+function groupOpen(kind, group) { return !!openGroups[kind + '/' + group]; }
+
+// One row per image, and one per group with its images folded behind it.
 function storageCard(kind, files) {
-  const rows = files.map(f => {
+  const groups = [...new Set(files.map(f => f.group || ''))]
+    .filter(Boolean).sort();
+  const fileRow = f => {
     const used = f.used_by.join(', ');
     const targets = CONVERT_TARGETS[kind + ':' + extOf(f.name)] || [];
-    return '<tr><td><a href="#/disk/' + kind + '/' +
+    const g = f.group || '';
+    return '<tr data-name="' + esc(f.name) + '" data-groupname="' + esc(g) +
+      '"' + (g && !groupOpen(kind, g) ? ' style="display:none"' : '') +
+      '><td' + (g ? ' style="padding-left:1.6em"' : '') + '>' +
+      '<input type="checkbox" class="pick" value="' + esc(f.name) + '"> ' +
+      '<a href="#/disk/' + kind + '/' +
       encodeURIComponent(f.name) + '">' + esc(f.name) + '</a></td><td>' +
       diskTypeCell(f) + '</td><td>' + fmtBytes(f.size) +
       '</td><td class="note">' + fmtDate(f.mtime) + '</td><td>' +
       esc(used || '-') + '</td><td style="text-align:right">' +
       '<button type="button" onclick="showTree(\'' + kind + '\',\'' +
-      f.name + '\')">Contents</button> ' +
-      '<a href="/disks/' + kind + '/' + f.name + '" download>' +
-      '<button type="button">Download</button></a> ' +
+      esc(jsq(f.name)) + '\')">Contents</button> ' +
+      '<a href="/disks/' + kind + '/' + encodeURIComponent(f.name) +
+      '" download><button type="button">Download</button></a> ' +
       targets.map(t => '<button type="button" onclick="convertDisk(\'' +
-        kind + '\',\'' + f.name + '\',\'' + t + '\')">to ' + t +
+        kind + '\',\'' + esc(jsq(f.name)) + '\',\'' + t + '\')">to ' + t +
         '</button>').join(' ') +
+      ' <button type="button" onclick="moveOne(\'' + kind + '\',\'' +
+      esc(jsq(f.name)) + '\')">Move...</button>' +
+      ' <button type="button" onclick="renameDisk(\'' + kind +
+      '\',\'' + esc(jsq(f.name)) + '\')">Rename</button>' +
       ' <button type="button"' + (used ? ' disabled title="in use"' : '') +
-      ' onclick="deleteDisk(\'' + kind + '\',\'' + f.name +
+      ' onclick="deleteDisk(\'' + kind + '\',\'' + esc(jsq(f.name)) +
       '\')">Delete</button></td></tr>';
-  }).join('');
+  };
+  const groupRow = g => {
+    const mine = files.filter(f => (f.group || '') === g);
+    const used = [...new Set(mine.flatMap(f => f.used_by))].join(', ');
+    return '<tr data-grouprow="' + esc(g) + '" style="cursor:pointer" ' +
+      'onclick="toggleGroup(\'' + kind + '\',\'' + g + '\')">' +
+      '<td><span class="caret">' + (groupOpen(kind, g) ? '▼' : '▶') +
+      '</span> <b>' + esc(g) + '</b> <span class="note">' + mine.length +
+      ' image' + (mine.length === 1 ? '' : 's') + '</span></td>' +
+      '<td class="note">group</td><td>' +
+      fmtBytes(mine.reduce((n, f) => n + f.size, 0)) +
+      '</td><td class="note">' +
+      fmtDate(Math.max(...mine.map(f => f.mtime))) + '</td><td>' +
+      esc(used || '-') + '</td><td style="text-align:right">' +
+      '<button type="button" onclick="event.stopPropagation();moveGroup(\'' +
+      kind + '\',\'' + g + '\')">Move all...</button></td></tr>';
+  };
+  const rows = groups.map(g => groupRow(g) +
+      files.filter(f => (f.group || '') === g).map(fileRow).join('')).join('') +
+    files.filter(f => !f.group).map(fileRow).join('');
+  const shelf = '<div class="row" style="margin:.2em 0">' +
+    '<input type="text" placeholder="filter" style="min-width:9em" ' +
+    'value="' + esc(diskFilter[kind] || '') + '" ' +
+    'oninput="filterDisks(\'' + kind + '\',this.value)">' +
+    '<span class="note" id="storage-count-' + kind + '">' + files.length +
+    ' image' + (files.length === 1 ? '' : 's') + '</span>' +
+    '<button type="button" onclick="moveChecked(\'' + kind +
+    '\')">Move checked...</button>' +
+    '<button type="button" onclick="suggestGroups(\'' + kind +
+    '\')">Group by name...</button></div>';
   let create = '';
   // a machine plugin may add image formats of its own (label, note)
   const extra = window.MiraiPlugins.diskFormats[kind] || [];
@@ -1250,8 +1315,9 @@ function storageCard(kind, files) {
       '<button class="primary">Create</button></form>' +
       '<div class="note">.fdi or .raw. Formatted, empty.</div>' +
       extraNotes + '</div>';
-  return '<div class="card"><h3>disks/' + kind + '/</h3>' +
-    '<h4>Images</h4><table>' +
+  return '<div class="card" id="storage-' + kind + '"><h3>disks/' + kind +
+    '/</h3>' +
+    '<h4>Images</h4>' + shelf + '<table>' +
     '<tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th>' +
     '<th>Used by</th><th></th></tr>' +
     (rows || '<tr><td colspan="6" class="note">(empty)</td></tr>') +
@@ -1265,7 +1331,12 @@ function storageCard(kind, files) {
     '<button type="button" onclick="importDisk(\'' + kind +
     '\')">Import a server path...</button>' +
     '<button type="button" onclick="readFromDrive(\'' + kind +
-    '\')">Read a host drive...</button></div>' +
+    '\')">Read a host drive...</button>' +
+    '<label class="check">into <select id="upload-group-' + kind + '">' +
+    '<option value="">no group</option>' +
+    [...new Set(files.map(f => f.group || ''))].filter(Boolean).sort()
+      .map(g => '<option>' + esc(g) + '</option>').join('') +
+    '<option value="__new">new group...</option></select></label></div>' +
     '<div id="jobs-' + kind + '" class="note"></div>' +
     (kind === 'cdrom'
      ? '<div class="note">Several files may be chosen (or dropped here) at ' +
@@ -1352,15 +1423,17 @@ async function diskView(kind, name) {
       '" download><button>Download image</button></a>',
       '<a href="/zip/' + kind + '/' + encodeURIComponent(name) +
       '"><button>Download contents as ZIP</button></a>',
-      '<button onclick="pickZip(\'' + kind + '\',\'' + name +
+      '<button onclick="pickZip(\'' + kind + '\',\'' + esc(jsq(name)) +
       '\')">Write a ZIP into it...</button>',
-      '<button onclick="copyDisk(\'' + kind + '\',\'' + name +
+      '<button onclick="copyDisk(\'' + kind + '\',\'' + esc(jsq(name)) +
       '\')">Make a copy</button>',
-      '<button onclick="writeToDrive(\'' + kind + '\',\'' + name +
+      '<button onclick="renameDisk(\'' + kind + '\',\'' + esc(jsq(name)) +
+      '\',\'#/disk/' + kind + '/\')">Rename...</button>',
+      '<button onclick="writeToDrive(\'' + kind + '\',\'' + esc(jsq(name)) +
       '\')">Write to a drive...</button>',
       '<button onclick="render()">Refresh</button>',
       d.used_by.length ? '' : '<button onclick="deleteDisk(\'' + kind +
-        '\',\'' + name + '\',\'#/storage\')">Delete</button>']) +
+        '\',\'' + esc(jsq(name)) + '\',\'#/storage\')">Delete</button>']) +
     '<div class="grid2" style="grid-template-columns:22em 1fr">' +
     '<div class="card"><h3>Details</h3><table>' +
     [['File', d.path], ['Format', d.format], ['Size', fmtBytes(d.size)],
@@ -1425,7 +1498,8 @@ window.readFromDrive = async kind => {
   if (!name) return;
   api('/api/disks/' + kind + '/from-drive',
       {method: 'POST',
-       body: JSON.stringify({device: drive.path, name})})
+       body: JSON.stringify({device: drive.path, name,
+                             group: uploadGroup(kind)})})
     .then(r => { if (r) { toast('reading ' + drive.path);
                           task('Disk ' + drive.path + ' → ' + name,
                                'started'); pollJobs(); } });
@@ -1440,9 +1514,10 @@ window.copyDisk = (kind, name) => {
   toast('copying ' + name + '...');
   api('/api/disk/' + kind + '/' + encodeURIComponent(name) + '/copy',
       {method: 'POST', body: JSON.stringify({name: target})})
-    .then(r => { if (r) { toast('made ' + r.name);
+    .then(r => { if (r) { toast('made ' + (r.files || [r.name]).join(' + '));
                           task('Disk ' + name + ' - copy', 'OK');
-                          location.hash = '#/disk/' + kind + '/' + r.name; }
+                          location.hash = '#/disk/' + kind + '/' +
+                            encodeURIComponent(r.name); }
                  render(); });
 };
 
@@ -1485,6 +1560,9 @@ async function storageView() {
         fmtBytes(hostFacts.disk_total) : '') + '</span></div>' +
     ['hdd','fdd','cdrom'].map(k => storageCard(k, catalog[k])).join('') +
     (roms ? romCard(roms) : '');
+  // the rows were written folded; this is what a filter left on from
+  // before does to them, once they are in the document
+  ['hdd', 'fdd', 'cdrom'].forEach(applyView);
 }
 
 window.createDisk = (form, kind) => {
@@ -1507,6 +1585,140 @@ window.convertDisk = (kind, name, target) => {
     .then(r => { if (r) { toast('made ' + r.name);
                           task('Disk ' + name + ' - convert to ' + target,
                                'OK'); }
+                 render(); });
+};
+// Rows come out of storageCard already folded the way the browser last
+// left them; this is what a click on a caret, or a letter in the filter,
+// does to them afterwards.
+function applyView(kind) {
+  const card = document.getElementById('storage-' + kind);
+  if (!card) return;
+  const q = (diskFilter[kind] || '').trim().toLowerCase();
+  let shown = 0, total = 0;
+  card.querySelectorAll('tr[data-name]').forEach(tr => {
+    const g = tr.dataset.groupname;
+    const hit = !q || (tr.dataset.name + ' ' + g).toLowerCase().includes(q);
+    total++;
+    if (hit) shown++;
+    // while a filter is on, every group is open: a hit folded away behind
+    // a shut group reads as no hit at all
+    tr.style.display = (hit && (!g || q || groupOpen(kind, g))) ? '' : 'none';
+  });
+  card.querySelectorAll('tr[data-grouprow]').forEach(tr => {
+    const g = tr.dataset.grouprow;
+    const kids = [...card.querySelectorAll('tr[data-groupname="' + g + '"]')];
+    tr.style.display = (!q || kids.some(k => k.style.display !== 'none'))
+      ? '' : 'none';
+    const caret = tr.querySelector('.caret');
+    if (caret) caret.textContent = (q || groupOpen(kind, g)) ? '▼' : '▶';
+  });
+  const note = document.getElementById('storage-count-' + kind);
+  if (note) note.textContent = q
+    ? shown + ' of ' + total + ' shown'
+    : total + ' image' + (total === 1 ? '' : 's');
+}
+function rememberGroups() {
+  localStorage.setItem('mirai98.groups', JSON.stringify(openGroups));
+}
+window.toggleGroup = (kind, group) => {
+  openGroups[kind + '/' + group] = !openGroups[kind + '/' + group];
+  rememberGroups();
+  applyView(kind);
+};
+window.filterDisks = (kind, text) => {
+  diskFilter[kind] = text;
+  applyView(kind);
+};
+// Moving is not renaming: the name is the same wherever the image sits,
+// so nothing that named it has to be told, and a CD dump takes its sheet
+// with it.
+function askGroup(kind, what) {
+  const groups = [...new Set((catalog[kind] || []).map(f => f.group)
+                                                  .filter(Boolean))];
+  const to = prompt('move ' + what + ' into which group?' +
+    (groups.length ? '\n\nthere is already: ' + groups.join(', ') : '') +
+    '\n\nleave it empty to take it out of its group', '');
+  return to === null ? null : to.trim();
+}
+function doMove(kind, names, group) {
+  api('/api/disks/' + kind + '/move',
+      {method: 'POST', body: JSON.stringify({names: names, group: group})})
+    .then(r => { if (r) {
+                   toast(r.files.length + ' moved ' +
+                         (r.group ? 'into ' + r.group : 'out of its group'));
+                   task('Storage ' + kind + ' - move', 'OK');
+                   if (r.group) {
+                     openGroups[kind + '/' + r.group] = true;
+                     rememberGroups();
+                   } }
+                 render(); });
+}
+window.moveOne = (kind, name) => {
+  const to = askGroup(kind, name);
+  if (to !== null) doMove(kind, [name], to);
+};
+window.moveGroup = (kind, group) => {
+  const names = (catalog[kind] || []).filter(f => f.group === group)
+                                     .map(f => f.name);
+  const to = askGroup(kind, group + ' (' + names.length + ')');
+  if (to !== null) doMove(kind, names, to);
+};
+window.moveChecked = kind => {
+  const card = document.getElementById('storage-' + kind);
+  const names = [...card.querySelectorAll('input.pick:checked')]
+    .map(i => i.value);
+  if (!names.length) { toast('nothing is checked'); return; }
+  const to = askGroup(kind, names.length + ' images');
+  if (to !== null) doMove(kind, names, to);
+};
+// What the names suggest, put one group at a time so each can be turned
+// down: a name is a hint about what a disc belongs to, not a statement.
+window.suggestGroups = async kind => {
+  const r = await api('/api/disks/' + kind + '/suggest-groups',
+                      {method: 'POST'});
+  if (!r) return;
+  if (!r.groups.length) { toast('the names suggest nothing to group'); return; }
+  let moved = 0;
+  for (const g of r.groups) {
+    if (!confirm('Shelve these ' + g.names.length + ' as "' + g.group +
+                 '"?\n\n' + g.names.join('\n'))) continue;
+    const ok = await api('/api/disks/' + kind + '/move',
+      {method: 'POST', body: JSON.stringify({names: g.names, group: g.group})});
+    if (!ok) break;
+    moved += ok.files.length;
+    openGroups[kind + '/' + g.group] = true;
+  }
+  rememberGroups();
+  if (moved) {
+    toast(moved + ' moved');
+    task('Storage ' + kind + ' - group by name', 'OK');
+  }
+  render();
+};
+// The group whatever arrives next goes into, as the panel has it set.
+function uploadGroup(kind) {
+  const sel = document.getElementById('upload-group-' + kind);
+  if (!sel) return '';
+  if (sel.value !== '__new') return sel.value;
+  return (prompt('name for the new group?', '') || '').trim();
+}
+// A CD dump is a set: the sheet beside the data file is renamed with
+// it and pointed at the new name, and a machine that named the image is
+// pointed at it too -- so the server answers with everything that moved.
+window.renameDisk = (kind, name, then) => {
+  const to = (prompt('rename ' + name + ' to?', name) || '').trim();
+  if (!to || to === name) return;
+  api('/api/disks/' + kind + '/rename',
+      {method: 'POST', body: JSON.stringify({name: name, to: to})})
+    .then(r => { if (r) { toast('renamed to ' + r.files.join(' + ') +
+                            (r.vms.length ? ', and ' + r.vms.join(', ') +
+                             ' follows' : ''));
+                          task('Disk ' + name + ' - rename to ' + r.name,
+                               'OK');
+                          if (then) {
+                            location.hash = then + encodeURIComponent(r.name);
+                            return;
+                          } }
                  render(); });
 };
 window.deleteDisk = (kind, name, then) => {
@@ -1542,7 +1754,7 @@ window.fetchDisk = kind => {
   const url = prompt('image URL to download into disks/' + kind + '/');
   if (!url) return;
   api('/api/disks/' + kind + '/fetch',
-      {method: 'POST', body: JSON.stringify({url})})
+      {method: 'POST', body: JSON.stringify({url, group: uploadGroup(kind)})})
     .then(r => { if (r) { toast('downloading ' + r.name);
                           task('Disk ' + r.name + ' - download', 'started');
                           pollJobs(); } });
@@ -1576,7 +1788,7 @@ window.importDisk = kind => {
   const path = prompt('server path to adopt into disks/' + kind + '/');
   if (!path) return;
   api('/api/disks/' + kind + '/import',
-      {method: 'POST', body: JSON.stringify({path})})
+      {method: 'POST', body: JSON.stringify({path, group: uploadGroup(kind)})})
     .then(r => { if (r) { toast('imported ' + r.name);
                           task('Disk ' + r.name + ' - import', 'OK'); }
                  render(); });
@@ -1619,11 +1831,20 @@ function sendSlice(url, blob) {
 
 // the name a file is stored under: what the server's SAFE_NAME allows,
 // anything else becoming '_' (the server sanitises the same way)
+// The same rule the server keeps (given_name / safe_disk_name there): a
+// disc keeps the name it came with, kanji and spaces and all, and only
+// what would break something downstream is turned into '_'.  The length
+// is counted in bytes, as a filesystem counts it.
 function safeDiskName(name) {
-  let out = name.replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_')
-                .replace(/^[_.]+|[_.]+$/g, '') || 'disk';
-  if (!/^[A-Za-z0-9]/.test(out)) out = 'x' + out;
-  return out.slice(0, 64);
+  let out = name.replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_')
+                .trim().replace(/^\.+/, '').replace(/[ .]+$/, '');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(out)) out = '_' + out;
+  const bytes = new TextEncoder().encode(out);
+  if (bytes.length > 240) {
+    // the cut may land inside a character; the decoder marks it and it goes
+    out = new TextDecoder().decode(bytes.slice(0, 240)).replace(/\uFFFD$/, '');
+  }
+  return out || 'disk';
 }
 window.dropUpload = (ev, kind) => {
   ev.preventDefault();
@@ -1643,6 +1864,7 @@ window.pickUpload = kind => {
 // A .mds is the same set in binary and names its data by wildcard, so
 // what it wants is the .mdf sharing its stem.
 async function uploadFiles(kind, files) {
+  const group = uploadGroup(kind);
   const plan = files.map(f => ({ file: f, name: safeDiskName(f.name) }));
   const cues = plan.filter(p => /\.(cue|mds)$/i.test(p.name));
   if (kind === 'cdrom' && cues.length) {
@@ -1679,7 +1901,8 @@ async function uploadFiles(kind, files) {
   for (let n = 0; n < plan.length; n++) {
     const p = plan[n];
     const done = await uploadOne(kind, p.file, p.name, overwrite,
-                                 plan.length > 1 ? (n + 1) + '/' + plan.length + ' ' : '');
+                                 plan.length > 1 ? (n + 1) + '/' + plan.length + ' ' : '',
+                                 group);
     if (!done) return;
     stored.push(done);
   }
@@ -1704,9 +1927,10 @@ async function uploadFiles(kind, files) {
   render();
 }
 // one file, in slices; resolves to the stored name or null when it failed
-async function uploadOne(kind, file, name, overwrite, prefix) {
+async function uploadOne(kind, file, name, overwrite, prefix, group) {
     const base = '/api/disks/' + kind;
-    const q = 'name=' + encodeURIComponent(name) + '&total=' + file.size;
+    const q = 'name=' + encodeURIComponent(name) + '&total=' + file.size +
+              (group ? '&group=' + encodeURIComponent(group) : '');
     uploadBox(file, kind, prefix + name);
     const bar = document.getElementById('upload-bar');
     const stat = document.getElementById('upload-stat');

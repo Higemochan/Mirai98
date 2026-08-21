@@ -239,7 +239,7 @@ def towns_argv(api, inst):
     # CD-DA voice all open on the backend the VNC server streams; the CMOS
     # file keeps the guest's SETUP; a boot key overrides the ROM's order
     machine = "towns,accel=%s,audiodev=snd,cmos=%s" % (
-        accel, api.win_short(towns_cmos(api, inst, towns_roms)))
+        accel, api.qemu_file(towns_cmos(api, inst, towns_roms)))
     bootkey = BOOT_KEYS.get(inst.get("boot") or "")
     if bootkey:
         machine += ",bootkey=%s" % bootkey
@@ -248,7 +248,7 @@ def towns_argv(api, inst):
     if MIDI_MODES.get(inst.get("midi") or ""):
         machine += ",midi=on"
         if cfg.get("soundfont"):
-            machine += ",soundfont=%s" % api.win_short(cfg["soundfont"])
+            machine += ",soundfont=%s" % api.qemu_file(cfg["soundfont"])
     argv = [cfg["qemu"],
             "-M", machine,
             "-m", inst.get("memory") or "16M",
@@ -272,7 +272,7 @@ def towns_argv(api, inst):
     # so a disc can be put in from the Media row while the machine runs
     cd = "if=ide,index=2,media=cdrom"
     if inst.get("cd"):
-        cd += ",format=raw,file=%s" % api.win_short(api.disk_path(inst, "cd"))
+        cd += ",format=raw,file=%s" % api.qemu_file(api.disk_path(inst, "cd"))
     argv += ["-drive", cd]
     # both internal floppy drives always exist (so a disk can be put in
     # from the Media row while the machine runs); an image is a raw dump
@@ -280,7 +280,7 @@ def towns_argv(api, inst):
     for index, key in enumerate(("fdd1", "fdd2")):
         drive = "if=floppy,index=%d" % index
         if inst.get(key):
-            drive += ",format=raw,file=%s" % api.win_short(
+            drive += ",format=raw,file=%s" % api.qemu_file(
                 api.disk_path(inst, key))
         argv += ["-drive", drive]
     # SCSI hard disks: SCSI ID = unit (Towns OS drive letters follow the
@@ -288,7 +288,7 @@ def towns_argv(api, inst):
     for unit, key in enumerate(("scsi1", "scsi2", "scsi3", "scsi4")):
         if inst.get(key):
             argv += ["-drive", "if=scsi,bus=0,unit=%d,format=raw,file=%s" % (
-                unit, api.win_short(api.disk_path(inst, key)))]
+                unit, api.qemu_file(api.disk_path(inst, key)))]
     if inst.get("extra"):
         argv += inst["extra"].split()
     return argv
