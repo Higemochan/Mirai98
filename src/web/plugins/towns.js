@@ -176,6 +176,17 @@ const TOWNS_RESET_KEYS = [
   ['FAST', 'Restart: fast mode (T)'],
   ['SLOW', 'Restart: slow mode (N)']];
 
+// A name inside an onclick is a JS string inside an HTML attribute, and
+// needs escaping for both.  app.js has a pair of functions for exactly
+// this and keeps them to itself -- a plugin is handed `esc` and nothing
+// else -- and reaching for them by their bare names threw a
+// ReferenceError, which pluginActions catches and turns into no buttons
+// at all.  So the pair lives here, where this file can see it.
+const townsInAttr = s => String(s ?? '')
+  .replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+  .replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;',
+                             '"': '&quot;'}[c]));
+
 function townsActions(i) {
   if (!i.running) {
     return [];
@@ -189,13 +200,13 @@ function townsActions(i) {
           'where the Towns OS still finds it. A game that steers itself ' +
           'as the mouse moves is reading port A and wants the pad there. ' +
           'Changed here it takes effect at once." onchange="townsPadPort(\'' +
-          esc(jsq(i.name)) + '\')">' +
+          townsInAttr(i.name) + '\')">' +
           TOWNS_PADS.map(([v, label]) =>
             '<option value="' + v + '"' +
             ((i.pad || '') === v ? ' selected' : '') + '>' +
             'pad: ' + label.split(' — ')[0] + '</option>').join('') +
           '</select>',
-          '<button onclick="townsPadPort(\'' + esc(jsq(i.name)) +
+          '<button onclick="townsPadPort(\'' + townsInAttr(i.name) +
           '\')">Move the pad</button>'];
   return padHere.concat(
          ['<select id="towns-bootkey" title="Keys held down while the ' +
