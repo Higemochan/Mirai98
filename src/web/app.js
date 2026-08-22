@@ -253,6 +253,7 @@ JA['(empty)'] = '(なし)';
 JA['to hdi'] = 'hdiへ';
 JA['to qcow2'] = 'qcow2へ';
 JA['to raw'] = 'rawへ';
+JA['to nfd'] = 'nfdへ';
 JA['to fdi'] = 'fdiへ';
 JA['.qcow2 grows on demand. .hdi: Anex86. .raw: flat.'] =
   '.qcow2 は必要に応じて大きくなります。.hdi は Anex86 形式、.raw はベタ。';
@@ -1195,7 +1196,8 @@ const stemOf = n => { const i = n.lastIndexOf('.');
 const CONVERT_TARGETS = {
   'hdd:.hdi': ['raw'], 'hdd:.raw': ['hdi','qcow2'],
   'hdd:.img': ['hdi','qcow2'], 'hdd:.qcow2': ['raw'],
-  'fdd:.fdi': ['raw'], 'fdd:.raw': ['fdi'], 'fdd:.img': ['fdi'],
+  'fdd:.fdi': ['raw'], 'fdd:.nfd': ['raw'],
+  'fdd:.raw': ['fdi', 'nfd'], 'fdd:.img': ['fdi', 'nfd'],
 };
 
 // what a catalog entry is: its type, and for a CD dump the state of its

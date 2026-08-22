@@ -4440,7 +4440,7 @@ class Handler(BaseHTTPRequestHandler):
         ext = ext.lower()
         if (kind, ext) == ("hdd", ".hdi"):
             target = stem + ".qcow2"
-        elif (kind, ext) == ("fdd", ".fdi"):
+        elif (kind, ext) in (("fdd", ".fdi"), ("fdd", ".nfd")):
             target = stem + ".raw"
         else:
             return os.path.basename(dest)
@@ -4452,7 +4452,8 @@ class Handler(BaseHTTPRequestHandler):
             return os.path.basename(dest)      # never clobber sideways
         try:
             import virtpc98
-            payload = virtpc98.read_image(dest)[0]
+            payload = (virtpc98.nfd_to_raw(dest) if ext == ".nfd"
+                       else virtpc98.read_image(dest)[0])
             if target.endswith(".qcow2"):
                 virtpc98.qcow2_write(target, payload, lambda *a: None)
             else:
@@ -4769,8 +4770,11 @@ class Handler(BaseHTTPRequestHandler):
         ("hdd", ".img", "qcow2"): ("raw-to-qcow2", ".qcow2"),
         ("hdd", ".qcow2", "raw"): ("qcow2-to-raw", ".raw"),
         ("fdd", ".fdi", "raw"): ("fdi-to-raw", ".raw"),
+        ("fdd", ".nfd", "raw"): ("nfd-to-raw", ".raw"),
         ("fdd", ".raw", "fdi"): ("raw-to-fdi", ".fdi"),
         ("fdd", ".img", "fdi"): ("raw-to-fdi", ".fdi"),
+        ("fdd", ".raw", "nfd"): ("raw-to-nfd", ".nfd"),
+        ("fdd", ".img", "nfd"): ("raw-to-nfd", ".nfd"),
     }
 
     def convert_disk(self, kind):

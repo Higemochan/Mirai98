@@ -186,6 +186,91 @@ def read_image(path):
         return f.read(size), sectors, heads
 
 
+# ------------------------------------------------------------ NFD floppies
+
+# T98-Next's floppy container.  An R0 header is fixed-size: 163 rows of 26
+# sector IDs, 16 bytes each, and the data area then holds exactly the
+# sectors those IDs name, in the order the table names them.  A slot that
+# names no sector carries 0xFF where its cylinder would be.  R1 ("R1" in
+# the signature) lays every track out on its own and is another format in
+# all but name; images in the wild are R0.
+NFD_SIG_R0 = b"T98FDDIMAGE.R0\0\0"
+NFD_SIG_R1 = b"T98FDDIMAGE.R1\0\0"
+NFD_ROWS = 163
+NFD_SLOTS = 26
+NFD_TABLE = 0x120
+NFD_HEAD_SIZE = NFD_TABLE + NFD_ROWS * NFD_SLOTS * 0x10 + 0x10
+# what T98-Next itself leaves in an empty slot: a missing-sector status,
+# whose ST0 still carries the head bit of the side the slot belongs to
+def nfd_empty_slot(side):
+    return b"\xff" * 6 + bytes((0xE0, 0x40 | side << 2, 0x01)) + b"\0" * 7
+
+
+def nfd_to_raw(path):
+    """The sector bytes of an NFD R0, in plain cylinder/head/sector order."""
+    with open(path, "rb") as f:
+        image = f.read()
+    if image[:16] == NFD_SIG_R1:
+        raise ValueError("an NFD R1 (track-by-track) image; only the "
+                         "fixed-table R0 kind converts")
+    if image[:16] != NFD_SIG_R0 or len(image) < NFD_HEAD_SIZE:
+        raise ValueError("not a T98-Next NFD R0 image")
+    data = struct.unpack_from("<I", image, 0x110)[0]
+    out = []
+    for row in range(NFD_ROWS):
+        sectors = []
+        for slot in range(NFD_SLOTS):
+            at = NFD_TABLE + (row * NFD_SLOTS + slot) * 0x10
+            cyl, _, sec, size_code = image[at:at + 4]
+            if cyl == 0xFF:
+                continue
+            size = 128 << size_code
+            sectors.append((sec, image[data:data + size]))
+            data += size
+        # a raw image is read by sector number, whatever order the drive
+        # happened to write them in
+        for _, chunk in sorted(sectors):
+            out.append(chunk)
+    if data > len(image):
+        raise ValueError("the NFD header names more sector data than the "
+                         "file holds")
+    if not out:
+        raise ValueError("the NFD header names no sectors")
+    return b"".join(out)
+
+
+def raw_to_nfd(src, dst, log=print):
+    """Wrap a bare floppy image in a T98-Next NFD R0 header."""
+    fmt = FDD_FORMATS[fdd_format_of(src)]
+    bps, sectors, heads, cylinders, media = (fmt[0], fmt[8], fmt[9],
+                                             fmt[10], fmt[11])
+    payload = read_image(src)[0]
+    want = bps * sectors * heads * cylinders
+    payload = payload[:want].ljust(want, b"\0")
+    head = bytearray(NFD_HEAD_SIZE)
+    head[:16] = NFD_SIG_R0
+    head[0x10:0x17] = b"Mirai98"        # the comment field, ASCIIZ
+    struct.pack_into("<IBB", head, 0x110, NFD_HEAD_SIZE, 0, heads)
+    for row in range(NFD_ROWS):
+        cyl, side = divmod(row, heads)
+        for slot in range(NFD_SLOTS):
+            at = NFD_TABLE + (row * NFD_SLOTS + slot) * 0x10
+            if cyl < cylinders and slot < sectors:
+                # ST0 carries the head bit, as the FDC would report it
+                head[at:at + 11] = bytes((cyl, side, slot + 1,
+                                          bps.bit_length() - 8, 1, 0,
+                                          0, side << 2, 0, 0, media))
+            else:
+                # rows past the media's last cylinder are nobody's side
+                head[at:at + 16] = nfd_empty_slot(side if cyl < cylinders
+                                                  else 0)
+    with open(dst, "wb") as f:
+        f.write(head)
+        f.write(payload)
+    log("%s -> %s (%d cyl x %d heads x %d sectors, %d bytes)"
+        % (src, dst, cylinders, heads, sectors, len(payload)))
+
+
 def is_bare(path):
     """Whether an output name asks for a plain image with no Anex86 header."""
     return os.path.splitext(path)[1].lower() in (".raw", ".img")
@@ -2244,6 +2329,7 @@ def convert_pair(src_kind, src_ref, dst_kind, dst_ref, opts=None, log=print):
 RAW_TYPES = [("Raw images", "*.raw *.img"), ("All files", "*.*")]
 HDI_TYPES = [("HDI images", "*.hdi"), ("All files", "*.*")]
 FDI_TYPES = [("FDI images", "*.fdi"), ("All files", "*.*")]
+NFD_TYPES = [("NFD images", "*.nfd"), ("All files", "*.*")]
 ISO_TYPES = [("ISO images", "*.iso"), ("All files", "*.*")]
 KIND_SUFFIX = {KIND_HDI: ".hdi", KIND_FDI: ".fdi", KIND_RAW_HDD: ".raw",
                KIND_RAW_FDD: ".raw", KIND_QCOW2: ".qcow2"}
@@ -2272,6 +2358,10 @@ CONVERSIONS = [
      ("save", ".hdi", HDI_TYPES), ()),
     ("RAW to FDI", "raw-to-fdi", ("open", RAW_TYPES),
      ("save", ".fdi", FDI_TYPES), ()),
+    ("NFD to RAW", "nfd-to-raw", ("open", NFD_TYPES),
+     ("save", ".raw", RAW_TYPES), ()),
+    ("RAW to NFD", "raw-to-nfd", ("open", RAW_TYPES),
+     ("save", ".nfd", NFD_TYPES), ()),
     ("HDI to Folder", "hdd-to-folder", ("open", HDI_TYPES),
      ("dir", "", None), (PART_FIELD,)),
     ("RAW HDD to Folder", "hdd-to-folder", ("open", RAW_TYPES),
@@ -2319,6 +2409,13 @@ def run_command(name, src, dst, opts, log=print):
     elif name == "raw-to-fdi":
         f = FDD_FORMATS[fdd_format_of(src)]
         convert_image(src, dst, f[11], f[8], f[9], f[0], log)
+    elif name == "nfd-to-raw":
+        payload = nfd_to_raw(src)
+        with open(dst, "wb") as f:
+            f.write(payload)
+        log("%s -> %s (%d bytes)" % (src, dst, len(payload)))
+    elif name == "raw-to-nfd":
+        raw_to_nfd(src, dst, log)
     elif name == "hdd-to-folder":
         image_to_folder(src, dst, False, int(opts.get("partition") or 1), log)
     elif name == "fdd-to-folder":
@@ -2379,6 +2476,7 @@ USAGE = """PC-98 disk images and QEMU launcher
 Images
   hdi-to-raw     IN OUT          fdi-to-raw     IN OUT
   raw-to-hdi     IN OUT          raw-to-fdi     IN OUT
+  nfd-to-raw     IN OUT          raw-to-nfd     IN OUT
   hdd-to-folder  IN OUTDIR       fdd-to-folder  IN OUTDIR
   folder-to-hdd  INDIR OUT       folder-to-fdd  INDIR OUT
   folder-to-iso  INDIR OUT       iso-to-folder  IN OUTDIR
