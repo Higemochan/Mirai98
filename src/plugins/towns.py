@@ -147,9 +147,13 @@ def towns_pad_port(api, inst, data):
     api.save_instance(inst)
     if not api.is_running(inst):
         return {"result": "kept", "port": port}
+    # the empty choice is "the default", and the default is port A -- the
+    # machine boots that way, and a live request saying the same words has
+    # to mean the same thing, or picking "default" while playing quietly
+    # moved the pad to port B and off of the port the title was reading
     reply = api.qmp(inst, "qom-set", {"path": "/machine/towns-gameport",
                                       "property": "pad",
-                                      "value": PAD_PORTS[port] or "b"})
+                                      "value": PAD_PORTS[port] or "a"})
     if reply is None:
         return 502, "the machine did not answer"
     if "error" in reply:
