@@ -250,6 +250,8 @@ JA['where this program was started'] = 'このプログラムを起動した場�
 JA['Modified'] = '更新日時';
 JA['Used by'] = '使用中';
 JA['(empty)'] = '(なし)';
+JA['filter'] = '絞り込み';
+JA['narrow the list of images'] = 'イメージ一覧を絞り込む';
 JA['to hdi'] = 'hdiへ';
 JA['to qcow2'] = 'qcow2へ';
 JA['to raw'] = 'rawへ';
@@ -300,6 +302,7 @@ const JA_RE = [
   [/^host RSS (.+)$/, 'ホストRSS $1'],
   [/^(\d+) lines$/, '$1 行'],
   [/^(\d+) disks?$/, 'ディスク $1 台'],
+  [/^(\d+) of (\d+) shown$/, '$2 件中 $1 件'],
   [/^\((\d+), (\d+) on\)$/, '($1 台、$2 台実行中)'],
   [/^in use: (.+)$/, '使用中: $1'],
   [/^Move back to (.+)$/, '$1 に戻す'],
@@ -640,16 +643,28 @@ function diskOptions(files, value) {
     files.filter(f => !f.group).map(opt).join('');
 }
 
-function diskSelect(key, kind, value, name) {
-  const files = (catalog[kind] || []).filter(f => !f.orphan);
+// The inside of a disk <select>, drawn from scratch again every time the
+// filter box in front of it is typed into.  o.drives offers the host's own
+// drives after the images, o.orphans keeps the ones whose file has gone
+// missing, o.empty names the first entry, o.filter narrows the rest.
+function diskBody(kind, value, o) {
+  o = o || {};
+  const q = (o.filter || '').trim().toLowerCase();
+  // whatever is already picked survives the filter: a narrowed list that
+  // dropped the pick would quietly change what the form submits
+  const hit = (name, text) =>
+    name === value || !q || text.toLowerCase().includes(q);
+  const all = (catalog[kind] || []).filter(f => o.orphans || !f.orphan);
+  const files = all.filter(f => hit(f.name, f.name + ' ' + (f.group || '')));
   // real drives of the matching sort come after the images, so a guest
   // can be pointed at the host's own CD or floppy
-  const drives = (hardware.drives || []).filter(
-    d => d.type === kind || (kind === 'hdd' && d.type === 'hdd'));
-  const known = files.some(f => f.name === value) ||
-                drives.some(d => d.path === value);
-  return '<select name="' + (name || key) + '">' +
-    '<option value="">(none)</option>' +
+  const allDrives = o.drives ? (hardware.drives || []).filter(
+    d => d.type === kind) : [];
+  const drives = allDrives.filter(
+    d => hit(d.path, d.path + ' ' + (d.model || '')));
+  const known = all.some(f => f.name === value) ||
+                allDrives.some(d => d.path === value);
+  return '<option value="">' + esc(o.empty || '(none)') + '</option>' +
     diskOptions(files, value) +
     (drives.length
      ? '<optgroup label="host drives">' + drives.map(d =>
@@ -661,8 +676,54 @@ function diskSelect(key, kind, value, name) {
          (d.busy ? ' [mounted on ' + esc(d.busy) + ']' : '') +
          '</option>').join('') + '</optgroup>'
      : '') +
-    (value && !known ? '<option selected>' + esc(value) + '</option>' : '') +
-    '</select>';
+    (value && !known ? '<option selected>' + esc(value) + '</option>' : '');
+}
+
+// how many images the filter left, read the same way the Storage filter
+// reads a shelf: the name and the group it sits in
+function diskCount(kind, o) {
+  const q = (o.filter || '').trim().toLowerCase();
+  if (!q) return '';
+  const all = (catalog[kind] || []).filter(f => o.orphans || !f.orphan);
+  const shown = all.filter(f => (f.name + ' ' + (f.group || ''))
+                                .toLowerCase().includes(q)).length;
+  return shown + ' of ' + all.length + ' shown';
+}
+
+// A shelf outgrows a list long before it outgrows the disk: groups thin a
+// couple of dozen images down, a few typed letters thin any number of them.
+// The box carries what its list is made of, so a keystroke can rebuild it.
+// o.attrs goes on the <select>, o.box on the filter itself.
+function diskPicker(kind, value, o) {
+  o = o || {};
+  return '<input type="text" class="disk-filter" placeholder="filter" ' +
+    'title="narrow the list of images" oninput="filterDiskSelect(this)" ' +
+    'value="' + esc(o.filter || '') + '" data-kind="' + esc(kind) + '"' +
+    (o.drives ? ' data-drives="1"' : '') +
+    (o.orphans ? ' data-orphans="1"' : '') +
+    ' data-empty="' + esc(o.empty || '(none)') + '"' + (o.box || '') + '>' +
+    '<select ' + (o.attrs || '') + '>' + diskBody(kind, value, o) +
+    '</select><span class="note disk-count">' + esc(diskCount(kind, o)) +
+    '</span>';
+}
+
+window.filterDiskSelect = (box) => {
+  const sel = box.nextElementSibling;
+  if (!sel || sel.tagName !== 'SELECT') return;
+  const d = box.dataset;
+  const o = {filter: box.value, drives: !!d.drives, orphans: !!d.orphans,
+             empty: d.empty};
+  const value = sel.value;
+  sel.innerHTML = diskBody(d.kind, value, o);
+  sel.value = value;          // redrawing the list must not move the pick
+  const note = sel.nextElementSibling;
+  if (note && note.classList.contains('disk-count'))
+    note.textContent = diskCount(d.kind, o);
+};
+
+function diskSelect(key, kind, value, name) {
+  return diskPicker(kind, value,
+                    {drives: true, attrs: 'name="' + (name || key) + '"'});
 }
 
 function serialSelect(value, name) {
@@ -1138,18 +1199,21 @@ async function drawMedia(name) {
       'no floppy or CD-ROM drive';
     return;
   }
-  document.getElementById('media-row').innerHTML = d.drives.map(drive => {
-    const files = catalog[drive.kind] || [];
-    const here = drive.file.split('/').pop();
-    return '<div class="row" style="margin:.1em 0">' +
+  // a swap redraws these rows; a filter someone typed to find the disc is
+  // still the one they are working through, so it comes back with them
+  const typed = {};
+  for (const box of document.querySelectorAll('#media-row .disk-filter'))
+    typed[box.dataset.device] = box.value;
+  document.getElementById('media-row').innerHTML = d.drives.map(drive =>
+    '<div class="row" style="margin:.1em 0">' +
       '<span style="width:5.5em">' + esc(drive.device) + '</span>' +
-      '<select onchange="swapMedia(\'' + name + '\',\'' + drive.device +
-      '\',this.value)"><option value="">(empty)</option>' +
-      diskOptions(files, here) +
-      (here && !files.some(f => f.name === here)
-       ? '<option selected>' + esc(here) + '</option>' : '') +
-      '</select></div>';
-  }).join('');
+      diskPicker(drive.kind, drive.file.split('/').pop(),
+                 {orphans: true, empty: '(empty)',
+                  filter: typed[drive.device] || '',
+                  box: ' data-device="' + esc(drive.device) + '"',
+                  attrs: 'onchange="swapMedia(\'' + name + '\',\'' +
+                         drive.device + '\',this.value)"'}) +
+    '</div>').join('');
 }
 window.swapMedia = (name, device, file) => {
   api('/api/instances/' + encodeURIComponent(name) + '/media',

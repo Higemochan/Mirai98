@@ -96,6 +96,10 @@
    border: 1px solid var(--line); background: #1b1e21; color: var(--ink); }
  input[type=text], select { min-width: 14em; }
  input[type=range] { vertical-align: middle; width: 14em; }
+ /* the filter in front of a disk list: narrow, so the list stays the
+    widest thing in the row */
+ input[type=text].disk-filter { min-width: 0; width: 7em; flex: none; }
+ .disk-count { flex: none; white-space: nowrap; }
  label.check { user-select: none; }
 
  .state { display: inline-block; padding: 0 .55em; border-radius: 9px;
