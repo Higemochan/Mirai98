@@ -707,7 +707,8 @@ def rom_catalog():
 # emulator is given the data file and finds the sheet beside it, so the
 # pair is one disc in the tree: the data file is the entry, the .cue its
 # sidecar, and a .cue whose data file is missing is an orphan nothing can
-# use.
+# use.  The same goes for Alcohol's .mds and CloneCD's .ccd, which name
+# their data by stem instead of by line.
 
 CUE_FILE_RE = re.compile(r'^\s*FILE\s+(?:"([^"]*)"|(\S+))\s+(\S+)',
                          re.IGNORECASE)
@@ -821,7 +822,63 @@ def mds_summary(path):
     return [os.path.splitext(os.path.basename(path))[0] + ".mdf"], tracks, audio
 
 
-SIDECAR_EXTS = (".cue", ".mds")
+# CloneCD's sheet is the third shape: INI-style text beside a raw .img,
+# naming the data by stem as an .mds does, with the TOC in [Entry N]
+# sections -- one per lead-in point, the A0-A2 disc entries included.  A
+# .sub of subchannel data often completes the set; the emulator reads it
+# when it is there, so it rides with the disc but is not required of it.
+
+
+def ccd_summary(path):
+    """(referenced file names, track count, audio track count)."""
+    tracks = audio = 0
+    sessions = 1
+    in_disc = in_entry = False
+    entries = []
+    point = control = None
+    try:
+        for line in read_cue(path):
+            line = line.strip()
+            if line.startswith("["):
+                if point is not None:
+                    entries.append((point, control))
+                point = control = None
+                low = line.lower()
+                in_disc = low.startswith("[disc]")
+                in_entry = low.startswith("[entry")
+                continue
+            key, eq, value = line.partition("=")
+            if not eq:
+                continue
+            try:
+                value = int(value.strip(), 0)
+            except ValueError:
+                continue
+            key = key.strip().lower()
+            if in_disc and key == "sessions":
+                sessions = value
+            elif in_entry and key == "point":
+                point = value
+            elif in_entry and key == "control":
+                control = value
+        if point is not None:
+            entries.append((point, control))
+    except OSError:
+        return [], 0, 0
+    if sessions != 1:
+        return [], 0, 0             # one session, as the drive reads
+    for point, control in entries:
+        if 1 <= point <= 99:
+            tracks += 1
+            if control is not None and not control & 0x04:
+                audio += 1
+    if not tracks:
+        return [], 0, 0
+    return ([os.path.splitext(os.path.basename(path))[0] + ".img"],
+            tracks, audio)
+
+
+SIDECAR_EXTS = (".cue", ".mds", ".ccd")
 
 
 def is_sidecar(name):
@@ -832,6 +889,8 @@ def sidecar_summary(path):
     """(referenced file names, track count, audio count), either kind."""
     if path.lower().endswith(".mds"):
         return mds_summary(path)
+    if path.lower().endswith(".ccd"):
+        return ccd_summary(path)
     return cue_summary(path)
 
 
@@ -845,16 +904,32 @@ def sidecar_partner(root, name):
     return None
 
 
+def sub_partner(root, name):
+    """The CloneCD .sub riding with a data file (same stem), or None."""
+    stem = os.path.splitext(name)[0]
+    for cand in (stem + ".sub", stem + ".SUB"):
+        if os.path.isfile(os.path.join(root, cand)):
+            return cand
+    return None
+
+
 def disc_set(root, name):
     """The files an image travels with.  A CD dump is its data file and
-    the .cue or .mds beside it, which the emulator finds by the stem the
-    two share; anything else is the one file.  Moving or copying half of
+    the .cue, .mds or .ccd beside it, which the emulator finds by the
+    stem the two share -- a CloneCD set's .sub of subchannel data as
+    well; anything else is the one file.  Moving or copying half of
     a set leaves a disc that reads as a single data track with its audio
     gone, so whatever happens to the data file happens to the sheet."""
     if is_sidecar(name):
         return [name]
     partner = sidecar_partner(root, name)
-    return [name, partner] if partner else [name]
+    if not partner:
+        return [name]
+    if partner.lower().endswith(".ccd"):
+        sub = sub_partner(root, name)
+        if sub:
+            return [name, partner, sub]
+    return [name, partner]
 
 
 def sheet_left_behind(root, name):
@@ -1010,6 +1085,12 @@ def disk_catalog():
                 if kind == "cdrom" and is_sidecar(name) \
                         and name not in orphans:
                     continue                # a sidecar rides with its data
+                if kind == "cdrom" and name.lower().endswith(".sub") \
+                        and any(os.path.splitext(d)[0]
+                                == os.path.splitext(name)[0]
+                                and pairs[d].lower().endswith(".ccd")
+                                for d in pairs):
+                    continue        # a CloneCD .sub rides with its disc too
                 st = os.stat(full)
                 used = sorted(i["name"] for i in instances
                               if any(disk_path(i, k) == full
@@ -4503,36 +4584,45 @@ class Handler(BaseHTTPRequestHandler):
         say("rom %s uploaded (%d bytes)" % (name, size), "system")
         self.reply(200, {"result": "uploaded", "name": name, "size": size})
 
-    def settle_mds_set(self, root, mds, files):
-        """A descriptor names its data file by wildcard -- "*.mdf" is the
-        one sharing its stem -- so there are no names in it to point at
-        what was stored.  The stem is the whole of the pairing, and the
-        lone data file that came up with it takes it."""
+    def settle_stem_set(self, root, sheet, files):
+        """A descriptor names its data by stem -- "*.mdf" is the one
+        sharing an .mds's, and a .ccd's is the .img beside it, with the
+        .sub of subchannel data riding along -- so there are no names in
+        it to point at what was stored.  The stem is the whole of the
+        pairing, and the lone data file that came up with it takes it,
+        whatever rides with it following."""
         present = {n.lower(): n for n in os.listdir(root)
                    if os.path.isfile(os.path.join(root, n))}
         chosen = [present[f.lower()] for f in files if f.lower() in present]
-        if not chosen:
-            self.fail(400, "%s came without its data file" % mds)
+        data = [f for f in chosen if not f.lower().endswith(".sub")]
+        if not data:
+            self.fail(400, "%s came without its data file" % sheet)
             return
-        if len(chosen) == 1:
-            want = os.path.splitext(mds)[0] + os.path.splitext(chosen[0])[1]
-            if chosen[0] != want and not disk_taken("cdrom", want):
-                os.replace(os.path.join(root, chosen[0]),
-                           os.path.join(root, want))
-                chosen = [want]
-        _, tracks, audio = mds_summary(os.path.join(root, mds))
-        say("disc set %s: %d track(s), %d audio" % (mds, tracks, audio),
+        if len(data) == 1:
+            stem = os.path.splitext(sheet)[0]
+            renamed = []
+            for f in chosen:
+                want = stem + os.path.splitext(f)[1]
+                if f != want and not disk_taken("cdrom", want):
+                    os.replace(os.path.join(root, f),
+                               os.path.join(root, want))
+                    f = want
+                renamed.append(f)
+            chosen = renamed
+        _, tracks, audio = sidecar_summary(os.path.join(root, sheet))
+        say("disc set %s: %d track(s), %d audio" % (sheet, tracks, audio),
             "disk")
-        self.reply(200, {"result": "set", "cue": mds, "files": chosen,
+        self.reply(200, {"result": "set", "cue": sheet, "files": chosen,
                          "tracks": tracks, "audio": audio,
-                         "multi": len(chosen) > 1})
+                         "multi": len(data) > 1})
 
     def settle_cue_set(self):
         """A cue sheet and its data files have all arrived: point the
         sheet's FILE lines at the names they were stored under (uploads
         get safe names, and sheets often name the file with a path or a
         different case) and check the set is complete.  A binary .mds
-        carries no such names and is settled by its stem instead."""
+        or a CloneCD .ccd carries no such names and is settled by its
+        stem instead."""
         data = self.body_json() or {}
         cue = str(data.get("cue") or "")
         files = [str(f) for f in (data.get("files") or [])]
@@ -4544,8 +4634,8 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isfile(cue_path):
             self.fail(404, "no such cue sheet")
             return
-        if cue.lower().endswith(".mds"):
-            self.settle_mds_set(root, cue, files)
+        if cue.lower().endswith((".mds", ".ccd")):
+            self.settle_stem_set(root, cue, files)
             return
         present = {n.lower(): n for n in os.listdir(root)
                    if os.path.isfile(os.path.join(root, n))}
@@ -4643,10 +4733,13 @@ class Handler(BaseHTTPRequestHandler):
                                   "beside it" % ref)
                         return
                     group.append(cand)
+                if name.lower().endswith(".ccd"):
+                    sub = sub_partner(folder, name)
+                    if sub:
+                        group.append(os.path.join(folder, sub))
             else:
-                cue = sidecar_partner(folder, name)
-                if cue:
-                    group.append(os.path.join(folder, cue))
+                group += [os.path.join(folder, f)
+                          for f in disc_set(folder, name)[1:]]
         for src in group:
             base = os.path.basename(src)
             if not given_name(base):

@@ -1358,10 +1358,11 @@ function storageCard(kind, files) {
     '<div id="jobs-' + kind + '" class="note"></div>' +
     (kind === 'cdrom'
      ? '<div class="note">Several files may be chosen (or dropped here) at ' +
-       'once: a .cue and its .bin/.img -- or a .mds and its .mdf -- travel ' +
-       'as one disc, the sheet is pointed at the stored names, and the ' +
-       'pair is listed as one entry.  A .chd holds its tracks inside it ' +
-       'and comes on its own.</div>' : '') + '</div>' +
+       'once: a .cue and its .bin/.img, a .ccd with its .img and .sub, or ' +
+       'a .mds and its .mdf travel as one disc, the sheet is pointed at ' +
+       'the stored names, and the set is listed as one entry.  A .chd ' +
+       'holds its tracks inside it and comes on its own.</div>' : '') +
+    '</div>' +
     create + '</div>';
 }
 
@@ -1891,19 +1892,20 @@ window.pickUpload = kind => {
 // Several files at once.  For CD dumps a sheet and the data files it
 // names form a set: the sheet is checked against the selection first, all
 // files go up under safe names, then the server points the sheet at them.
-// A .mds is the same set in binary and names its data by wildcard, so
-// what it wants is the .mdf sharing its stem.
+// A .mds or a .ccd names its data by stem instead -- the .mdf or .img
+// sharing it -- and a CloneCD .sub rides along unnamed.
 async function uploadFiles(kind, files) {
   const group = uploadGroup(kind);
   const plan = files.map(f => ({ file: f, name: safeDiskName(f.name) }));
-  const cues = plan.filter(p => /\.(cue|mds)$/i.test(p.name));
+  const cues = plan.filter(p => /\.(cue|mds|ccd)$/i.test(p.name));
   if (kind === 'cdrom' && cues.length) {
     const have = new Set(plan.map(p => p.file.name.toLowerCase()));
     const haveSafe = new Set(plan.map(p => p.name.toLowerCase()));
     for (const c of cues) {
       let refs;
-      if (/\.mds$/i.test(c.name)) {
-        refs = [c.file.name.replace(/\.[^.]*$/, '') + '.mdf'];
+      if (/\.(mds|ccd)$/i.test(c.name)) {
+        refs = [c.file.name.replace(/\.[^.]*$/, '') +
+                (/\.mds$/i.test(c.name) ? '.mdf' : '.img')];
       } else {
         const text = await c.file.text().catch(() => '');
         refs = [...text.matchAll(/^\s*FILE\s+(?:"([^"]*)"|(\S+))/gim)]
@@ -1942,7 +1944,7 @@ async function uploadFiles(kind, files) {
       stat.textContent = 'settling ' + c.name + '...';
       const r = await api('/api/disks/cdrom/set',
         {method: 'POST', body: JSON.stringify(
-          {cue: c.name, files: stored.filter(s => !/\.(cue|mds)$/i.test(s))})});
+          {cue: c.name, files: stored.filter(s => !/\.(cue|mds|ccd)$/i.test(s))})});
       if (r) {
         stat.textContent = 'disc set ' + r.cue + ': ' + r.files.join(' + ') +
           ' — ' + r.tracks + ' track(s)' + (r.audio ? ', ' + r.audio + ' audio' : '') +

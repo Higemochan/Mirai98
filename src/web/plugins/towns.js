@@ -36,8 +36,8 @@ function townsEditForm(i, h) {
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', i.cd) +
-      note('built-in FM TOWNS CD drive; use a .cue/.bin set (or a .img with ' +
-           'a sibling .cue) so the CD-DA audio tracks are kept') + '</div>' +
+      note('built-in FM TOWNS CD drive; a .cue/.bin, .ccd/.img/.sub or ' +
+           '.mds/.mdf set keeps the CD-DA audio tracks') + '</div>' +
     '<div class="row"><label>Floppy A</label>' +
       h.diskSelect('fdd1', 'fdd', i.fdd1) +
       note('internal 3-mode drive; raw dump or D77/D88 image') + '</div>' +
@@ -128,8 +128,8 @@ function townsHardware(i, h) {
   if (i.ports) rows.push(['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
      ', websocket ' + i.ports[1]]);
   if (i.cd) rows.push(['&#9707; CD-ROM', h.esc(i.cd) +
-    ' <span class="note">(built-in FM TOWNS drive, read-only; a .cue ' +
-    'beside the image carries the audio tracks)</span>']);
+    ' <span class="note">(built-in FM TOWNS drive, read-only; a .cue, ' +
+    '.ccd or .mds beside the image carries the audio tracks)</span>']);
   if (i.fdd1) rows.push(['&#9707; Floppy A', h.esc(i.fdd1)]);
   if (i.fdd2) rows.push(['&#9707; Floppy B', h.esc(i.fdd2)]);
   ['scsi1', 'scsi2', 'scsi3', 'scsi4'].forEach((k, n) => {
@@ -293,8 +293,8 @@ window.townsResetCmos = async (name) => {
 function townsWizardDisks(h) {
   return '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', '') +
-      h.note('built-in drive; a .cue/.bin set (or a .img with a sibling ' +
-             '.cue) keeps the CD-DA tracks') + '</div>' +
+      h.note('built-in drive; a .cue/.bin, .ccd/.img/.sub or .mds/.mdf ' +
+             'set keeps the CD-DA tracks') + '</div>' +
     '<div class="row"><label>Floppy A</label>' +
       h.diskSelect('fdd1', 'fdd', '') +
       h.note('internal 3-mode drive; raw dump or D77/D88 image') + '</div>' +
