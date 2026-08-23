@@ -1145,6 +1145,7 @@ def load_instance(index):
                     or "vm-%d" % index, "index": index,
             "memory": root.findtext("memory") or "64M",
             "snapshot": (root.findtext("snapshot") or "no") == "yes",
+            "pegc": (root.findtext("pegc") or "no") == "yes",
             "net": root.findtext("net") or "",
             "machine": root.findtext("machine") or "pc9821",
             "bios": root.findtext("bios") or "compat",
@@ -1181,6 +1182,8 @@ def save_instance(inst):
         ET.SubElement(root, "midi").text = inst["midi"]
     ET.SubElement(root, "snapshot").text = ("yes" if inst.get("snapshot")
                                             else "no")
+    if inst.get("pegc"):
+        ET.SubElement(root, "pegc").text = "yes"
     if inst.get("net"):
         ET.SubElement(root, "net").text = inst["net"]
     for key in ("serial", "parallel", "gpib"):
@@ -1274,6 +1277,7 @@ def sanitize(data, taken_names=()):
     record = {"name": name,
               "memory": str(data.get("memory") or "64M"),
               "snapshot": bool(data.get("snapshot")),
+              "pegc": bool(data.get("pegc")),
               "net": str(data.get("net") or ""),
               "machine": str(data.get("machine") or "pc9821"),
               "bios": str(data.get("bios") or "compat"),
@@ -2955,9 +2959,15 @@ def qemu_argv(inst):
     midi = MIDI_MODES.get(inst.get("midi") or "")
     sound = fm or pcm or midi
     argv = [CONFIG["qemu"],
-            "-M", "%s,accel=%s%s" % (
+            "-M", "%s,accel=%s%s%s" % (
                 inst.get("machine") or "pc9821", accel,
-                ",pcspk-audiodev=snd" if sound else ""),
+                ",pcspk-audiodev=snd" if sound else "",
+                # PEGC (256-colour packed pixel) is what the Windows 9x
+                # display driver needs.  QEMU only implements it behind
+                # the bundled compatibility BIOS; asking for both is
+                # passed through so QEMU says so and stops, rather than
+                # starting a machine whose guest will never come up.
+                ",pegc=on" if inst.get("pegc") else ""),
             "-m", inst.get("memory") or "64M",
             # PC-98 is a JIS keyboard; use the Japanese VNC keymap
             "-k", "ja",
