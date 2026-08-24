@@ -120,6 +120,7 @@ const TABS = ["General","Disks","Host","Memory","Sound","Network",
               "Options","Confirm"];
 const view = document.getElementById('view');
 let rfb = null, consoleWatch = null, consoleFbWatch = null;
+let consolePointerStop = null;
 let catalog = {hdd:[], fdd:[], cdrom:[]};
 let instances = [], hostFacts = {}, tab = 0;
 let hardware = {drives: [], serial: []}, autoConnect = '', facts = {};
@@ -996,6 +997,116 @@ function fitConsoleBox() {
   }
 }
 
+// --- relative-pointer capture ---------------------------------------------
+// QEMU's VNC turns every absolute pointer event into a delta from the last
+// one, which stalls at the canvas edge and drifts as soon as the guest
+// applies its own pointer acceleration.  Every machine this manager runs
+// has a relative mouse (the PC-98 bus mouse, the FM TOWNS mouse), so there
+// is no absolute path worth keeping: we ask for QEMU's relative branch
+// (pseudo-encoding -257) and, while the pointer is locked, feed each host
+// movement as a delta around 0x7FFF.
+// The -257 request has to ride in the handshake's initial client-encodings
+// message, so the patch goes on before an RFB object ever exists.
+function patchRFBForRelativePointer() {
+  if (!RFB || RFB.messages._miraiRelPatched) return;
+  const orig = RFB.messages.clientEncodings;
+  RFB.messages.clientEncodings = function (sock, encodings) {
+    if (!encodings.includes(-257)) encodings = encodings.concat([-257]);
+    return orig.call(this, sock, encodings);
+  };
+  const origHandleRect = RFB.prototype._handleRect;
+  RFB.prototype._handleRect = function () {
+    if (this._FBU.encoding === -257) return true;   // pointer-type-change: no data
+    return origHandleRect.call(this);
+  };
+  RFB.messages._miraiRelPatched = true;
+}
+
+function captureRelativePointer(rfb, target) {
+  const RFB = rfb.constructor;
+  const CENTER = 0x7FFF;
+  rfb._sendMouse = function () {};        // silence noVNC's absolute sends
+  // These guests draw their own (software) cursor, so noVNC sees no server
+  // cursor and hides the local one (canvas cursor:none) -- which left the
+  // pointer invisible after Esc.  Ask noVNC for a dot cursor instead.
+  rfb.showDotCursor = true;
+  let locked = false, mask = 0, accX = 0, accY = 0, flush = false;
+  const canvas = () => target.querySelector('canvas');
+  const send = (dx, dy, m) => {
+    if (!rfb || rfb._rfbConnectionState !== 'connected') return;
+    RFB.messages.pointerEvent(rfb._sock,
+      (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
+  };
+  // The PC-98 bus mouse and the FM TOWNS mouse both have two buttons, so
+  // the middle one is free: while the pointer is captured it leaves the
+  // capture, for people who would rather not reach for Esc.  It is
+  // swallowed either way (it would
+  // otherwise start the browser's autoscroll) and never reaches the guest.
+  const MIDDLE = 1;
+  const onDown = (ev) => {
+    if (!locked) {
+      if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
+      return;
+    }
+    ev.preventDefault(); ev.stopPropagation();
+    if (ev.button === MIDDLE) {
+      document.exitPointerLock();
+      return;
+    }
+    mask |= (1 << ev.button); send(0, 0, mask);
+  };
+  const onUp = (ev) => {
+    if (!locked) return;
+    ev.preventDefault(); ev.stopPropagation();
+    if (ev.button === MIDDLE) {
+      return;
+    }
+    mask &= ~(1 << ev.button); send(0, 0, mask);
+  };
+  const onMove = (ev) => {
+    if (!locked) return;
+    accX += ev.movementX; accY += ev.movementY; ev.preventDefault(); ev.stopPropagation();
+    if (!flush) {
+      flush = true;
+      requestAnimationFrame(() => {
+        flush = false;
+        if (accX || accY) { send(accX, accY, mask); accX = 0; accY = 0; }
+      });
+    }
+  };
+  const hint = document.createElement('div');
+  hint.textContent = 'クリックでマウス操作を開始（Escまたは中ボタンで解除）';
+  hint.style.cssText = 'position:absolute;left:50%;bottom:8px;' +
+    'transform:translateX(-50%);background:rgba(0,0,0,.7);color:#fff;' +
+    'font:12px sans-serif;padding:4px 10px;border-radius:4px;' +
+    'pointer-events:none;z-index:5';
+  if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+  target.appendChild(hint);
+  const onLock = () => {
+    locked = document.pointerLockElement === canvas();
+    hint.style.display = locked ? 'none' : '';
+    if (!locked) {
+      mask = 0;
+      // Pointer Lock hid the cursor and noVNC leaves the canvas at
+      // cursor:none; bring a visible host cursor back after Esc.
+      const c = canvas();
+      if (c) c.style.cursor = 'default';
+    }
+  };
+  document.addEventListener('mousedown', onDown, true);
+  document.addEventListener('mouseup', onUp, true);
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('pointerlockchange', onLock);
+  return () => {
+    document.removeEventListener('mousedown', onDown, true);
+    document.removeEventListener('mouseup', onUp, true);
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('pointerlockchange', onLock);
+    if (document.pointerLockElement) document.exitPointerLock();
+    hint.remove();
+  };
+}
+
 window.connectConsole = async (name, ws) => {
   disconnectConsole();
   window.toggleConsolePane(true);      // a hidden box has no size to scale to
@@ -1009,16 +1120,22 @@ window.connectConsole = async (name, ws) => {
     toast('no noVNC to draw the console with');
     return;
   }
-  // plugins prepare the connection first (e.g. the relative-pointer
-  // negotiation must be in place before the VNC handshake advertises the
-  // client encodings, so this happens before the RFB object exists)
+  // the relative-pointer negotiation must be in place before the VNC
+  // handshake advertises the client encodings, i.e. before the RFB object
+  // exists; plugins get the same chance to prepare the connection
+  patchRFBForRelativePointer();
   for (const fn of (window.MiraiPlugins.consolePrep || [])) {
     try { await fn(name); } catch (e) { console.error('console prep', e); }
   }
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
-  // let plugins augment the console (e.g. relative-pointer capture)
+  try {
+    consolePointerStop = captureRelativePointer(rfb, target);
+  } catch (e) {
+    console.error('pointer capture', e);
+  }
+  // let plugins augment the console (e.g. the FM TOWNS gamepad)
   window._pluginConsoleCleanups = [];
   (window.MiraiPlugins.console || []).forEach(fn => {
     try {
@@ -1054,6 +1171,10 @@ window.connectConsole = async (name, ws) => {
 window.disconnectConsole = () => {
   (window._pluginConsoleCleanups || []).forEach(c => { try { c(); } catch (e) {} });
   window._pluginConsoleCleanups = [];
+  if (consolePointerStop) {
+    try { consolePointerStop(); } catch (e) {}
+    consolePointerStop = null;
+  }
   if (consoleWatch) { consoleWatch.disconnect(); consoleWatch = null; }
   if (consoleFbWatch) { consoleFbWatch.disconnect(); consoleFbWatch = null; }
   if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
