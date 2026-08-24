@@ -893,69 +893,141 @@ window.saveVm = (form, name) => {
 };
 
 // ------------------------------------------------------- console sound
-// QEMU's VNC server streams the guest's PCM over the same WebSocket as
-// the pixels (S16LE, stereo, 44.1 kHz).  Chunks are turned into
-// AudioBuffers and scheduled back to back on a small jitter cushion.
+// QEMU's VNC server streams the guest's PCM over the same WebSocket as the
+// pixels (S16LE, stereo, 44.1 kHz).  Playback lives in an AudioWorklet: its
+// process() runs on the audio thread, so a busy main thread -- noVNC
+// decoding a burst of framebuffer updates while a game loads, say -- cannot
+// starve it.  The main thread only hands the arriving chunks over.
 const AUDIO_RATE = 44100;
-const RING_FRAMES = AUDIO_RATE;               // 1 s ring
-const AUDIO_PREFILL = Math.floor(AUDIO_RATE * 0.12);
-let audioCtx = null, audioNode = null, audioOn = false;
-let ringL = null, ringR = null, wPos = 0, rPos = 0, primed = false;
-// One continuous ScriptProcessor drains a ring buffer.  Scheduling a fresh
-// AudioBuffer per chunk left clicks between them that a pure tone (the
-// power-on beep) exposed; a single stream removes the seams.
-function audioStart() {
-  if (audioCtx) return;
-  audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
-  ringL = new Float32Array(RING_FRAMES);
-  ringR = new Float32Array(RING_FRAMES);
-  wPos = 0; rPos = 0; primed = false;
-  audioNode = audioCtx.createScriptProcessor(1024, 0, 2);
-  audioNode.onaudioprocess = (e) => {
-    const oL = e.outputBuffer.getChannelData(0);
-    const oR = e.outputBuffer.getChannelData(1);
-    const avail = (wPos - rPos + RING_FRAMES) % RING_FRAMES;
-    if (!primed) {
-      if (avail < AUDIO_PREFILL) { oL.fill(0); oR.fill(0); return; }
-      primed = true;
+const AUDIO_PREFILL = 0.12;        // seconds of cushion before playback starts
+const AUDIO_MAX_LAG = 0.40;        // seconds; give back anything beyond this
+
+// The worklet keeps its own ring: the main thread posts PCM in, the audio
+// thread takes it out a render quantum at a time.
+const AUDIO_WORKLET_SRC = `
+class Pc98Sink extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opt = options.processorOptions;
+    this.size = Math.round(sampleRate);          // one second of room
+    this.l = new Float32Array(this.size);
+    this.r = new Float32Array(this.size);
+    this.w = 0;
+    this.rd = 0;
+    this.prefill = Math.round(sampleRate * opt.prefill);
+    this.maxLag = Math.round(sampleRate * opt.maxLag);
+    this.primed = false;
+    this.starved = 0;
+    this.told = 0;
+    this.port.onmessage = (e) => this.push(new Int16Array(e.data));
+  }
+  avail() {
+    return (this.w - this.rd + this.size) % this.size;
+  }
+  push(pcm) {
+    const frames = pcm.length >> 1;
+    for (let i = 0; i < frames; i++) {
+      this.l[this.w] = pcm[i * 2] / 32768;
+      this.r[this.w] = pcm[i * 2 + 1] / 32768;
+      this.w = (this.w + 1) % this.size;
+      if (this.w === this.rd) { this.rd = (this.rd + 1) % this.size; }
+    }
+    // Server and sound card never tick at exactly the same rate, so the
+    // backlog creeps.  Drop it back to the cushion in one step instead of
+    // letting it grow until the ring writes over itself.
+    const over = this.avail() - this.maxLag;
+    if (over > 0) { this.rd = (this.rd + over) % this.size; }
+  }
+  process(inputs, outputs) {
+    const out = outputs[0];
+    const oL = out[0];
+    const oR = out[1];
+    if (!this.primed) {
+      if (this.avail() < this.prefill) { return true; }
+      this.primed = true;
     }
     for (let i = 0; i < oL.length; i++) {
-      if (rPos === wPos) { oL[i] = 0; oR[i] = 0; primed = false; }
-      else {
-        oL[i] = ringL[rPos]; oR[i] = ringR[rPos];
-        rPos = (rPos + 1) % RING_FRAMES;
+      if (this.rd === this.w) {
+        // Ran dry: fill in silence and carry on.  Waiting for a fresh
+        // cushion here would turn every hiccup into a long gap.
+        oL[i] = 0;
+        oR[i] = 0;
+        this.starved++;
+      } else {
+        oL[i] = this.l[this.rd];
+        oR[i] = this.r[this.rd];
+        this.rd = (this.rd + 1) % this.size;
       }
+    }
+    if (this.starved && currentTime - this.told >= 1) {
+      this.told = currentTime;
+      this.port.postMessage({starved: this.starved});
+      this.starved = 0;
+    }
+    return true;
+  }
+}
+registerProcessor('pc98-sink', Pc98Sink);
+`;
+
+let audioCtx = null, audioNode = null, audioOn = false;
+
+async function audioStart() {
+  if (audioNode) return;
+  if (!window.AudioWorkletNode) {
+    toast('this browser has no AudioWorklet: no console sound');
+    return;
+  }
+  if (!audioCtx) audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+  const url = URL.createObjectURL(
+    new Blob([AUDIO_WORKLET_SRC], {type: 'application/javascript'}));
+  try {
+    await audioCtx.audioWorklet.addModule(url);
+  } catch (err) {
+    console.error('console sound', err);
+    toast('the sound worklet would not load: no console sound');
+    return;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+  audioNode = new AudioWorkletNode(audioCtx, 'pc98-sink', {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [2],
+    processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG}
+  });
+  audioNode.port.onmessage = (e) => {
+    if (e.data && e.data.starved) {
+      console.warn('console sound: filled in ' + e.data.starved +
+                   ' frames of silence');
     }
   };
   audioNode.connect(audioCtx.destination);
 }
 function audioChunk(bytes) {
-  if (!audioCtx || !ringL) return;
-  const frames = bytes.byteLength >> 2;         // 2 channels x 16 bits
-  if (!frames) return;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  for (let i = 0; i < frames; i++) {
-    ringL[wPos] = view.getInt16(i * 4, true) / 32768;
-    ringR[wPos] = view.getInt16(i * 4 + 2, true) / 32768;
-    wPos = (wPos + 1) % RING_FRAMES;
-    if (wPos === rPos) rPos = (rPos + 1) % RING_FRAMES;   // full: drop oldest
-  }
+  if (!audioNode) return;
+  const whole = bytes.byteLength & ~3;          // whole stereo frames only
+  if (!whole) return;
+  const copy = bytes.slice(0, whole);           // own it, then hand it over
+  audioNode.port.postMessage(copy.buffer, [copy.buffer]);
 }
-function enableAudioNow() {
+async function enableAudioNow() {
   if (!rfb || !rfb.enableAudio) return;
-  audioStart();
+  await audioStart();
+  if (!audioNode) return;
   audioCtx.resume();
   rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
   audioOn = true;
   const btn = document.getElementById('btn-audio');
   if (btn) { btn.textContent = '\u{1F50A} Sound on'; }
 }
-window.toggleAudio = () => {
+window.toggleAudio = async () => {
   if (!rfb || !rfb.enableAudio) { toast('no console'); return; }
   audioOn = !audioOn;
   const btn = document.getElementById('btn-audio');
   if (audioOn) {
-    audioStart();
+    await audioStart();
+    if (!audioNode) { audioOn = false; return; }
     audioCtx.resume();
     rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
     if (btn) { btn.textContent = '🔊 Sound on'; }
@@ -968,9 +1040,11 @@ window.toggleAudio = () => {
 };
 function stopAudio() {
   audioOn = false;
-  if (audioNode) { try { audioNode.disconnect(); } catch (e) {} audioNode = null; }
+  if (audioNode) {
+    try { audioNode.port.onmessage = null; audioNode.disconnect(); } catch (e) {}
+    audioNode = null;
+  }
   if (audioCtx) { try { audioCtx.close(); } catch (e) {} audioCtx = null; }
-  ringL = ringR = null; wPos = 0; rPos = 0; primed = false;
 }
 
 /*
