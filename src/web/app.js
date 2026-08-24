@@ -1681,19 +1681,201 @@ window.deleteRom = name => {
                  render(); });
 };
 
+// ------------------------------------------- the files inside an image
+// A thin cover over /api/fs.  The image is edited in place, so the server
+// turns writes away while a machine has it open, and names become 8.3 on
+// the way in -- the answer says what a file actually landed as.
+let fsAt = null;
+
+function fsJoin(dir, leaf) {
+  return (dir === '/' ? '' : dir) + '/' + leaf;
+}
+
+function fsUrl(verb, extra) {
+  return '/api/fs/' + fsAt.kind + '/' + encodeURIComponent(fsAt.name) +
+    (verb ? '/' + verb : '') + '?partition=' + fsAt.partition + (extra || '');
+}
+
+function fsCrumbs(path) {
+  const parts = path.split('/').filter(Boolean);
+  let at = '';
+  const out = ['<a href="#" data-go="/">(root)</a>'];
+  parts.forEach(p => {
+    at += '/' + p;
+    out.push('<a href="#" data-go="' + esc(at) + '">' + esc(p) + '</a>');
+  });
+  return out.join(' &rsaquo; ');
+}
+
+function fsRow(e) {
+  return '<tr><td><a href="#" data-open="' + esc(e.name) + '" data-dir="' +
+    (e.dir ? 1 : 0) + '">' + (e.dir ? '&#128193;' : '&#128196;') + ' ' +
+    esc(e.name) + '</a>' +
+    (e.long && e.long.toUpperCase() !== e.name.toUpperCase()
+      ? '<div class="note">' + esc(e.long) + '</div>' : '') +
+    '</td><td>' + (e.dir ? '' : fmtBytes(e.size)) +
+    '</td><td class="note">' + esc(e.modified || '') +
+    '</td><td style="white-space:nowrap">' +
+    '<button data-rename="' + esc(e.name) + '">Rename</button> ' +
+    '<button data-remove="' + esc(e.name) + '" data-dir="' +
+    (e.dir ? 1 : 0) + '">Delete</button></td></tr>';
+}
+
+async function fsLoad(path) {
+  const box = document.getElementById('fsbox');
+  if (!box || !fsAt) return;
+  if (path != null) fsAt.path = path;
+  const d = await api(fsUrl('', '&path=' + encodeURIComponent(fsAt.path)));
+  if (!d) {
+    box.innerHTML = '<div class="note">Cannot read a file system in this ' +
+      'image. Only raw PC-98 disks and floppies can be browsed; a qcow2 ' +
+      'has to be converted first.</div>';
+    return;
+  }
+  fsAt.partition = d.partition;
+  const dirs = d.entries.filter(e => e.dir);
+  const files = d.entries.filter(e => !e.dir);
+  const by = (a, b) => a.name.localeCompare(b.name);
+  box.innerHTML =
+    '<div class="row" style="align-items:center;gap:.6em;flex-wrap:wrap">' +
+    (d.partitions.length > 1
+      ? '<label>Partition <select data-part>' + d.partitions.map(p =>
+          '<option value="' + p.n + '"' + (p.n === d.partition ? ' selected' : '')
+          + '>' + p.n + (p.name ? ' – ' + esc(p.name) : '') + '</option>')
+          .join('') + '</select></label>' : '') +
+    '<span class="note">FAT' + d.fat + ' · ' + fmtBytes(d.free) +
+    ' free of ' + fmtBytes(d.total) + '</span>' +
+    '<button data-mkdir>New folder...</button></div>' +
+    '<div class="crumb">' + fsCrumbs(d.path) + '</div>' +
+    '<div data-drop style="border:1px dashed #4a5a6a;border-radius:4px;' +
+    'padding:.4em">' +
+    '<table><tr><th>Name</th><th style="width:7em">Size</th>' +
+    '<th style="width:10em">Modified</th><th style="width:12em"></th></tr>' +
+    (d.path !== '/' ? '<tr><td colspan="4"><a href="#" data-go="' +
+      esc(d.path.replace(/\/[^/]*$/, '') || '/') + '">&#8593; up</a></td></tr>'
+      : '') +
+    (d.entries.length
+      ? dirs.sort(by).concat(files.sort(by)).map(fsRow).join('')
+      : '<tr><td colspan="4" class="note">(empty)</td></tr>') +
+    '</table>' +
+    '<div class="note">Drop files here from the desktop to put them in this ' +
+    'folder. A name that is not already 8.3 is shortened, and the answer ' +
+    'says what it became.</div></div>';
+  fsWire(box);
+}
+
+function fsWire(box) {
+  box.querySelectorAll('[data-go]').forEach(a => {
+    a.onclick = ev => { ev.preventDefault(); fsLoad(a.dataset.go); };
+  });
+  box.querySelectorAll('[data-open]').forEach(a => {
+    a.onclick = ev => {
+      ev.preventDefault();
+      const where = fsJoin(fsAt.path, a.dataset.open);
+      if (a.dataset.dir === '1') { fsLoad(where); return; }
+      location.href = '/fsfile/' + fsAt.kind + '/' +
+        encodeURIComponent(fsAt.name) + '?partition=' + fsAt.partition +
+        '&path=' + encodeURIComponent(where);
+    };
+  });
+  box.querySelectorAll('[data-rename]').forEach(b => {
+    b.onclick = () => fsRename(b.dataset.rename);
+  });
+  box.querySelectorAll('[data-remove]').forEach(b => {
+    b.onclick = () => fsRemove(b.dataset.remove, b.dataset.dir === '1');
+  });
+  const part = box.querySelector('[data-part]');
+  if (part) part.onchange = () => {
+    fsAt.partition = Number(part.value);
+    fsLoad('/');
+  };
+  const mk = box.querySelector('[data-mkdir]');
+  if (mk) mk.onclick = () => fsMkdir();
+  const zone = box.querySelector('[data-drop]');
+  if (!zone) return;
+  const lit = on => { zone.style.background = on ? 'rgba(122,60,255,.12)' : ''; };
+  zone.addEventListener('dragover', ev => { ev.preventDefault(); lit(true); });
+  zone.addEventListener('dragleave', () => lit(false));
+  zone.addEventListener('drop', async ev => {
+    ev.preventDefault();
+    lit(false);
+    await fsDrop(ev.dataTransfer);
+  });
+}
+
+async function fsDrop(transfer) {
+  const items = transfer.items ? [...transfer.items] : [];
+  const folders = items.filter(
+    it => it.webkitGetAsEntry && it.webkitGetAsEntry() &&
+          it.webkitGetAsEntry().isDirectory);
+  const files = [...(transfer.files || [])];
+  if (!files.length) {
+    toast(folders.length ? 'drop the files themselves, not the folder'
+                         : 'nothing to put in');
+    return;
+  }
+  let done = 0, became = [];
+  for (const file of files) {
+    toast('putting ' + file.name + ' in...');
+    const r = await api(
+      fsUrl('put', '&path=' + encodeURIComponent(fsAt.path) +
+            '&name=' + encodeURIComponent(file.name)),
+      {method: 'POST', body: file});
+    if (!r) break;
+    done++;
+    if (r.renamed) became.push(file.name + ' → ' + r.name);
+  }
+  if (done) {
+    toast(done + ' file' + (done === 1 ? '' : 's') + ' written' +
+          (became.length ? ' (' + became.join(', ') + ')' : ''));
+    task('Disk ' + fsAt.name + ' - ' + done + ' file(s) in', 'OK');
+  }
+  if (folders.length) toast('folders were skipped');
+  fsLoad();
+}
+
+async function fsMkdir() {
+  const typed = prompt('name for the new folder?');
+  if (typed === null) return;
+  const name = typed.trim();
+  if (!name) return;
+  const r = await api(fsUrl('mkdir'), {method: 'POST',
+    body: JSON.stringify({path: fsAt.path, name: name})});
+  if (r) { toast('created ' + r.name); fsLoad(); }
+}
+
+async function fsRename(name) {
+  const typed = prompt('rename ' + name + ' to?\n\nnames inside an image ' +
+                       'are 8.3', name);
+  if (typed === null) return;
+  const to = typed.trim();
+  if (!to || to === name) return;
+  const r = await api(fsUrl('rename'), {method: 'POST',
+    body: JSON.stringify({path: fsJoin(fsAt.path, name), name: to})});
+  if (r) {
+    toast('renamed to ' + r.name);
+    task('Disk ' + fsAt.name + ' - rename ' + name, 'OK');
+    fsLoad();
+  }
+}
+
+async function fsRemove(name, isDir) {
+  if (!confirm('remove ' + name + (isDir ? ' and everything in it?' : '?')))
+    return;
+  const r = await api(fsUrl('delete'), {method: 'POST',
+    body: JSON.stringify({paths: [fsJoin(fsAt.path, name)]})});
+  if (r) {
+    toast('removed ' + r.count + ' entr' + (r.count === 1 ? 'y' : 'ies'));
+    task('Disk ' + fsAt.name + ' - remove ' + name, 'OK');
+    fsLoad();
+  }
+}
+
 // ---------------------------------------------------- one disk's page
 async function diskView(kind, name) {
   view.innerHTML = '<div class="note">reading ' + esc(name) + '...</div>';
   const d = await api('/api/disk/' + kind + '/' + encodeURIComponent(name));
   if (!d) { view.innerHTML = ''; return; }
-  const listing = d.error
-    ? '<div class="body note">Cannot read the file system inside: ' +
-      esc(d.error) + '</div>'
-    : '<table><tr><th>Name</th><th style="width:8em">Size</th></tr>' +
-      (d.files.length
-       ? d.files.map(f => '<tr><td>' + esc(f.name) + '</td><td>' +
-           (f.size == null ? '' : fmtBytes(f.size)) + '</td></tr>').join('')
-       : '<tr><td colspan="2" class="note">(empty)</td></tr>') + '</table>';
   view.innerHTML =
     '<div class="crumb"><a href="#/">' + esc(facts.hostname || 'host') +
     '</a> &rsaquo; <a href="#/storage">Storage</a> &rsaquo; ' +
@@ -1721,14 +1903,17 @@ async function diskView(kind, name) {
     '<div class="grid2" style="grid-template-columns:22em 1fr">' +
     '<div class="card"><h3>Details</h3><table>' +
     [['File', d.path], ['Format', d.format], ['Size', fmtBytes(d.size)],
-     ['Contents', d.error ? 'unreadable'
-       : d.files.length + ' entries, ' + fmtBytes(d.bytes)],
      ['Modified', new Date(d.mtime * 1000).toLocaleString()],
      ['Used by', d.used_by.join(', ') || 'no machine']]
       .map(([k, v]) => '<tr><td style="width:7em;color:#8d99a5">' + k +
         '</td><td style="overflow-wrap:anywhere">' + esc(v) +
         '</td></tr>').join('') + '</table></div>' +
-    '<div class="card"><h3>File system</h3>' + listing + '</div></div>';
+    '<div class="card"><h3>Files</h3><div id="fsbox">' +
+    '<div class="note">reading...</div></div></div></div>';
+  fsAt = {kind: kind, name: name, partition: 1, path: '/'};
+  if (kind !== 'cdrom') fsLoad('/');
+  else document.getElementById('fsbox').innerHTML =
+    '<div class="note">A disc image is read-only here.</div>';
 }
 
 // real drives, both ways: a card written from an image, or an image

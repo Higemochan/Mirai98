@@ -604,6 +604,28 @@ def safe_disk_name(name):
     return out or "disk"
 
 
+
+# ------------------------------------------------------- inside an image
+
+FS_MAX_PUT = 512 << 20              # one file dropped in at a time
+
+
+def fat_stamp(date, clock):
+    """A FAT date/time pair as an ISO string, or '' when it is unset."""
+    if not date:
+        return ""
+    year, month, day = 1980 + (date >> 9), (date >> 5) & 15, date & 31
+    hour, minute = (clock >> 11) & 31, (clock >> 5) & 63
+    if not 1 <= month <= 12 or not 1 <= day <= 31:
+        return ""
+    return "%04d-%02d-%02d %02d:%02d" % (year, month, day, hour, minute)
+
+
+def fs_path_ok(where):
+    """A path inside an image: no climbing out of it."""
+    return ".." not in str(where).replace("\\", "/").split("/")
+
+
 def disk_contents(kind, name):
     """What is inside an image, read through virtpc98's FAT reader."""
     import virtpc98
@@ -3542,6 +3564,10 @@ class Handler(BaseHTTPRequestHandler):
             self.api_get(path[len("/api/instances/"):])
         elif path.startswith("/disks/"):
             self.download(path[len("/disks/"):])
+        elif path.startswith("/api/fs/"):
+            self.fs_page(path[len("/api/fs/"):])
+        elif path.startswith("/fsfile/"):
+            self.fs_file(path[len("/fsfile/"):])
         elif path.startswith("/api/disk/"):
             self.disk_page(path[len("/api/disk/"):])
         elif path.startswith("/zip/"):
@@ -3576,10 +3602,8 @@ class Handler(BaseHTTPRequestHandler):
                "format": os.path.splitext(name)[1].lstrip(".").lower()
                          or "raw",
                "path": full}
-        try:
-            out.update(disk_contents(kind, name))
-        except Exception as err:
-            out["error"] = str(err)
+        # what is inside is the file view's business now: listing it here
+        # meant unpacking the whole image into a temporary folder first
         self.reply(200, out)
 
     def send_zip(self, rest):
@@ -3850,6 +3874,11 @@ class Handler(BaseHTTPRequestHandler):
             say(str(data.get("text") or "")[:800], "web")
             self.reply(200, {"result": "noted"})
             return
+        if path.startswith("/api/fs/"):
+            rest, _slash, verb = path[len("/api/fs/"):].rpartition("/")
+            if verb in ("put", "mkdir", "delete", "rename"):
+                self.fs_write(rest, verb)
+                return
         m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/rename$", path)
         if m:
             self.rename_disk(m.group(1))
@@ -4241,6 +4270,192 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"result": "renamed", "name": to,
                          "files": [t for _, t in moves], "vms": touched,
                          "left": os.path.basename(left) if left else ""})
+
+    # --------------------------------------------------- inside an image
+    def fs_target(self, rest, writable=False):
+        """(kind, name, path) of an image the file view may open.
+
+        A machine with the image open is writing to it, so its files are
+        not ours to move around underneath it -- the same rule renaming an
+        image already follows.
+        """
+        ref = self.disk_ref(rest)
+        if ref is None or not os.path.isfile(ref[2]):
+            self.fail(404, "no such disk")
+            return None
+        kind, name, full = ref
+        if kind == "cdrom":
+            self.fail(400, "a disc image is read-only")
+            return None
+        if writable:
+            with _lock:
+                busy = sorted(i["name"] for i in load_instances()
+                              if is_running(i)
+                              and any(disk_path(i, k) == full
+                                      for k in DISK_KEYS))
+            if busy:
+                self.fail(409, "%s has this image open: stop it first"
+                          % ", ".join(busy))
+                return None
+        return kind, name, full
+
+    def fs_drain(self):
+        """Swallow a body whose request has already been turned down: left
+        in the socket it would be read back as the next request."""
+        left = int(self.headers.get("Content-Length", 0) or 0)
+        while left > 0:
+            chunk = self.rfile.read(min(left, 1 << 20))
+            if not chunk:
+                break
+            left -= len(chunk)
+
+    def fs_query(self):
+        """(partition, path inside the image, a name) out of the URL."""
+        from urllib.parse import parse_qs, urlparse
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            part = max(1, int((q.get("partition") or ["1"])[0]))
+        except ValueError:
+            part = 1
+        return part, (q.get("path") or ["/"])[0], (q.get("name") or [""])[0]
+
+    def fs_page(self, rest):
+        """One directory inside an image, and what the volume looks like."""
+        target = self.fs_target(rest)
+        if target is None:
+            return
+        _kind, _name, full = target
+        partition, where, _n = self.fs_query()
+        if not fs_path_ok(where):
+            self.fail(400, "bad path")
+            return
+        import virtpc98
+        try:
+            with virtpc98.Volume(full, partition) as vol:
+                free, total = vol.usage()
+                out = {"partition": partition, "path": where,
+                       "fat": vol.fat.bits, "cluster": vol.fat.clustersize,
+                       "free": free, "total": total,
+                       "partitions": [{"n": i + 1, "name": nm} for i, (nm, _o)
+                                      in enumerate(vol.table)]
+                                     or [{"n": 1, "name": ""}],
+                       "entries": [{"name": e["name"], "long": e["long"],
+                                    "dir": e["dir"], "size": e["size"],
+                                    "attr": e["attr"],
+                                    "modified": fat_stamp(e["date"],
+                                                          e["time"])}
+                                   for e in vol.listdir(where)]}
+        except Exception as err:
+            self.fail(400, "%s" % err)
+            return
+        self.reply(200, out)
+
+    def fs_file(self, rest):
+        """One file out of an image."""
+        target = self.fs_target(rest)
+        if target is None:
+            return
+        _kind, _name, full = target
+        partition, where, _n = self.fs_query()
+        if not fs_path_ok(where):
+            self.fail(400, "bad path")
+            return
+        import virtpc98
+        try:
+            with virtpc98.Volume(full, partition) as vol:
+                blob = vol.read_file(where)
+        except Exception as err:
+            self.fail(404, "%s" % err)
+            return
+        leaf = where.replace("\\", "/").rstrip("/").rpartition("/")[2] \
+            or "file"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(blob)))
+        self.send_header("Content-Disposition", attachment(leaf))
+        self.end_headers()
+        self.wfile.write(blob)
+
+    def fs_write(self, rest, verb):
+        """Put a file in, make a directory, remove one, or rename one."""
+        writable = self.fs_target(rest, writable=True)
+        if writable is None:
+            if verb == "put":
+                self.fs_drain()      # the body is already on its way in
+            return
+        _kind, name, full = writable
+        partition, where, filename = self.fs_query()
+        import virtpc98
+        if verb == "put":
+            size = int(self.headers.get("Content-Length", 0) or 0)
+            if not filename or not fs_path_ok(where):
+                self.refuse(400, "the file needs a name and a place")
+                return
+            if size > FS_MAX_PUT:
+                self.refuse_upload(size, 413,
+                                   "that file is too big to place here")
+                return
+            blob = self.rfile.read(size) if size else b""
+            try:
+                with virtpc98.Volume(full, partition, writable=True) as vol:
+                    stored = vol.put(where, filename, blob)
+            except ValueError as err:
+                self.fail(409, "%s" % err)
+                return
+            except Exception as err:
+                self.fail(400, "%s" % err)
+                return
+            say("%s: %s written into %s" % (name, stored, where or "/"),
+                "disk")
+            self.reply(200, {"result": "written", "name": stored,
+                             "renamed": stored.upper() != filename.upper()})
+            return
+        data = self.body_json() or {}
+        where = str(data.get("path") or where)
+        if not fs_path_ok(where):
+            self.fail(400, "bad path")
+            return
+        try:
+            with virtpc98.Volume(full, partition, writable=True) as vol:
+                if verb == "mkdir":
+                    leaf = str(data.get("name") or "").strip()
+                    if not leaf:
+                        self.fail(400, "the folder needs a name")
+                        return
+                    made = vol.mkdir(where, leaf)
+                    say("%s: %s created in %s" % (name, made, where or "/"),
+                        "disk")
+                    self.reply(200, {"result": "created", "name": made})
+                elif verb == "delete":
+                    paths = data.get("paths") or ([where] if where != "/"
+                                                  else [])
+                    if not paths:
+                        self.fail(400, "nothing to remove")
+                        return
+                    gone = 0
+                    for one in paths:
+                        if not fs_path_ok(one):
+                            continue
+                        gone += vol.delete(one)
+                    say("%s: %d removed" % (name, gone), "disk")
+                    self.reply(200, {"result": "removed", "count": gone})
+                else:
+                    leaf = str(data.get("name") or "").strip()
+                    if not leaf:
+                        self.fail(400, "the new name is missing")
+                        return
+                    got = vol.rename(where, leaf)
+                    say("%s: %s renamed to %s" % (name, where, got), "disk")
+                    self.reply(200, {"result": "renamed", "name": got,
+                                     "renamed": got.upper() != leaf.upper()})
+        except FileExistsError as err:
+            self.fail(409, "%s is already there" % err)
+        except FileNotFoundError as err:
+            self.fail(404, "%s" % err)
+        except ValueError as err:
+            self.fail(409, "%s" % err)
+        except Exception as err:
+            self.fail(400, "%s" % err)
 
     def disk_action(self, kind, name, verb):
         """Write a ZIP into an image, or duplicate the image itself."""

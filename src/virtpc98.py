@@ -9,6 +9,7 @@ Copyright (C) 2026 Awe Morris
 """
 
 import configparser
+import mmap
 import os
 import shutil
 import struct
@@ -294,12 +295,15 @@ def fat_name(name, taken):
         stem, ext = name, ""
     keep = lambda s: "".join(
         c if c.isalnum() or c in "$%'-_@~`!(){}^#&" else "_" for c in s.upper())
-    stem, ext = keep(stem)[:8] or "_", keep(ext)[:3]
+    # eight and three *bytes*: a cp932 name runs out of room sooner than
+    # its character count suggests, and an over-long field would push the
+    # rest of the 32 byte entry out of place
+    stem, ext = cp932_cut(keep(stem), 8) or "_", cp932_cut(keep(ext), 3)
     candidate = (stem, ext)
     n = 1
     while candidate in taken:
         suffix = "~%d" % n
-        candidate = ((stem[:8 - len(suffix)] + suffix), ext)
+        candidate = (cp932_cut(stem, 8 - len(suffix)) + suffix, ext)
         n += 1
     taken.add(candidate)
     return candidate
@@ -308,8 +312,8 @@ def fat_name(name, taken):
 def fat_time(path):
     try:
         t = time.localtime(os.path.getmtime(path))
-    except OSError:
-        t = time.localtime()
+    except (OSError, TypeError):
+        t = time.localtime()             # path None: stamp it with now
     if t.tm_year < 1980:
         return 0, 0
     date = ((t.tm_year - 1980) << 9) | (t.tm_mon << 5) | t.tm_mday
@@ -321,7 +325,8 @@ def dir_entry(stem, ext, attr, cluster, size, date, clock):
     """One 32 byte directory entry; the cluster's high half sits at 20."""
     # attr, reserved, tenths, create time/date, access date, cluster high,
     # write time/date, cluster low, size
-    return (stem.ljust(8).encode("cp932") + ext.ljust(3).encode("cp932")
+    wide, short = name_fields(stem, ext)
+    return (wide + short
             + struct.pack("<BBBHHHHHHHI", attr, 0, 0, clock, date, date,
                           cluster >> 16, clock, date, cluster & 0xFFFF, size))
 
@@ -897,6 +902,532 @@ class FatUpdater:
                 self.log("  %s%s (%d bytes)" % (prefix, shown, len(data)))
                 self.count += 1
         self.store_dir(blob, chain)
+
+
+# --------------------------------------------- FAT: browsing and editing
+
+ATTR_LFN = 0x0F
+
+
+def cp932_cut(text, limit):
+    """As much of `text` as fits in `limit` bytes of cp932."""
+    out = text
+    while out and len(out.encode("cp932", "replace")) > limit:
+        out = out[:-1]
+    return out
+
+
+def name_fields(stem, ext):
+    """The 8 and 3 byte halves of a directory entry's name.
+
+    0xE5 in the first byte is how FAT marks an entry removed, so a name
+    that really begins with it -- which a cp932 lead byte can -- is stored
+    as 0x05 and read back the other way.  Written through, the file would
+    vanish the moment it was made and leave its clusters behind.
+    """
+    wide = stem.encode("cp932", "replace")[:8].ljust(8, b" ")
+    if wide[:1] == b"\xe5":
+        wide = b"\x05" + wide[1:]
+    return wide, ext.encode("cp932", "replace")[:3].ljust(3, b" ")
+
+
+def short_name(entry):
+    """The 8.3 name a directory entry carries."""
+    stem = bytes(entry[0:8]).rstrip(b" ")
+    ext = bytes(entry[8:11]).rstrip(b" ")
+    if stem[:1] == b"\x05":
+        stem = b"\xe5" + stem[1:]           # a name that starts 0xE5 is stored 0x05
+    name = stem.decode("cp932", "replace")
+    if ext:
+        name += "." + ext.decode("cp932", "replace")
+    return name
+
+
+def lfn_text(run):
+    """The long name a run of 0x0F entries spells, or ''."""
+    parts = {}
+    for entry in run:
+        seq = entry[0] & 0x3F
+        if not seq:
+            return ""
+        parts[seq] = (bytes(entry[1:11]) + bytes(entry[14:26])
+                      + bytes(entry[28:32]))
+    if not parts:
+        return ""
+    text = b"".join(parts[k] for k in sorted(parts)).decode("utf-16-le",
+                                                            "ignore")
+    for stop in ("\0", "￿"):
+        if stop in text:
+            text = text.split(stop)[0]
+    return text
+
+
+def partition_table(front):
+    """(name, start cylinder) for each entry of the PC-98 partition table."""
+    for i in range(512, 1024, 32):
+        entry = front[i:i + 32]
+        if len(entry) < 32 or entry[0] == 0:
+            continue
+        yield (bytes(entry[16:32]).rstrip(b" \0").decode("cp932", "replace"),
+               struct.unpack_from("<H", entry, 10)[0])
+
+
+def _boot_record(buf):
+    """(bytes per sector, hidden sectors) if this looks like a FAT BPB."""
+    if len(buf) < 64 or buf[0] not in (0xEB, 0xE9):
+        return None
+    bps = struct.unpack_from("<H", buf, 11)[0]
+    spc = buf[13]
+    if bps not in (256, 512, 1024) or not spc or spc & (spc - 1):
+        return None
+    return bps, struct.unpack_from("<I", buf, 28)[0]
+
+
+def _volume_at(mm, off):
+    """(bytes per sector, sectors) if a whole FAT volume starts here.
+
+    Every field has to agree with the others and the volume has to fit
+    inside the image, which is what keeps a scan from mistaking ordinary
+    code for a boot record.
+    """
+    buf = mm[off:off + 64]
+    if len(buf) < 64 or buf[0] not in (0xEB, 0xE9):
+        return None
+    bps, spc = struct.unpack_from("<HB", buf, 11)
+    reserved, nfats, rootents = struct.unpack_from("<HBH", buf, 14)
+    small, _media, secperfat = struct.unpack_from("<HBH", buf, 19)
+    large = struct.unpack_from("<I", buf, 32)[0]
+    total = small or large
+    if (bps not in (256, 512, 1024) or not spc or spc & (spc - 1)
+            or not reserved or not 1 <= nfats <= 2 or not total):
+        return None
+    if not secperfat:
+        secperfat = struct.unpack_from("<I", buf, 36)[0]
+    if not secperfat:
+        return None
+    front = reserved + nfats * secperfat + -(-rootents * 32 // bps)
+    if front >= total or off + total * bps > len(mm):
+        return None
+    return bps, total
+
+
+def _scan_volumes(mm, start, limit=64 << 20):
+    """Offsets of the FAT volumes lying in the front of an image.
+
+    The partition table counts in cylinders, and an image whose geometry
+    does not match the one it was written with puts those counts in the
+    wrong place.  Looking for the volumes themselves does not care.
+    """
+    found, off = [], start
+    end = min(len(mm), start + limit)
+    while off < end:
+        if _volume_at(mm, off):
+            found.append(off)
+            off += 512 * 64                  # no second boot record in here
+            continue
+        off += 512
+    return found
+
+
+def _cylinder_sectors(mm, start, first_cylinder, limit=8 << 20):
+    """How many sectors a cylinder holds, learned from the disk itself.
+
+    The partition table counts in cylinders, and a PC-98 disk may have 256,
+    512 or 1024 byte sectors and a geometry of its own, so a fixed 17 x 8 x
+    512 guess puts the offsets in the wrong place.  The first partition's
+    boot record says where it sits (its hidden-sector count) and how big a
+    sector is, and that pins the cylinder down.
+    """
+    if not first_cylinder:
+        return None
+    for off in range(start, min(len(mm), start + limit), 512):
+        found = _boot_record(mm[off:off + 64])
+        if not found:
+            continue
+        bps, hidden = found
+        if hidden and start + hidden * bps == off and not hidden % first_cylinder:
+            return hidden // first_cylinder, bps
+    return None
+
+
+def volume_layout(path):
+    """(payload start, [(name, byte offset)]) for an image's partitions."""
+    wrapper = anex86_header(path)
+    start = 0 if wrapper is None else 4096
+    with open(path, "rb") as f:
+        f.seek(start)
+        front = f.read(1024)
+    if len(front) < 1024 or not looks_like_hdd(front):
+        return start, []                      # a floppy: one volume at start
+    table = list(partition_table(front))
+    if not table:
+        return start, []
+    with open(path, "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            step = _cylinder_sectors(mm, start, table[0][1])
+    if step is None:
+        sectors, heads = (SECTORS, HEADS) if wrapper is None else \
+            struct.unpack_from("<II", wrapper[0], 20)
+        step = (sectors * heads, 512)
+    per, bps = step
+    places = [(name, start + cyl * per * bps) for name, cyl in table]
+    with open(path, "rb") as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            if all(_volume_at(mm, off) for _name, off in places):
+                return start, places
+            # the table's arithmetic lands nowhere: go and find the volumes
+            found = _scan_volumes(mm, start)
+    if not found:
+        return start, places
+    return start, [(table[i][0] if i < len(table) else "volume %d" % (i + 1),
+                    off) for i, off in enumerate(found)]
+
+
+class Volume:
+    """One FAT partition of a raw image, reached through mmap.
+
+    Mapping instead of reading keeps the cost proportional to what is
+    touched: replacing a file inside a 1.6 GB image pages in the FAT, the
+    directories on the way and the clusters that move -- not 1.6 GB.
+
+    Names are written as 8.3 in cp932.  Long-name (0x0F) entries already on
+    the volume are read, so a Windows 9x disk lists the way its guest sees
+    it, and they are cleared whenever the 8.3 entry they describe is
+    renamed or removed, which is what keeps them from being orphaned.
+    """
+
+    def __init__(self, path, partition=1, writable=False,
+                 log=lambda *a: None):
+        if is_qcow2(path):
+            raise ValueError("qcow2 images cannot be edited in place; "
+                             "convert to raw first")
+        self.log = log
+        self.writable = writable
+        self.map = None
+        self.removed = 0
+        self.file = open(path, "r+b" if writable else "rb")
+        try:
+            self.map = mmap.mmap(self.file.fileno(), 0,
+                                 access=(mmap.ACCESS_WRITE if writable
+                                         else mmap.ACCESS_READ))
+            self.start, self.table = volume_layout(path)
+            base = self.start
+            if self.table:
+                if not 1 <= partition <= len(self.table):
+                    raise ValueError("no partition %d" % partition)
+                base = self.table[partition - 1][1]
+            if self.map[base:base + 1] not in (b"\xeb", b"\xe9"):
+                raise ValueError("no FAT boot record at byte %d" % base)
+            self.partition = partition
+            self.fat = FatUpdater(self.map, base, log)
+        except Exception:
+            self.close()
+            raise
+
+    # ------------------------------------------------------------ lifetime
+    def close(self):
+        if self.map is not None:
+            try:
+                if self.writable:
+                    self.map.flush()
+            finally:
+                self.map.close()
+                self.map = None
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def flush(self):
+        """Settle the FAT32 free-cluster hint and push the pages out."""
+        fat = self.fat
+        if fat.bits == 32 and fat._free is not None and fat.fsinfo:
+            off = fat.base + fat.fsinfo * fat.bps
+            if self.map[off:off + 4] == b"RRaA":
+                struct.pack_into("<II", self.map, off + 488, len(fat._free),
+                                 fat._free[0] if fat._free else 2)
+        if self.writable:
+            self.map.flush()
+
+    # --------------------------------------------------------- directories
+    @property
+    def root(self):
+        return self.fat.rootclus            # 0 on FAT12/16 = the fixed root
+
+    def _load(self, first, clean=False):
+        blob, chain = self.fat.load_dir(first)
+        if clean:
+            # whatever sits past the end marker is dead space; clearing it
+            # lets an appended entry terminate the directory by itself
+            for i in range(0, len(blob) - 31, 32):
+                if blob[i] == 0x00:
+                    blob[i:] = b"\0" * (len(blob) - i)
+                    break
+        return blob, chain
+
+    def _scan(self, blob):
+        """Every live entry of a directory, and where each one sits."""
+        out, run = [], []
+        for i in range(0, len(blob) - 31, 32):
+            head, attr = blob[i], blob[i + 11]
+            if head == 0x00:
+                break
+            if head == DIR_FREE:
+                # a removed entry, long-name halves included: whatever the
+                # run held described something that is no longer there
+                run = []
+                continue
+            if attr == ATTR_LFN:
+                run.append(bytes(blob[i:i + 32]))
+                continue
+            if attr & ATTR_VOLUME:
+                run = []
+                continue
+            cluster = struct.unpack_from("<H", blob, i + 26)[0]
+            if self.fat.bits == 32:
+                cluster |= struct.unpack_from("<H", blob, i + 20)[0] << 16
+            is_dir = bool(attr & ATTR_DIRECTORY)
+            out.append({"at": i, "lfn": len(run),
+                        "name": short_name(blob[i:i + 32]),
+                        "long": lfn_text(run), "attr": attr, "dir": is_dir,
+                        "cluster": cluster,
+                        "size": 0 if is_dir else
+                                struct.unpack_from("<I", blob, i + 28)[0],
+                        "date": struct.unpack_from("<H", blob, i + 24)[0],
+                        "time": struct.unpack_from("<H", blob, i + 22)[0]})
+            run = []
+        return out
+
+    @staticmethod
+    def _split(path):
+        return [p for p in str(path).replace("\\", "/").split("/")
+                if p not in ("", ".")]
+
+    def _in(self, entries, name):
+        want = name.upper()
+        for e in entries:
+            if e["name"].upper() == want or (e["long"]
+                                             and e["long"].upper() == want):
+                return e
+        return None
+
+    def find(self, path):
+        """(directory that holds it, entry); entry is None for the root."""
+        first, entry = self.root, None
+        for part in self._split(path):
+            if entry is not None:
+                if not entry["dir"]:
+                    raise NotADirectoryError(part)
+                first = entry["cluster"]
+            blob, _chain = self._load(first)
+            entry = self._in(self._scan(blob), part)
+            if entry is None:
+                raise FileNotFoundError(path)
+        return first, entry
+
+    def _dir_first(self, path):
+        _parent, entry = self.find(path)
+        if entry is None:
+            return self.root
+        if not entry["dir"]:
+            raise NotADirectoryError(path)
+        return entry["cluster"]
+
+    # ------------------------------------------------------------ reading
+    def listdir(self, path="/"):
+        blob, _chain = self._load(self._dir_first(path))
+        return [e for e in self._scan(blob) if e["name"] not in (".", "..")]
+
+    def read_file(self, path):
+        _parent, entry = self.find(path)
+        if entry is None or entry["dir"]:
+            raise IsADirectoryError(path)
+        if not entry["cluster"] or not entry["size"]:
+            return b""
+        out = bytearray()
+        for n in self.fat.follow(entry["cluster"]):
+            off = self.fat.cluster_off(n)
+            out += self.map[off:off + self.fat.clustersize]
+            if len(out) >= entry["size"]:
+                break
+        return bytes(out[:entry["size"]])
+
+    def usage(self):
+        """(free bytes, total bytes) of the data area."""
+        fat = self.fat
+        free = sum(1 for n in range(2, fat.clusters + 2) if fat.get(n) == 0)
+        return free * fat.clustersize, fat.clusters * fat.clustersize
+
+    # ------------------------------------------------------------ writing
+    def _need_write(self):
+        if not self.writable:
+            raise PermissionError("this volume was opened read-only")
+
+    def _taken(self, entries, skip=None):
+        out = set()
+        for e in entries:
+            if skip is not None and e["at"] == skip:
+                continue
+            stem, _dot, ext = e["name"].partition(".")
+            out.add((stem, ext))
+        return out
+
+    def _place(self, blob, chain, entry):
+        """Put a 32 byte entry in a free slot, growing the directory if it
+        can grow.  The fixed FAT12/16 root cannot."""
+        end = len(blob)
+        for i in range(0, len(blob) - 31, 32):
+            if blob[i] == 0x00:
+                end = i
+                break
+            if blob[i] == DIR_FREE:
+                blob[i:i + 32] = entry
+                return blob
+        if end + 32 > len(blob):
+            if chain is None:
+                raise ValueError("the root directory is full")
+            blob.extend(b"\0" * self.fat.clustersize)
+        blob[end:end + 32] = entry
+        return blob
+
+    def _clear_lfn(self, blob, entry):
+        """Free the long-name entries that describe an 8.3 entry, so that
+        renaming or removing it does not leave them behind."""
+        for i in range(entry["at"] - 32 * entry["lfn"], entry["at"], 32):
+            blob[i] = DIR_FREE
+
+    def put(self, dirpath, filename, data, when=None):
+        """Create or replace one file.  Returns the 8.3 name it landed on."""
+        self._need_write()
+        first = self._dir_first(dirpath)
+        blob, chain = self._load(first, clean=True)
+        entries = self._scan(blob)
+        wanted = fat_name(filename, set())
+        target = None
+        for e in entries:
+            stem, _dot, ext = e["name"].partition(".")
+            if (stem, ext) == wanted:
+                target = e
+                break
+        if target is not None and target["dir"]:
+            raise IsADirectoryError(filename)
+        stem, ext = wanted if target is not None else fat_name(
+            filename, self._taken(entries))
+        date, clock = when if when else fat_time(None)
+        # the room the file needs, counting what the one it replaces gives
+        # back: running out half way through would leave the entry pointing
+        # at clusters that had already been handed away
+        free, _total = self.usage()
+        held = 0
+        if target is not None and target["cluster"]:
+            held = len(list(self.fat.follow(target["cluster"]))) \
+                * self.fat.clustersize
+        if len(data) > free + held:
+            raise ValueError("no room: %d bytes free, %d needed"
+                             % (free + held, len(data)))
+        if target is not None and target["cluster"]:
+            self.fat.free_chain(target["cluster"])
+        start = 0
+        if data:
+            chainlet = self.fat.allocate(len(data))
+            self.fat.write_chain(chainlet, data)
+            start = chainlet[0]
+        attr = target["attr"] if target is not None else 0x20
+        entry = dir_entry(stem, ext, attr, start, len(data), date, clock)
+        if target is not None:
+            blob[target["at"]:target["at"] + 32] = entry
+        else:
+            blob = self._place(blob, chain, entry)
+        self.fat.store_dir(blob, chain)
+        self.flush()
+        return stem + ("." + ext if ext else "")
+
+    def mkdir(self, dirpath, name):
+        """Make one directory.  Returns the 8.3 name it landed on."""
+        self._need_write()
+        first = self._dir_first(dirpath)
+        blob, chain = self._load(first, clean=True)
+        entries = self._scan(blob)
+        if self._in(entries, name) is not None:
+            raise FileExistsError(name)
+        stem, ext = fat_name(name, self._taken(entries))
+        date, clock = fat_time(None)
+        grown = self.fat.allocate(self.fat.clustersize)
+        self.fat.write_chain(grown, dir_entry(".", "", ATTR_DIRECTORY,
+                                              grown[0], 0, date, clock)
+                             + dir_entry("..", "", ATTR_DIRECTORY,
+                                         0 if first == self.root and
+                                         not self.fat.rootclus else first,
+                                         0, date, clock))
+        blob = self._place(blob, chain,
+                           dir_entry(stem, ext, ATTR_DIRECTORY, grown[0], 0,
+                                     date, clock))
+        self.fat.store_dir(blob, chain)
+        self.flush()
+        return stem + ("." + ext if ext else "")
+
+    def _kill(self, blob, entry):
+        if entry["dir"]:
+            sub, _subchain = self._load(entry["cluster"], clean=True)
+            for child in self._scan(sub):
+                if child["name"] in (".", ".."):
+                    continue
+                self._kill(sub, child)
+        if entry["cluster"]:
+            self.fat.free_chain(entry["cluster"])
+        blob[entry["at"]] = DIR_FREE
+        self._clear_lfn(blob, entry)
+        self.removed += 1
+
+    def delete(self, path):
+        """Remove a file, or a directory and everything under it."""
+        self._need_write()
+        parent, entry = self.find(path)
+        if entry is None:
+            raise ValueError("the root cannot be removed")
+        blob, chain = self._load(parent, clean=True)
+        here = self._in(self._scan(blob), entry["name"])
+        if here is None:
+            raise FileNotFoundError(path)
+        self.removed = 0
+        self._kill(blob, here)
+        self.fat.store_dir(blob, chain)
+        self.flush()
+        return self.removed
+
+    def rename(self, path, newname):
+        """Give one entry a new 8.3 name in the directory it already sits in."""
+        self._need_write()
+        parent, entry = self.find(path)
+        if entry is None:
+            raise ValueError("the root cannot be renamed")
+        blob, chain = self._load(parent, clean=True)
+        entries = self._scan(blob)
+        here = self._in(entries, entry["name"])
+        if here is None:
+            raise FileNotFoundError(path)
+        clash = self._in(entries, newname)
+        if clash is not None and clash["at"] != here["at"]:
+            raise FileExistsError(newname)
+        stem, ext = fat_name(newname, self._taken(entries, skip=here["at"]))
+        wide, short = name_fields(stem, ext)
+        blob[here["at"]:here["at"] + 8] = wide
+        blob[here["at"] + 8:here["at"] + 11] = short
+        # the long name described the old 8.3 entry, so it goes with it
+        self._clear_lfn(blob, here)
+        self.fat.store_dir(blob, chain)
+        self.flush()
+        return stem + ("." + ext if ext else "")
+
+
+def image_partitions(path):
+    """[(name, byte offset)] for a raw PC-98 hard disk image, else []."""
+    return volume_layout(path)[1]
 
 
 # ------------------------------------------------------- IPL and boot
