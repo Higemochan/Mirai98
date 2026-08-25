@@ -2968,7 +2968,9 @@ def missing_roms():
     without saying where it looked, which is the one thing worth knowing.
     """
     wanted = ("pc98itf.bin", "pc98bios.bin")
-    for where in (CONFIG["roms"], CONFIG["datadir"]):
+    for where in (CONFIG.get("pc98_roms")
+                  or os.path.join(CONFIG["roms"], "pc98"),
+                  CONFIG["roms"], CONFIG["datadir"]):
         if not where:
             continue
         try:
@@ -3016,6 +3018,13 @@ def qemu_argv(inst):
     # QEMU searches -L paths in order, so putting the uploaded ROMs first
     # lets a partial real set fall through to the compatible ones
     if inst.get("bios") == "real":
+        # -L does not recurse, so the machine's own ROM directory has to be
+        # named outright; the shelf behind it still answers for what the
+        # machines share, and for a set dropped straight into it.
+        pc98_roms = (CONFIG.get("pc98_roms")
+                     or os.path.join(CONFIG["roms"], "pc98"))
+        if os.path.isdir(pc98_roms):
+            argv += ["-L", win_short(pc98_roms)]
         argv += ["-L", win_short(CONFIG["roms"])]
     # the boards play into a null backend; the VNC server captures that
     # mix and hands it to any client that asks, so the browser hears them
