@@ -708,6 +708,10 @@ class FatUpdater:
         return pair >> 4 if n & 1 else pair & 0xFFF
 
     def set(self, n, value):
+        if not 2 <= n < self.clusters + 2:
+            # a damaged entry naming a cluster past the end would otherwise
+            # be written through, into the second FAT or the root directory
+            raise ValueError("cluster %d is outside the volume" % n)
         for copy in range(self.nfats):
             off = self.fat_start + copy * self.secperfat * self.bps
             if self.bits == 32:
@@ -729,7 +733,8 @@ class FatUpdater:
                                          | ((value >> 8) & 0x0F))
 
     def follow(self, first):
-        end = {12: 0xFF0, 16: 0xFFF0, 32: 0x0FFFFFF0}[self.bits]
+        end = min({12: 0xFF0, 16: 0xFFF0, 32: 0x0FFFFFF0}[self.bits],
+                  self.clusters + 2)
         n, seen = first, set()
         while 2 <= n < end:
             if n in seen:
@@ -788,8 +793,12 @@ class FatUpdater:
         if chain is None:
             self.image[self.root_start:self.data_start] = blob
             return
-        while len(chain) * self.clustersize < len(blob):
-            extra = self.allocate(self.clustersize)
+        short = len(blob) - len(chain) * self.clustersize
+        if short > 0:
+            # in one go: allocating a cluster at a time and linking as it
+            # went spliced a cluster nobody had written into a live
+            # directory when the volume ran out part way through
+            extra = self.allocate(short)
             self.set(chain[-1], extra[0])
             chain.extend(extra)
         self.write_chain(chain, bytes(blob))
@@ -907,6 +916,11 @@ class FatUpdater:
 # --------------------------------------------- FAT: browsing and editing
 
 ATTR_LFN = 0x0F
+# What a long name can hold.  Past this the run needs more than the 20
+# entries FAT allows, and past 63 the sequence number wraps into the
+# "last entry" flag and the run cannot be read back at all -- while still
+# costing the directory a slot per entry that nothing can reclaim.
+LFN_MAX = 255
 
 
 def cp932_cut(text, limit):
@@ -1012,23 +1026,12 @@ def partition_table(front):
                struct.unpack_from("<H", entry, 10)[0])
 
 
-def _boot_record(buf):
-    """(bytes per sector, hidden sectors) if this looks like a FAT BPB."""
-    if len(buf) < 64 or buf[0] not in (0xEB, 0xE9):
-        return None
-    bps = struct.unpack_from("<H", buf, 11)[0]
-    spc = buf[13]
-    if bps not in (256, 512, 1024) or not spc or spc & (spc - 1):
-        return None
-    return bps, struct.unpack_from("<I", buf, 28)[0]
-
-
 def _volume_at(mm, off):
     """(bytes per sector, sectors) if a whole FAT volume starts here.
 
     Every field has to agree with the others and the volume has to fit
-    inside the image, which is what keeps a scan from mistaking ordinary
-    code for a boot record.
+    inside the image, which is what keeps ordinary code from being read
+    as a boot record.
     """
     buf = mm[off:off + 64]
     if len(buf) < 64 or buf[0] not in (0xEB, 0xE9):
@@ -1051,42 +1054,30 @@ def _volume_at(mm, off):
     return bps, total
 
 
-def _scan_volumes(mm, start, limit=64 << 20):
-    """Offsets of the FAT volumes lying in the front of an image.
-
-    The partition table counts in cylinders, and an image whose geometry
-    does not match the one it was written with puts those counts in the
-    wrong place.  Looking for the volumes themselves does not care.
-    """
-    found, off = [], start
-    end = min(len(mm), start + limit)
-    while off < end:
-        if _volume_at(mm, off):
-            found.append(off)
-            off += 512 * 64                  # no second boot record in here
-            continue
-        off += 512
-    return found
-
-
-def _cylinder_sectors(mm, start, first_cylinder, limit=8 << 20):
+def _cylinder_sectors(mm, start, first_cylinder, limit=4 << 20):
     """How many sectors a cylinder holds, learned from the disk itself.
 
     The partition table counts in cylinders, and a PC-98 disk may have 256,
     512 or 1024 byte sectors and a geometry of its own, so a fixed 17 x 8 x
     512 guess puts the offsets in the wrong place.  The first partition's
-    boot record says where it sits (its hidden-sector count) and how big a
-    sector is, and that pins the cylinder down.
+    own boot record settles it: where it sits, divided by the cylinder the
+    table gives it, is the size of a cylinder.
+
+    Only the front of the disk is looked at, and only the first volume
+    found is believed.  Ranging further would find the boot records of the
+    floppy and hard disk images a PC-98 disk is likely to be *holding*, and
+    offering one of those as a partition to write to would put files on top
+    of an unrelated file.
     """
     if not first_cylinder:
         return None
     for off in range(start, min(len(mm), start + limit), 512):
-        found = _boot_record(mm[off:off + 64])
+        found = _volume_at(mm, off)
         if not found:
             continue
-        bps, hidden = found
-        if hidden and start + hidden * bps == off and not hidden % first_cylinder:
-            return hidden // first_cylinder, bps
+        bps, _total = found
+        step, over = divmod(off - start, first_cylinder * bps)
+        return (step, bps) if step and not over else None
     return None
 
 
@@ -1110,17 +1101,7 @@ def volume_layout(path):
             struct.unpack_from("<II", wrapper[0], 20)
         step = (sectors * heads, 512)
     per, bps = step
-    places = [(name, start + cyl * per * bps) for name, cyl in table]
-    with open(path, "rb") as f:
-        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            if all(_volume_at(mm, off) for _name, off in places):
-                return start, places
-            # the table's arithmetic lands nowhere: go and find the volumes
-            found = _scan_volumes(mm, start)
-    if not found:
-        return start, places
-    return start, [(table[i][0] if i < len(table) else "volume %d" % (i + 1),
-                    off) for i, off in enumerate(found)]
+    return start, [(name, start + cyl * per * bps) for name, cyl in table]
 
 
 class Volume:
@@ -1373,18 +1354,26 @@ class Volume:
         first = self._dir_first(dirpath)
         blob, chain = self._load(first, clean=True)
         entries = self._scan(blob)
-        wanted = fat_name(filename, set())
+        if len(filename) > LFN_MAX:
+            raise ValueError("a name can be at most %d characters" % LFN_MAX)
+        # Only an exact name matches -- the long one it shows, or the 8.3 one
+        # it was given.  Matching on what this name would mangle to picked
+        # unrelated files: dropping "drvspace_result.htm" next to Windows'
+        # own DRVSPACE.HTM would have replaced DRVSPACE.HTM.
         target = None
         for e in entries:
-            stem, _dot, ext = e["name"].partition(".")
             if (e["long"] and e["long"].upper() == filename.upper()) \
-                    or (stem, ext) == wanted:
+                    or e["name"].upper() == filename.upper():
                 target = e
                 break
         if target is not None and target["dir"]:
             raise IsADirectoryError(filename)
-        stem, ext = wanted if target is not None else fat_name(
-            filename, self._taken(entries))
+        if target is not None:
+            # it keeps the name it has: writing our own mangle over it would
+            # leave the long name in front describing a name that had moved
+            stem, _dot, ext = target["name"].partition(".")
+        else:
+            stem, ext = fat_name(filename, self._taken(entries))
         date, clock = when if when else fat_time(None)
         # the room the file needs, counting what the one it replaces gives
         # back: running out half way through would leave the entry pointing
@@ -1400,30 +1389,44 @@ class Volume:
         if target is not None and target["cluster"]:
             self.fat.free_chain(target["cluster"])
         start = 0
+        chainlet = None
         if data:
             chainlet = self.fat.allocate(len(data))
             self.fat.write_chain(chainlet, data)
             start = chainlet[0]
         attr = target["attr"] if target is not None else 0x20
         short = stem + ("." + ext if ext else "")
+        try:
+            return self._settle_put(blob, chain, target, filename, stem, ext,
+                                    attr, start, len(data), date, clock, short)
+        except Exception:
+            # the directory never took it, so the clusters are nobody's
+            if chainlet:
+                self.fat.free_chain(chainlet[0])
+            raise
+
+    def _settle_put(self, blob, chain, target, filename, stem, ext, attr,
+                    start, size, date, clock, short):
         if target is not None:
             # the name on the volume stays as it is; only what is in the
             # file changes, so the long-name run in front still fits
             blob[target["at"]:target["at"] + 32] = dir_entry(
-                stem, ext, attr, start, len(data), date, clock)
+                stem, ext, attr, start, size, date, clock)
             shown = target["long"] or short
         else:
             blob = self._place(blob, chain,
                                self._entry_run(filename, stem, ext, attr,
-                                               start, len(data), date, clock))
+                                               start, size, date, clock))
             shown = filename if lfn_needed(filename, stem, ext) else short
         self.fat.store_dir(blob, chain)
         self.flush()
         return shown
 
     def mkdir(self, dirpath, name):
-        """Make one directory.  Returns the 8.3 name it landed on."""
+        """Make one directory.  Returns the name it is known by."""
         self._need_write()
+        if len(name) > LFN_MAX:
+            raise ValueError("a name can be at most %d characters" % LFN_MAX)
         first = self._dir_first(dirpath)
         blob, chain = self._load(first, clean=True)
         entries = self._scan(blob)
@@ -1438,10 +1441,14 @@ class Volume:
                                          0 if first == self.root and
                                          not self.fat.rootclus else first,
                                          0, date, clock))
-        blob = self._place(blob, chain,
-                           self._entry_run(name, stem, ext, ATTR_DIRECTORY,
-                                           grown[0], 0, date, clock))
-        self.fat.store_dir(blob, chain)
+        try:
+            blob = self._place(blob, chain,
+                               self._entry_run(name, stem, ext, ATTR_DIRECTORY,
+                                               grown[0], 0, date, clock))
+            self.fat.store_dir(blob, chain)
+        except Exception:
+            self.fat.free_chain(grown[0])       # the parent never took it
+            raise
         self.flush()
         return name if lfn_needed(name, stem, ext) else \
             stem + ("." + ext if ext else "")
@@ -1455,7 +1462,7 @@ class Volume:
         survives is struck out -- the records below it go away with the
         clusters that hold them.
         """
-        pending = [entry]
+        pending, doomed = [entry], []
         while pending:
             one = pending.pop()
             if one["dir"] and one["cluster"]:
@@ -1463,8 +1470,17 @@ class Volume:
                 pending.extend(child for child in self._scan(sub)
                                if child["name"] not in (".", ".."))
             if one["cluster"]:
-                self.fat.free_chain(one["cluster"])
+                doomed.append(list(self.fat.follow(one["cluster"])))
             self.removed += 1
+        # nothing is given back until the whole tree has been read: a chain
+        # that turns out to loop half way through would otherwise leave a
+        # directory freed with its entry still pointing at it, and the next
+        # file written would land on top of it
+        for chain in doomed:
+            for n in chain:
+                self.fat.set(n, 0)
+            if self.fat._free is not None:
+                self.fat._free.extend(chain)
         blob[entry["at"]] = DIR_FREE
         self._clear_lfn(blob, entry)
 
@@ -1498,6 +1514,8 @@ class Volume:
         clash = self._in(entries, newname)
         if clash is not None and clash["at"] != here["at"]:
             raise FileExistsError(newname)
+        if len(newname) > LFN_MAX:
+            raise ValueError("a name can be at most %d characters" % LFN_MAX)
         stem, ext = fat_name(newname, self._taken(entries, skip=here["at"]))
         # the record is rebuilt rather than patched: a new long name needs
         # its own run, which may not be the size of the one it replaces
