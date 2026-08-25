@@ -943,6 +943,46 @@ def short_name(entry):
     return name
 
 
+def lfn_checksum(wide, short):
+    """The 8.3 name's checksum, which every long-name entry carries so the
+    two can be told apart from a run left behind by something else."""
+    total = 0
+    for b in bytes(wide) + bytes(short):
+        total = (((total & 1) << 7) + (total >> 1) + b) & 0xFF
+    return total
+
+
+def lfn_needed(name, stem, ext):
+    """Whether a name says more than its 8.3 form can hold."""
+    return name != (stem + ("." + ext if ext else ""))
+
+
+def lfn_entries(name, wide, short):
+    """The 0x0F entries spelling a long name, in the order they go down.
+
+    Thirteen UTF-16 units each, the last of them first, every one carrying
+    the 8.3 name's checksum.  What is left over after the terminator is
+    0xFFFF, which is what Windows writes and what its scandisk expects.
+    """
+    text = name.encode("utf-16-le")
+    parts = [text[i:i + 26] for i in range(0, len(text), 26)] or [b""]
+    check = lfn_checksum(wide, short)
+    out = []
+    for n, part in enumerate(parts, 1):
+        if len(part) < 26:
+            part = (part + b"\0\0").ljust(26, b"\xff")
+        entry = bytearray(32)
+        entry[0] = n | (0x40 if n == len(parts) else 0)
+        entry[1:11] = part[0:10]
+        entry[11] = ATTR_LFN
+        entry[13] = check
+        entry[14:26] = part[10:22]
+        entry[28:32] = part[22:26]
+        out.append(bytes(entry))
+    out.reverse()
+    return out
+
+
 def lfn_text(run):
     """The long name a run of 0x0F entries spells, or ''."""
     parts = {}
@@ -1192,9 +1232,13 @@ class Volume:
             if self.fat.bits == 32:
                 cluster |= struct.unpack_from("<H", blob, i + 20)[0] << 16
             is_dir = bool(attr & ATTR_DIRECTORY)
-            out.append({"at": i, "lfn": len(run),
+            long = lfn_text(run) if run else ""
+            if long and run[0][13] != lfn_checksum(blob[i:i + 8],
+                                                   blob[i + 8:i + 11]):
+                long = ""           # the run describes a name that is gone
+            out.append({"at": i, "lfn": len(run) if long else 0,
                         "name": short_name(blob[i:i + 32]),
-                        "long": lfn_text(run), "attr": attr, "dir": is_dir,
+                        "long": long, "attr": attr, "dir": is_dir,
                         "cluster": cluster,
                         "size": 0 if is_dir else
                                 struct.unpack_from("<I", blob, i + 28)[0],
@@ -1277,23 +1321,40 @@ class Volume:
             out.add((stem, ext))
         return out
 
-    def _place(self, blob, chain, entry):
-        """Put a 32 byte entry in a free slot, growing the directory if it
-        can grow.  The fixed FAT12/16 root cannot."""
-        end = len(blob)
-        for i in range(0, len(blob) - 31, 32):
-            if blob[i] == 0x00:
-                end = i
-                break
-            if blob[i] == DIR_FREE:
-                blob[i:i + 32] = entry
-                return blob
-        if end + 32 > len(blob):
+    def _place(self, blob, chain, entries):
+        """Put a run of entries down where they will sit together.
+
+        A long name lives in the entries in front of the 8.3 one, so they
+        have to land side by side; the fixed FAT12/16 root cannot grow to
+        make room, a subdirectory can.
+        """
+        if isinstance(entries, (bytes, bytearray)):
+            entries = [entries]
+        need = len(entries)
+        while True:
+            free = 0
+            for i in range(0, len(blob) - 31, 32):
+                if blob[i] in (0x00, DIR_FREE):
+                    free += 1
+                    if free == need:
+                        at = i - 32 * (need - 1)
+                        for k, one in enumerate(entries):
+                            blob[at + 32 * k:at + 32 * (k + 1)] = one
+                        return blob
+                else:
+                    free = 0
             if chain is None:
                 raise ValueError("the root directory is full")
             blob.extend(b"\0" * self.fat.clustersize)
-        blob[end:end + 32] = entry
-        return blob
+
+    def _entry_run(self, name, stem, ext, attr, cluster, size, date, clock):
+        """The entries one file or folder needs: its 8.3 record, and the
+        long-name run in front of it when 8.3 cannot say the whole name."""
+        record = dir_entry(stem, ext, attr, cluster, size, date, clock)
+        if not lfn_needed(name, stem, ext):
+            return [record]
+        wide, short = name_fields(stem, ext)
+        return lfn_entries(name, wide, short) + [record]
 
     def _clear_lfn(self, blob, entry):
         """Free the long-name entries that describe an 8.3 entry, so that
@@ -1302,7 +1363,12 @@ class Volume:
             blob[i] = DIR_FREE
 
     def put(self, dirpath, filename, data, when=None):
-        """Create or replace one file.  Returns the 8.3 name it landed on."""
+        """Create or replace one file.  Returns the name it is known by.
+
+        A file already there under this name -- the long one it shows, or
+        the 8.3 one this name would take -- has its contents replaced and
+        keeps the name it has.
+        """
         self._need_write()
         first = self._dir_first(dirpath)
         blob, chain = self._load(first, clean=True)
@@ -1311,7 +1377,8 @@ class Volume:
         target = None
         for e in entries:
             stem, _dot, ext = e["name"].partition(".")
-            if (stem, ext) == wanted:
+            if (e["long"] and e["long"].upper() == filename.upper()) \
+                    or (stem, ext) == wanted:
                 target = e
                 break
         if target is not None and target["dir"]:
@@ -1338,14 +1405,21 @@ class Volume:
             self.fat.write_chain(chainlet, data)
             start = chainlet[0]
         attr = target["attr"] if target is not None else 0x20
-        entry = dir_entry(stem, ext, attr, start, len(data), date, clock)
+        short = stem + ("." + ext if ext else "")
         if target is not None:
-            blob[target["at"]:target["at"] + 32] = entry
+            # the name on the volume stays as it is; only what is in the
+            # file changes, so the long-name run in front still fits
+            blob[target["at"]:target["at"] + 32] = dir_entry(
+                stem, ext, attr, start, len(data), date, clock)
+            shown = target["long"] or short
         else:
-            blob = self._place(blob, chain, entry)
+            blob = self._place(blob, chain,
+                               self._entry_run(filename, stem, ext, attr,
+                                               start, len(data), date, clock))
+            shown = filename if lfn_needed(filename, stem, ext) else short
         self.fat.store_dir(blob, chain)
         self.flush()
-        return stem + ("." + ext if ext else "")
+        return shown
 
     def mkdir(self, dirpath, name):
         """Make one directory.  Returns the 8.3 name it landed on."""
@@ -1365,11 +1439,12 @@ class Volume:
                                          not self.fat.rootclus else first,
                                          0, date, clock))
         blob = self._place(blob, chain,
-                           dir_entry(stem, ext, ATTR_DIRECTORY, grown[0], 0,
-                                     date, clock))
+                           self._entry_run(name, stem, ext, ATTR_DIRECTORY,
+                                           grown[0], 0, date, clock))
         self.fat.store_dir(blob, chain)
         self.flush()
-        return stem + ("." + ext if ext else "")
+        return name if lfn_needed(name, stem, ext) else \
+            stem + ("." + ext if ext else "")
 
     def _kill(self, blob, entry):
         if entry["dir"]:
@@ -1415,14 +1490,20 @@ class Volume:
         if clash is not None and clash["at"] != here["at"]:
             raise FileExistsError(newname)
         stem, ext = fat_name(newname, self._taken(entries, skip=here["at"]))
-        wide, short = name_fields(stem, ext)
-        blob[here["at"]:here["at"] + 8] = wide
-        blob[here["at"] + 8:here["at"] + 11] = short
-        # the long name described the old 8.3 entry, so it goes with it
+        # the record is rebuilt rather than patched: a new long name needs
+        # its own run, which may not be the size of the one it replaces
+        date = here["date"] or fat_time(None)[0]
+        clock = here["time"]
+        blob[here["at"]] = DIR_FREE
         self._clear_lfn(blob, here)
+        blob = self._place(blob, chain,
+                           self._entry_run(newname, stem, ext, here["attr"],
+                                           here["cluster"], here["size"],
+                                           date, clock))
         self.fat.store_dir(blob, chain)
         self.flush()
-        return stem + ("." + ext if ext else "")
+        return newname if lfn_needed(newname, stem, ext) else \
+            stem + ("." + ext if ext else "")
 
 
 def image_partitions(path):

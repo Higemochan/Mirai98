@@ -1759,8 +1759,8 @@ async function fsLoad(path) {
       : '<tr><td colspan="4" class="note">(empty)</td></tr>') +
     '</table>' +
     '<div class="note">Drop files here from the desktop to put them in this ' +
-    'folder. A name that is not already 8.3 is shortened, and the answer ' +
-    'says what it became.</div></div>';
+    'folder. Long names are kept the way Windows keeps them, with an 8.3 ' +
+    'name beside them for DOS.</div></div>';
   fsWire(box);
 }
 
@@ -1845,8 +1845,7 @@ async function fsMkdir() {
 }
 
 async function fsRename(name) {
-  const typed = prompt('rename ' + name + ' to?\n\nnames inside an image ' +
-                       'are 8.3', name);
+  const typed = prompt('rename ' + name + ' to?', name);
   if (typed === null) return;
   const to = typed.trim();
   if (!to || to === name) return;
