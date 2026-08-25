@@ -1447,17 +1447,26 @@ class Volume:
             stem + ("." + ext if ext else "")
 
     def _kill(self, blob, entry):
-        if entry["dir"]:
-            sub, _subchain = self._load(entry["cluster"], clean=True)
-            for child in self._scan(sub):
-                if child["name"] in (".", ".."):
-                    continue
-                self._kill(sub, child)
-        if entry["cluster"]:
-            self.fat.free_chain(entry["cluster"])
+        """Free a file, or a directory and everything under it.
+
+        Walked with a stack rather than by recursion: a tree deep enough to
+        run Python out of frames is a tree a disk can hold, and one this
+        can be asked to remove.  Only the entry in the directory that
+        survives is struck out -- the records below it go away with the
+        clusters that hold them.
+        """
+        pending = [entry]
+        while pending:
+            one = pending.pop()
+            if one["dir"] and one["cluster"]:
+                sub, _chain = self._load(one["cluster"])
+                pending.extend(child for child in self._scan(sub)
+                               if child["name"] not in (".", ".."))
+            if one["cluster"]:
+                self.fat.free_chain(one["cluster"])
+            self.removed += 1
         blob[entry["at"]] = DIR_FREE
         self._clear_lfn(blob, entry)
-        self.removed += 1
 
     def delete(self, path):
         """Remove a file, or a directory and everything under it."""

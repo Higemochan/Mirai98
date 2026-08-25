@@ -607,7 +607,22 @@ def safe_disk_name(name):
 
 # ------------------------------------------------------- inside an image
 
-FS_MAX_PUT = 512 << 20              # one file dropped in at a time
+FS_MAX_PUT = 256 << 20              # one file dropped in at a time
+
+# The server answers in threads and a volume is edited in place, so two
+# requests against one image would each scan the FAT for free clusters,
+# hand out the same ones and write directory blocks over each other --
+# both answering that they had succeeded.  One at a time per image.
+_fs_locks = {}
+_fs_locks_guard = threading.Lock()
+
+
+def fs_lock(path):
+    with _fs_locks_guard:
+        lock = _fs_locks.get(path)
+        if lock is None:
+            lock = _fs_locks[path] = threading.Lock()
+        return lock
 
 
 def fat_stamp(date, clock):
@@ -4331,7 +4346,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         import virtpc98
         try:
-            with virtpc98.Volume(full, partition) as vol:
+            with fs_lock(full), virtpc98.Volume(full, partition) as vol:
                 free, total = vol.usage()
                 out = {"partition": partition, "path": where,
                        "fat": vol.fat.bits, "cluster": vol.fat.clustersize,
@@ -4362,7 +4377,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         import virtpc98
         try:
-            with virtpc98.Volume(full, partition) as vol:
+            with fs_lock(full), virtpc98.Volume(full, partition) as vol:
                 blob = vol.read_file(where)
         except Exception as err:
             self.fail(404, "%s" % err)
@@ -4387,7 +4402,13 @@ class Handler(BaseHTTPRequestHandler):
         partition, where, filename = self.fs_query()
         import virtpc98
         if verb == "put":
-            size = int(self.headers.get("Content-Length", 0) or 0)
+            try:
+                size = int(self.headers.get("Content-Length", 0) or 0)
+            except ValueError:
+                size = -1
+            if size < 0:
+                self.refuse(400, "the request does not say how long it is")
+                return
             if not filename or not fs_path_ok(where):
                 self.refuse(400, "the file needs a name and a place")
                 return
@@ -4397,7 +4418,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             blob = self.rfile.read(size) if size else b""
             try:
-                with virtpc98.Volume(full, partition, writable=True) as vol:
+                with fs_lock(full), \
+                        virtpc98.Volume(full, partition, writable=True) as vol:
                     stored = vol.put(where, filename, blob)
             except ValueError as err:
                 self.fail(409, "%s" % err)
@@ -4416,7 +4438,8 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400, "bad path")
             return
         try:
-            with virtpc98.Volume(full, partition, writable=True) as vol:
+            with fs_lock(full), \
+                    virtpc98.Volume(full, partition, writable=True) as vol:
                 if verb == "mkdir":
                     leaf = str(data.get("name") or "").strip()
                     if not leaf:
@@ -5406,6 +5429,10 @@ def main(argv):
         # everything but the consoles works without it
         print("no noVNC in %s: consoles will not draw" % CONFIG["novnc"])
     ready = start_up()
+    # a burst -- a browser putting a handful of files into an image one
+    # after another, or two tabs at once -- should wait in the queue
+    # rather than be turned away at the door by the default backlog of 5
+    ThreadingHTTPServer.request_queue_size = 64
     server = ThreadingHTTPServer((host, port), Handler)
     # --port=0 asks the operating system to pick one, so the answer is
     # only known now; the caller is told below
