@@ -390,11 +390,27 @@ function task(what, status) {
       '">' + esc(x.status) + '</td></tr>').join('');
 }
 
+async function apiResult(path, opts) {
+  // every caller is written for "data, or null"; a fetch that rejects --
+  // the server restarting, the tunnel dropping -- used to reach none of
+  // them and leave the screen sitting on whatever it last said
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } catch (err) {
+    return {ok: false, data: null, error: 'no answer from the server'};
+  }
+  const data = await r.json().catch(() => null);
+  if (!r.ok) {
+    return {ok: false, data: null,
+            error: (data && data.error) || r.statusText || 'failed'};
+  }
+  return {ok: true, data: data === null ? {} : data, error: ''};
+}
 async function api(path, opts) {
-  const r = await fetch(path, opts);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { toast(data.error || r.statusText); return null; }
-  return data;
+  const got = await apiResult(path, opts);
+  if (!got.ok) { toast(got.error); return null; }
+  return got.data;
 }
 /*
  * A machine plugin is loaded as its own module and its buttons call back
@@ -918,6 +934,7 @@ class Pc98Sink extends AudioWorkletProcessor {
     this.maxLag = Math.round(sampleRate * opt.maxLag);
     this.primed = false;
     this.starved = 0;
+    this.dry = 0;
     this.told = 0;
     this.port.onmessage = (e) => this.push(new Int16Array(e.data));
   }
@@ -933,10 +950,12 @@ class Pc98Sink extends AudioWorkletProcessor {
       if (this.w === this.rd) { this.rd = (this.rd + 1) % this.size; }
     }
     // Server and sound card never tick at exactly the same rate, so the
-    // backlog creeps.  Drop it back to the cushion in one step instead of
-    // letting it grow until the ring writes over itself.
-    const over = this.avail() - this.maxLag;
-    if (over > 0) { this.rd = (this.rd + over) % this.size; }
+    // backlog creeps.  Come back to the cushion -- stopping at maxLag
+    // would make the worst case the resting state, and one stall would
+    // leave the sound a full 0.4 s behind for good.
+    if (this.avail() > this.maxLag) {
+      this.rd = (this.rd + this.avail() - this.prefill) % this.size;
+    }
   }
   process(inputs, outputs) {
     const out = outputs[0];
@@ -953,11 +972,21 @@ class Pc98Sink extends AudioWorkletProcessor {
         oL[i] = 0;
         oR[i] = 0;
         this.starved++;
+        this.dry++;
       } else {
         oL[i] = this.l[this.rd];
         oR[i] = this.r[this.rd];
         this.rd = (this.rd + 1) % this.size;
+        this.dry = 0;
       }
+    }
+    if (this.dry > sampleRate / 2) {
+      // nothing has arrived for half a second: the stream has stopped
+      // rather than stumbled, so stop calling it starvation and take the
+      // cushion again when it comes back
+      this.primed = false;
+      this.starved = 0;
+      this.dry = 0;
     }
     if (this.starved && currentTime - this.told >= 1) {
       this.told = currentTime;
@@ -971,50 +1000,84 @@ registerProcessor('pc98-sink', Pc98Sink);
 `;
 
 let audioCtx = null, audioNode = null, audioOn = false;
+// One attempt at a time: two quick clicks used to load the worklet module
+// twice on one context and leave a second node connected but never fed.
+let audioPending = null;
+// 1-3 bytes of a frame that a chunk boundary cut in half
+let audioCarry = null;
 
 async function audioStart() {
   if (audioNode) return;
+  if (audioPending) { await audioPending; return; }
   if (!window.AudioWorkletNode) {
     toast('this browser has no AudioWorklet: no console sound');
     return;
   }
-  if (!audioCtx) audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
-  const url = URL.createObjectURL(
-    new Blob([AUDIO_WORKLET_SRC], {type: 'application/javascript'}));
-  try {
-    await audioCtx.audioWorklet.addModule(url);
-  } catch (err) {
-    console.error('console sound', err);
-    toast('the sound worklet would not load: no console sound');
-    return;
-  } finally {
-    URL.revokeObjectURL(url);
-  }
-  audioNode = new AudioWorkletNode(audioCtx, 'pc98-sink', {
-    numberOfInputs: 0,
-    numberOfOutputs: 1,
-    outputChannelCount: [2],
-    processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG}
-  });
-  audioNode.port.onmessage = (e) => {
-    if (e.data && e.data.starved) {
-      console.warn('console sound: filled in ' + e.data.starved +
-                   ' frames of silence');
+  audioPending = (async () => {
+    if (!audioCtx) audioCtx = new AudioContext({sampleRate: AUDIO_RATE});
+    const url = URL.createObjectURL(
+      new Blob([AUDIO_WORKLET_SRC], {type: 'application/javascript'}));
+    try {
+      await audioCtx.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
     }
-  };
-  audioNode.connect(audioCtx.destination);
+    if (audioNode) return;            // something finished this while we waited
+    const node = new AudioWorkletNode(audioCtx, 'pc98-sink', {
+      numberOfInputs: 0,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+      processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG}
+    });
+    node.port.onmessage = (e) => {
+      if (e.data && e.data.starved) {
+        console.warn('console sound: filled in ' + e.data.starved +
+                     ' frames of silence');
+      }
+    };
+    node.connect(audioCtx.destination);
+    audioNode = node;
+  })();
+  try {
+    await audioPending;
+  } catch (err) {
+    // the context, the module, the node and the connection can each fail;
+    // saying nothing left the button looking dead
+    console.error('console sound', err);
+    toast('console sound would not start: ' + (err && err.name || err));
+    audioOn = false;
+  } finally {
+    audioPending = null;
+  }
 }
 function audioChunk(bytes) {
-  if (!audioNode) return;
-  const whole = bytes.byteLength & ~3;          // whole stereo frames only
-  if (!whole) return;
-  const copy = bytes.slice(0, whole);           // own it, then hand it over
-  audioNode.port.postMessage(copy.buffer, [copy.buffer]);
+  // this runs inside noVNC's own dispatcher, which does not guard its
+  // listeners: a throw here would abort the message drain mid-message and
+  // take the console down with the sound
+  try {
+    if (!audioNode) return;
+    let data = bytes;
+    if (audioCarry && audioCarry.length) {
+      data = new Uint8Array(audioCarry.length + bytes.byteLength);
+      data.set(audioCarry, 0);
+      data.set(bytes, audioCarry.length);
+    }
+    const whole = data.byteLength & ~3;         // whole stereo frames only
+    // a boundary that cut a frame in half is carried, not dropped: losing
+    // the odd bytes would cross the channels from there on
+    audioCarry = whole < data.byteLength ? data.slice(whole) : null;
+    if (!whole) return;
+    const copy = data.slice(0, whole);          // own it, then hand it over
+    audioNode.port.postMessage(copy.buffer, [copy.buffer]);
+  } catch (err) {
+    console.error('console sound', err);
+  }
 }
 async function enableAudioNow() {
   if (!rfb || !rfb.enableAudio) return;
+  audioOn = true;
   await audioStart();
-  if (!audioNode) return;
+  if (!audioNode || !audioOn) return;   // turned off while it was loading
   audioCtx.resume();
   rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
   audioOn = true;
@@ -1027,19 +1090,24 @@ window.toggleAudio = async () => {
   const btn = document.getElementById('btn-audio');
   if (audioOn) {
     await audioStart();
-    if (!audioNode) { audioOn = false; return; }
+    if (!audioNode || !audioOn) { return; }   // clicked off while loading
     audioCtx.resume();
     rfb.enableAudio(3, 2, AUDIO_RATE);          // 3 = S16
     if (btn) { btn.textContent = '🔊 Sound on'; }
     toast('sound on');
   } else {
     rfb.disableAudio();
+    // and actually stop: leaving the worklet connected kept it reporting
+    // the silence it was filling in, once a second, for good
+    stopAudio();
+    audioOn = false;
     if (btn) { btn.textContent = '🔇 Sound off'; }
     toast('sound off');
   }
 };
 function stopAudio() {
   audioOn = false;
+  audioCarry = null;
   if (audioNode) {
     try { audioNode.port.onmessage = null; audioNode.disconnect(); } catch (e) {}
     audioNode = null;
@@ -1233,10 +1301,14 @@ window.connectConsole = async (name, ws) => {
   rfb.addEventListener('connect', () => {
     toast(name + ': console connected');
     fitConsoleBox();
-    enableAudioNow();
+    enableAudioNow().catch(err => console.error('console sound', err));
   });
-  rfb.addEventListener('disconnect',
-                       () => toast(name + ': console disconnected'));
+  rfb.addEventListener('disconnect', () => {
+    toast(name + ': console disconnected');
+    // the sound goes with it: left running, the worklet plays silence and
+    // reports it once a second for as long as the page is open
+    stopAudio();
+  });
   rfb.addEventListener('audiodata', e => audioChunk(e.detail.data));
   document.getElementById('btn-connect').style.display = 'none';
   for (const id of ['btn-disconnect','btn-cad','btn-expand','btn-audio'])
@@ -1686,14 +1758,23 @@ window.deleteRom = name => {
 // turns writes away while a machine has it open, and names become 8.3 on
 // the way in -- the answer says what a file actually landed as.
 let fsAt = null;
+// Which listing is the current one.  Two overlapping loads used to split
+// the state: the screen came from the answer that arrived last, fsAt from
+// the request that was issued last, and the row handlers then acted on a
+// directory that was not the one on screen.
+let fsSeq = 0;
+let fsBusy = false;
 
 function fsJoin(dir, leaf) {
   return (dir === '/' ? '' : dir) + '/' + leaf;
 }
 
-function fsUrl(verb, extra) {
-  return '/api/fs/' + fsAt.kind + '/' + encodeURIComponent(fsAt.name) +
-    (verb ? '/' + verb : '') + '?partition=' + fsAt.partition + (extra || '');
+function fsUrl(verb, extra, partition, at) {
+  const on = at || fsAt;
+  return '/api/fs/' + on.kind + '/' + encodeURIComponent(on.name) +
+    (verb ? '/' + verb : '') +
+    '?partition=' + (partition == null ? on.partition : partition) +
+    (extra || '');
 }
 
 function fsCrumbs(path) {
@@ -1716,22 +1797,35 @@ function fsRow(e) {
     '</td><td>' + (e.dir ? '' : fmtBytes(e.size)) +
     '</td><td class="note">' + esc(e.modified || '') +
     '</td><td style="white-space:nowrap">' +
-    '<button data-rename="' + esc(e.name) + '">Rename</button> ' +
-    '<button data-remove="' + esc(e.name) + '" data-dir="' +
+    '<button data-rename="' + esc(e.name) + '" data-shown="' +
+    esc(e.long || e.name) + '">Rename</button> ' +
+    '<button data-remove="' + esc(e.name) + '" data-shown="' +
+    esc(e.long || e.name) + '" data-dir="' +
     (e.dir ? 1 : 0) + '">Delete</button></td></tr>';
 }
 
 async function fsLoad(path) {
   const box = document.getElementById('fsbox');
   if (!box || !fsAt) return;
-  if (path != null) fsAt.path = path;
-  const d = await api(fsUrl('', '&path=' + encodeURIComponent(fsAt.path)));
-  if (!d) {
-    box.innerHTML = '<div class="note">Cannot read a file system in this ' +
-      'image. Only raw PC-98 disks and floppies can be browsed; a qcow2 ' +
-      'has to be converted first.</div>';
+  const seq = ++fsSeq;
+  const where = path == null ? fsAt.path : path;
+  const got = await apiResult(fsUrl('', '&path=' + encodeURIComponent(where),
+                                    fsAt.partition));
+  if (seq !== fsSeq) return;            // a newer listing is already on its way
+  if (!got.ok || !got.data || !Array.isArray(got.data.entries)) {
+    box.innerHTML = '<div class="note">' +
+      esc(got.error || 'that folder could not be read') +
+      (got.error && /qcow2/i.test(got.error) ? '' :
+       ' &mdash; only raw PC-98 disks and floppies can be browsed.') +
+      '</div><div class="row" style="margin-top:.6em">' +
+      '<button data-go="' + esc(fsAt.path) + '">Back to ' +
+      esc(fsAt.path) + '</button></div>';
+    fsWire(box, fsAt.path, fsAt.partition);
     return;
   }
+  const d = got.data;
+  // only now is this the folder we are in
+  fsAt.path = d.path;
   fsAt.partition = d.partition;
   const dirs = d.entries.filter(e => e.dir);
   const files = d.entries.filter(e => !e.dir);
@@ -1740,10 +1834,10 @@ async function fsLoad(path) {
     '<div class="row" style="align-items:center;gap:.6em;flex-wrap:wrap">' +
     (d.partitions.length > 1
       ? '<label>Partition <select data-part>' + d.partitions.map(p =>
-          '<option value="' + p.n + '"' + (p.n === d.partition ? ' selected' : '')
+          '<option value="' + esc(p.n) + '"' + (p.n === d.partition ? ' selected' : '')
           + '>' + p.n + (p.name ? ' – ' + esc(p.name) : '') + '</option>')
           .join('') + '</select></label>' : '') +
-    '<span class="note">FAT' + d.fat + ' · ' + fmtBytes(d.free) +
+    '<span class="note">FAT' + esc(d.fat) + ' · ' + fmtBytes(d.free) +
     ' free of ' + fmtBytes(d.total) + '</span>' +
     '<button data-mkdir>New folder...</button></div>' +
     '<div class="crumb">' + fsCrumbs(d.path) + '</div>' +
@@ -1761,28 +1855,34 @@ async function fsLoad(path) {
     '<div class="note">Drop files here from the desktop to put them in this ' +
     'folder. Long names are kept the way Windows keeps them, with an 8.3 ' +
     'name beside them for DOS.</div></div>';
-  fsWire(box);
+  fsWire(box, d.path, d.partition);
 }
 
-function fsWire(box) {
+function fsWire(box, path, partition) {
+  // every handler works on the folder that is on the screen, taken as it
+  // was rendered: reading fsAt at click time meant acting on whatever had
+  // been navigated to since
+  const here = {kind: fsAt.kind, name: fsAt.name, partition: partition,
+                path: path};
   box.querySelectorAll('[data-go]').forEach(a => {
     a.onclick = ev => { ev.preventDefault(); fsLoad(a.dataset.go); };
   });
   box.querySelectorAll('[data-open]').forEach(a => {
     a.onclick = ev => {
       ev.preventDefault();
-      const where = fsJoin(fsAt.path, a.dataset.open);
+      const where = fsJoin(here.path, a.dataset.open);
       if (a.dataset.dir === '1') { fsLoad(where); return; }
-      location.href = '/fsfile/' + fsAt.kind + '/' +
-        encodeURIComponent(fsAt.name) + '?partition=' + fsAt.partition +
+      location.href = '/fsfile/' + here.kind + '/' +
+        encodeURIComponent(here.name) + '?partition=' + here.partition +
         '&path=' + encodeURIComponent(where);
     };
   });
   box.querySelectorAll('[data-rename]').forEach(b => {
-    b.onclick = () => fsRename(b.dataset.rename);
+    b.onclick = () => fsRename(here, b.dataset.rename, b.dataset.shown);
   });
   box.querySelectorAll('[data-remove]').forEach(b => {
-    b.onclick = () => fsRemove(b.dataset.remove, b.dataset.dir === '1');
+    b.onclick = () => fsRemove(here, b.dataset.remove, b.dataset.shown,
+                               b.dataset.dir === '1');
   });
   const part = box.querySelector('[data-part]');
   if (part) part.onchange = () => {
@@ -1790,82 +1890,112 @@ function fsWire(box) {
     fsLoad('/');
   };
   const mk = box.querySelector('[data-mkdir]');
-  if (mk) mk.onclick = () => fsMkdir();
+  if (mk) mk.onclick = () => fsMkdir(here);
   const zone = box.querySelector('[data-drop]');
   if (!zone) return;
+  let inside = 0;
   const lit = on => { zone.style.background = on ? 'rgba(122,60,255,.12)' : ''; };
+  zone.addEventListener('dragenter', ev => { ev.preventDefault(); inside++; lit(true); });
   zone.addEventListener('dragover', ev => { ev.preventDefault(); lit(true); });
-  zone.addEventListener('dragleave', () => lit(false));
+  // crossing onto a child fires dragleave, so count the crossings
+  zone.addEventListener('dragleave', () => { inside = Math.max(0, inside - 1);
+                                             if (!inside) lit(false); });
   zone.addEventListener('drop', async ev => {
     ev.preventDefault();
-    lit(false);
-    await fsDrop(ev.dataTransfer);
+    inside = 0; lit(false);
+    await fsDrop(ev.dataTransfer, here);
   });
 }
 
-async function fsDrop(transfer) {
+async function fsDrop(transfer, here) {
+  if (fsBusy) { toast('still putting the last lot in'); return; }
   const items = transfer.items ? [...transfer.items] : [];
   const folders = items.filter(
     it => it.webkitGetAsEntry && it.webkitGetAsEntry() &&
           it.webkitGetAsEntry().isDirectory);
-  const files = [...(transfer.files || [])];
+  const files = [...(transfer.files || [])].filter(f => !folders.length ||
+                                                        f.size || f.type);
   if (!files.length) {
     toast(folders.length ? 'drop the files themselves, not the folder'
                          : 'nothing to put in');
     return;
   }
-  let done = 0, became = [];
-  for (const file of files) {
-    toast('putting ' + file.name + ' in...');
-    const r = await api(
-      fsUrl('put', '&path=' + encodeURIComponent(fsAt.path) +
-            '&name=' + encodeURIComponent(file.name)),
-      {method: 'POST', body: file});
-    if (!r) break;
-    done++;
-    if (r.renamed) became.push(file.name + ' → ' + r.name);
+  // where they were dropped, kept for the whole run: navigating away mid
+  // upload used to send the rest into another folder, or another image
+  const at = here || fsAt;
+  fsBusy = true;
+  let done = 0;
+  const became = [], failed = [];
+  try {
+    for (const file of files) {
+      toast('putting ' + file.name + ' in...');
+      const got = await apiResult(
+        fsUrl('put', '&path=' + encodeURIComponent(at.path) +
+              '&name=' + encodeURIComponent(file.name), at.partition, at),
+        {method: 'POST', body: file});
+      if (!got.ok) { failed.push(file.name + ': ' + got.error); continue; }
+      done++;
+      if (got.data.renamed) became.push(file.name + ' \u2192 ' + got.data.name);
+    }
+  } finally {
+    fsBusy = false;
   }
-  if (done) {
-    toast(done + ' file' + (done === 1 ? '' : 's') + ' written' +
-          (became.length ? ' (' + became.join(', ') + ')' : ''));
-    task('Disk ' + fsAt.name + ' - ' + done + ' file(s) in', 'OK');
-  }
-  if (folders.length) toast('folders were skipped');
-  fsLoad();
+  const said = [];
+  if (done) said.push(done + ' file' + (done === 1 ? '' : 's') + ' written' +
+                      (became.length ? ' (' + became.join(', ') + ')' : ''));
+  if (failed.length) said.push(failed.length + ' failed \u2014 ' + failed[0]);
+  if (folders.length) said.push('folders were skipped');
+  if (said.length) toast(said.join('; '));
+  if (done) task('Disk ' + at.name + ' - ' + done + ' file(s) in',
+                 failed.length ? 'partly' : 'OK');
+  if (failed.length) task('Disk ' + at.name + ' - ' + failed.length +
+                          ' file(s) refused', failed[0]);
+  if (fsAt && at.name === fsAt.name && at.path === fsAt.path) fsLoad();
 }
 
-async function fsMkdir() {
-  const typed = prompt('name for the new folder?');
+async function fsMkdir(here) {
+  const at = here || fsAt;
+  const typed = prompt('name for the new folder in ' + at.path + '?');
   if (typed === null) return;
   const name = typed.trim();
   if (!name) return;
-  const r = await api(fsUrl('mkdir'), {method: 'POST',
-    body: JSON.stringify({path: fsAt.path, name: name})});
-  if (r) { toast('created ' + r.name); fsLoad(); }
-}
-
-async function fsRename(name) {
-  const typed = prompt('rename ' + name + ' to?', name);
-  if (typed === null) return;
-  const to = typed.trim();
-  if (!to || to === name) return;
-  const r = await api(fsUrl('rename'), {method: 'POST',
-    body: JSON.stringify({path: fsJoin(fsAt.path, name), name: to})});
+  const r = await api(fsUrl('mkdir', '', at.partition, at), {method: 'POST',
+    body: JSON.stringify({path: at.path, name: name})});
   if (r) {
-    toast('renamed to ' + r.name);
-    task('Disk ' + fsAt.name + ' - rename ' + name, 'OK');
+    toast('created ' + r.name);
+    task('Disk ' + at.name + ' - new folder ' + r.name, 'OK');
     fsLoad();
   }
 }
 
-async function fsRemove(name, isDir) {
-  if (!confirm('remove ' + name + (isDir ? ' and everything in it?' : '?')))
+async function fsRename(here, name, shown) {
+  const at = here || fsAt;
+  const was = shown || name;
+  const typed = prompt('rename ' + was + '\n\nin ' + at.path, was);
+  if (typed === null) return;
+  const to = typed.trim();
+  if (!to) return;
+  if (to === was) { toast('that is the name it already has'); return; }
+  const r = await api(fsUrl('rename', '', at.partition, at), {method: 'POST',
+    body: JSON.stringify({path: fsJoin(at.path, name), name: to})});
+  if (r) {
+    toast('renamed to ' + r.name);
+    task('Disk ' + at.name + ' - rename ' + was, 'OK');
+    fsLoad();
+  }
+}
+
+async function fsRemove(here, name, shown, isDir) {
+  const at = here || fsAt;
+  const was = shown || name;
+  if (!confirm('remove ' + was + ' from ' + at.path +
+               (isDir ? ' and everything in it?' : '?')))
     return;
-  const r = await api(fsUrl('delete'), {method: 'POST',
-    body: JSON.stringify({paths: [fsJoin(fsAt.path, name)]})});
+  const r = await api(fsUrl('delete', '', at.partition, at), {method: 'POST',
+    body: JSON.stringify({paths: [fsJoin(at.path, name)]})});
   if (r) {
     toast('removed ' + r.count + ' entr' + (r.count === 1 ? 'y' : 'ies'));
-    task('Disk ' + fsAt.name + ' - remove ' + name, 'OK');
+    task('Disk ' + at.name + ' - remove ' + was, 'OK');
     fsLoad();
   }
 }
