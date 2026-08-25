@@ -3056,9 +3056,14 @@ def qemu_argv(inst):
         else:
             argv += ["-drive", "if=ide,bus=0,unit=%d," % unit
                      + drive_backing(disk_path(inst, key))]
-    if inst.get("cd"):
-        argv += ["-drive", "if=ide,bus=1,unit=0,media=cdrom,readonly=on,"
-                 + drive_backing(disk_path(inst, "cd"))]
+    # The CD-ROM drive belongs to the machine whether or not a disc is in
+    # it.  QEMU can only load a disc into a drive that already exists, so
+    # leaving the drive out would mean a machine started with an empty
+    # tray could never be handed a disc without being restarted.
+    disc = (("," + drive_backing(disk_path(inst, "cd")))
+            if inst.get("cd") else "")
+    argv += ["-drive",
+             "if=ide,bus=1,unit=0,media=cdrom,readonly=on" + disc]
     floppies = [k for k in ("fdd1", "fdd2") if inst.get(k)]
     for unit, key in enumerate(floppies):
         spec = "if=floppy,unit=%d," % unit if len(floppies) > 1 \
