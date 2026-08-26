@@ -2998,9 +2998,15 @@ def qemu_argv(inst):
     midi = MIDI_MODES.get(inst.get("midi") or "")
     sound = fm or pcm or midi
     argv = [CONFIG["qemu"],
-            "-M", "%s,accel=%s%s%s" % (
+            "-M", "%s,accel=%s%s%s%s" % (
                 inst.get("machine") or "pc9821", accel,
                 ",pcspk-audiodev=snd" if sound else "",
+                # the CD-ROM drive plays a disc's audio tracks itself, and
+                # needs to be told where they go.  On the real machines that
+                # went through the sound board, and here it goes through the
+                # same mix, so a machine with no board to hear it through
+                # has nowhere to put it either.
+                ",audiodev=snd" if sound else "",
                 # PEGC (256-colour packed pixel) is what the Windows 9x
                 # display driver needs.  QEMU only implements it behind
                 # the bundled compatibility BIOS; asking for both is
