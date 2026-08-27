@@ -258,8 +258,11 @@ JA['to qcow2'] = 'qcow2へ';
 JA['to raw'] = 'rawへ';
 JA['to nfd'] = 'nfdへ';
 JA['to fdi'] = 'fdiへ';
-JA['.qcow2 grows on demand. .hdi: Anex86. .raw: flat.'] =
-  '.qcow2 は必要に応じて大きくなります。.hdi は Anex86 形式、.raw はベタ。';
+JA['The extension is added for you. Anex86 .hdi cannot be made here: upload one and it is converted.'] =
+  '拡張子はこちらで付けます。Anex86 の .hdi はここでは作れません。' +
+  '取り込めば変換されます。';
+JA['PC-98 (FAT, flat)'] = 'PC-98 (FAT・ベタ)';
+JA['PC-98 (FAT, grows on demand)'] = 'PC-98 (FAT・必要に応じて拡大)';
 JA['.fdi or .raw. Formatted, empty.'] =
   '.fdi または .raw。フォーマット済みの空ディスクです。';
 JA['not uploaded, the compatible ROM stands in'] =
@@ -1531,8 +1534,10 @@ const extOf = n => { const i = n.lastIndexOf('.');
 const stemOf = n => { const i = n.lastIndexOf('.');
                       return i > 0 ? n.slice(0, i) : n; };
 const CONVERT_TARGETS = {
-  'hdd:.hdi': ['raw'], 'hdd:.raw': ['hdi','qcow2'],
-  'hdd:.img': ['hdi','qcow2'], 'hdd:.qcow2': ['raw'],
+  // no raw->hdi: an Anex86 image on this shelf is handed to QEMU flat,
+  // which reads its header as the first sectors of the disk
+  'hdd:.hdi': ['raw'], 'hdd:.raw': ['qcow2'],
+  'hdd:.img': ['qcow2'], 'hdd:.qcow2': ['raw'],
   'fdd:.fdi': ['raw'], 'fdd:.nfd': ['raw'],
   'fdd:.raw': ['fdi', 'nfd'], 'fdd:.img': ['fdi', 'nfd'],
 };
@@ -1649,17 +1654,19 @@ function storageCard(kind, files) {
   if (kind === 'hdd')
     create = '<h4>Create a disk</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'hdd\')" class="row">' +
-      '<input type="text" name="name" placeholder="new-disk.qcow2" ' +
+      '<input type="text" name="name" placeholder="new-disk" ' +
       'required style="min-width:11em"><select name="size">' +
-      [40,80,160,320,640,1200,2100,4300].map(s => '<option' +
+      [40,80,160,320,640,1200,1600,2100,4300].map(s => '<option' +
         (s === 40 ? ' selected' : '') + '>' + s + '</option>').join('') +
       '</select><span class="note">MB</span>' +
-      (extra.length ? '<select name="format"><option value="">PC-98 ' +
-       '(FAT, formatted)</option>' + extraOpts + '</select>' : '') +
+      '<select name="format"><option value="">PC-98 (FAT, flat)</option>' +
+      '<option value="qcow2">PC-98 (FAT, grows on demand)</option>' +
+      extraOpts + '</select>' +
       '<label class="check"><input type="checkbox" name="fat32"> FAT32' +
       '</label><button class="primary">Create</button></form>' +
-      '<div class="note">.qcow2 grows on demand. .hdi: Anex86. ' +
-      '.raw: flat.</div>' + extraNotes + '</div>';
+      '<div class="note">The extension is added for you. Anex86 .hdi ' +
+      'cannot be made here: upload one and it is converted.</div>' +
+      extraNotes + '</div>';
   else if (kind === 'fdd')
     create = '<h4>Create a floppy</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'fdd\')" class="row">' +

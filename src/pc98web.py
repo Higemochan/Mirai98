@@ -1381,8 +1381,8 @@ def seed_fleet():
     seed = os.path.join(CONFIG["datadir"], "seed")
     made = False
     for name in sorted(os.listdir(seed)) if os.path.isdir(seed) else []:
-        if not name.lower().endswith((".raw", ".img", ".hdi", ".qcow2")):
-            continue
+        if not name.lower().endswith((".raw", ".img", ".qcow2")):
+            continue    # .hdi is an interchange format, not one to run
         dest = os.path.join(disks_root("hdd"), name)
         if not os.path.exists(dest):
             shutil.copy2(os.path.join(seed, name), dest)
@@ -1513,8 +1513,27 @@ def usage_of(inst):
 
 def drive_backing(path):
     """format= and file=, with the format read off the extension; QEMU
-    told format=raw would happily show a guest the qcow2 container."""
+    told format=raw would happily show a guest the qcow2 container.
+
+    This is the one place a disk reaches a machine, so it is also where
+    an Anex86 image is stopped.  QEMU cannot read that container: told
+    format=raw it hands the guest the 4096 byte header as the first
+    sectors of the disk, and every partition then sits 4096 bytes from
+    where the guest looks for it -- a disk that mounts nothing, with no
+    error anywhere to say why.  Refusing here catches one whatever path
+    put it on the shelf, including the ones that predate this check.
+    """
     fmt = "qcow2" if path.lower().endswith(".qcow2") else "raw"
+    if fmt == "raw":
+        try:
+            import virtpc98
+            headered = virtpc98.anex86_header(path) is not None
+        except Exception:
+            headered = False        # unreadable is the caller's problem
+        if headered:
+            raise ValueError(
+                "%s is an Anex86 (.hdi) image, which cannot be run here. "
+                "Convert it to raw first." % os.path.basename(path))
     return "format=%s,file=%s" % (fmt, qemu_file(path))
 
 
@@ -4785,10 +4804,18 @@ class Handler(BaseHTTPRequestHandler):
         """Uploaded containers become what the tree prefers: an HDI turns
         into qcow2, an FDI into a bare raw floppy.  Returns the name the
         upload ended up under; trouble just keeps the original."""
+        import virtpc98
         stem, ext = os.path.splitext(dest)
         ext = ext.lower()
-        if (kind, ext) == ("hdd", ".hdi"):
-            target = stem + ".qcow2"
+        # What the file is, not what it is called.  An Anex86 image keeps
+        # a 4096 byte header in front of the disk, and every image but a
+        # qcow2 is handed to QEMU flat -- so one left on the shelf has its
+        # whole disk 4096 bytes from where its guest looks for it, whatever
+        # the name says.  Uploads arrive named anything.
+        headered = (kind == "hdd"
+                    and virtpc98.anex86_header(dest) is not None)
+        if headered or (kind, ext) == ("hdd", ".hdi"):
+            target = os.path.splitext(dest)[0] + ".qcow2"
         elif (kind, ext) in (("fdd", ".fdi"), ("fdd", ".nfd")):
             target = stem + ".raw"
         else:
@@ -4798,7 +4825,16 @@ class Handler(BaseHTTPRequestHandler):
         # up by name -- including Delete -- would then find whichever comes
         # first and leave the other
         if disk_taken(kind, os.path.basename(target)) or os.path.lexists(target):
-            return os.path.basename(dest)      # never clobber sideways
+            # Never clobber sideways -- but an Anex86 image cannot simply
+            # be left where it is either, so the upload has to fail rather
+            # than sit on the shelf looking usable.
+            if headered:
+                os.remove(dest)
+                raise ValueError(
+                    "%s is an Anex86 image and has to be converted, but "
+                    "%s is already taken" % (os.path.basename(dest),
+                                             os.path.basename(target)))
+            return os.path.basename(dest)
         try:
             import virtpc98
             payload = (virtpc98.nfd_to_raw(dest) if ext == ".nfd"
@@ -5085,6 +5121,17 @@ class Handler(BaseHTTPRequestHandler):
         if group and not given_name(group):
             self.fail(400, "a group is named like an image: " + NAME_RULE)
             return
+        fmt = str(data.get("format") or "")
+        if kind == "hdd" and (kind, fmt) not in DISK_BUILDERS:
+            # The container is decided here rather than typed.  A name
+            # that ended in .hdi made an Anex86 image -- a 4096 byte
+            # header in front of the disk -- and every image but a qcow2
+            # is opened flat, so that header was read as the first
+            # sectors and every partition sat 4096 bytes from where the
+            # guest looks for it.  Such a disk is not readable by the
+            # guest it was made for.
+            name = re.sub(r"\.(raw|img|hdi|qcow2)$", "", name, flags=re.I)
+            name += ".qcow2" if fmt == "qcow2" else ".raw"
         if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return
@@ -5125,8 +5172,9 @@ class Handler(BaseHTTPRequestHandler):
     # source extension and requested format pick the virtpc98 command
     CONVERSIONS = {
         ("hdd", ".hdi", "raw"): ("hdi-to-raw", ".raw"),
-        ("hdd", ".raw", "hdi"): ("raw-to-hdi", ".hdi"),
-        ("hdd", ".img", "hdi"): ("raw-to-hdi", ".hdi"),
+        # No raw-to-hdi: an Anex86 image on this shelf is handed to QEMU
+        # flat, which reads its header as the first sectors of the disk.
+        # The way out to another emulator is to take the .raw away.
         ("hdd", ".raw", "qcow2"): ("raw-to-qcow2", ".qcow2"),
         ("hdd", ".img", "qcow2"): ("raw-to-qcow2", ".qcow2"),
         ("hdd", ".qcow2", "raw"): ("qcow2-to-raw", ".raw"),
