@@ -331,17 +331,67 @@ def dir_entry(stem, ext, attr, cluster, size, date, clock):
                           cluster >> 16, clock, date, cluster & 0xFFFF, size))
 
 
-def patch_bpb(sector, geom):
+# NEC's DOS keeps three numbers outside the BPB, and its boot code reads the
+# start of the data area straight from 0x42 instead of working it out from
+# the BPB the way it does the root directory.  A record copied from another
+# volume therefore still points at that volume's data area, and the machine
+# loads whatever lives there instead of IO.SYS.
+DONOR_START = 0x3E          # partition's first physical sector, 32 bit
+DONOR_DATA = 0x42           # data area's first physical sector, 16 bit
+DONOR_SECSIZE = 0x44        # physical sector size the three numbers count in
+
+
+def donor_places_fit(record):
+    """True when a donor's numbers outside the BPB are where we think.
+
+    Work the donor's own data area out of the donor's own BPB: if that
+    lands on what 0x42 already holds, and 0x3E already holds where the
+    donor's partition began, then these offsets mean what NEC's DOS means
+    by them and ours can go in.  Boot code we cannot read this way keeps
+    every byte outside the BPB, because a wrong guess here overwrites
+    instructions.
+    """
+    if len(record) < DONOR_SECSIZE + 2:
+        return False
+    bps, _spc, reserved = struct.unpack_from("<HBH", record, 11)
+    nfats, rootents = record[16], struct.unpack_from("<H", record, 17)[0]
+    secperfat = struct.unpack_from("<H", record, 22)[0]
+    hidden = struct.unpack_from("<I", record, 28)[0]
+    start = struct.unpack_from("<I", record, DONOR_START)[0]
+    data = struct.unpack_from("<H", record, DONOR_DATA)[0]
+    secsize = struct.unpack_from("<H", record, DONOR_SECSIZE)[0]
+    if not bps or secsize not in (256, 512, 1024):
+        return False
+    own = reserved * bps + nfats * secperfat * bps + rootents * 32
+    return start == hidden and data == own // secsize
+
+
+def patch_bpb(sector, geom, log=None):
     """Keep a donor boot record's code, replace the BPB it carries.
 
     A PC-98 1024 byte logical sector holds a boot record in each of its two
     512 byte halves, so both get patched.
     """
     out = bytearray(sector)
+    told = False
     for base in (0, 512):
         if base + 0x24 > len(out) or out[base] not in (0xEB, 0xE9):
             continue
+        donor = bytes(out[base:base + SECTOR])
         out[base + 11:base + 36] = geom.bpb()
+        if not geom.hidden:                 # a floppy has no partition ahead
+            continue
+        if not donor_places_fit(donor):
+            if log and not told:
+                log("this boot code does not keep its volume's numbers where "
+                    "NEC's DOS does, so the data area it points at was left "
+                    "alone; the disk may not start")
+                told = True
+            continue
+        struct.pack_into("<I", out, base + DONOR_START, TRACK // SECTOR)
+        struct.pack_into("<H", out, base + DONOR_DATA,
+                         geom.data_start // SECTOR)
+        struct.pack_into("<H", out, base + DONOR_SECSIZE, SECTOR)
     return bytes(out)
 
 
@@ -501,7 +551,8 @@ class FatBuilder:
         if template is not None:
             if g.bits == 32:
                 raise ValueError("boot code from another image needs FAT12/16")
-            boot = bytearray(patch_bpb(template[:g.bps].ljust(g.bps, b"\0"), g))
+            boot = bytearray(patch_bpb(
+                template[:g.bps].ljust(g.bps, b"\0"), g, self.log))
         elif g.bits == 32:
             boot = self.fat32_boot(label)
         else:
