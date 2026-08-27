@@ -1609,9 +1609,11 @@ def build_ipl():
     IPL_SEGMENT so the boot record it is about to load cannot land on top of
     it, reads the partition table from cylinder 0 head 0 sector 1, then reads
     the first entry's boot record to PBR_SEGMENT:0000 and jumps there with
-    AL = the DA/UA from 0000:0584 and SI = DX = 0, which is the state NEC's
-    own boot selector leaves behind.  Progress and failures go straight to
-    text VRAM so a machine that stops here says why.
+    AL = the DA/UA from 0000:0584 and SI = the segment the boot record went
+    to, which is the handover NEC's own IPL makes.  DX is zeroed here; NEC's
+    leaves the sector number of its last read in it, and the difference has
+    not been tested.  Progress and failures go straight to text VRAM so a
+    machine that stops here says why.
     """
     code = bytearray()
     labels = {}
@@ -1699,7 +1701,14 @@ def build_ipl():
     emit(b"\xF4\xEB" + bytes([(labels["stop"] - (here() + 3)) & 0xFF]))
 
     mark("launch")
-    emit(b"\x33\xF6\x33\xD2")                   # xor si,si / xor dx,dx
+    # SI carries the segment the boot record was loaded to.  NEC's own IPL
+    # works that out as ES + BP/16 and hands it over, so this does too.
+    # A zero there stops Windows 95 and 98 before they start: the machine
+    # sits at 9000:0690 and stays there, and the same disk boots as soon as
+    # SI names the segment.  What MSLOAD does with the value has not been
+    # traced; the handover and that effect are what was measured.
+    emit(b"\x2E\x8B\x36\x0A\x00")               # mov si,[cs:0x000a]
+    emit(b"\x33\xD2")                           # xor dx,dx
     emit(b"\x2E\xFF\x2E\x08\x00")               # jmp far [cs:0x0008]
 
     # si = message, ds = 0 on entry and on return
