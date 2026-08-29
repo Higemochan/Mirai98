@@ -1189,6 +1189,7 @@ def load_instance(index):
             "snapshot": (root.findtext("snapshot") or "no") == "yes",
             "pegc": (root.findtext("pegc") or "no") == "yes",
             "ga98nb": (root.findtext("ga98nb") or "no") == "yes",
+            "wab": (root.findtext("wab") or "no") == "yes",
             "net": root.findtext("net") or "",
             "machine": root.findtext("machine") or "pc9821",
             "bios": root.findtext("bios") or "compat",
@@ -1229,6 +1230,8 @@ def save_instance(inst):
         ET.SubElement(root, "pegc").text = "yes"
     if inst.get("ga98nb"):
         ET.SubElement(root, "ga98nb").text = "yes"
+    if inst.get("wab"):
+        ET.SubElement(root, "wab").text = "yes"
     if inst.get("net"):
         ET.SubElement(root, "net").text = inst["net"]
     for key in ("serial", "parallel", "gpib"):
@@ -1324,6 +1327,7 @@ def sanitize(data, taken_names=()):
               "snapshot": bool(data.get("snapshot")),
               "pegc": bool(data.get("pegc")),
               "ga98nb": bool(data.get("ga98nb")),
+              "wab": bool(data.get("wab")),
               "net": str(data.get("net") or ""),
               "machine": str(data.get("machine") or "pc9821"),
               "bios": str(data.get("bios") or "compat"),
@@ -3026,7 +3030,7 @@ def qemu_argv(inst):
     midi = MIDI_MODES.get(inst.get("midi") or "")
     sound = fm or pcm or midi
     argv = [CONFIG["qemu"],
-            "-M", "%s,accel=%s%s%s%s%s" % (
+            "-M", "%s,accel=%s%s%s%s%s%s" % (
                 inst.get("machine") or "pc9821", accel,
                 ",pcspk-audiodev=snd" if sound else "",
                 # the CD-ROM drive plays a disc's audio tracks itself, and
@@ -3047,7 +3051,13 @@ def qemu_argv(inst):
                 # Say which way round it is either way round: a VM
                 # saved before this setting existed has nothing
                 # recorded, and off is what it was running as.
-                ",ga98nb=on" if inst.get("ga98nb") else ",ga98nb=off"),
+                ",ga98nb=on" if inst.get("ga98nb") else ",ga98nb=off",
+                # The window accelerator built into the later
+                # PC-9821s is found by Windows ahead of the display
+                # the machine would otherwise use, so it decides
+                # which driver the guest ends up running.  Named
+                # either way for the same reason the card above is.
+                ",wab=on" if inst.get("wab") else ",wab=off"),
             "-m", inst.get("memory") or "64M",
             # PC-98 is a JIS keyboard; use the Japanese VNC keymap
             "-k", "ja",
