@@ -3024,8 +3024,14 @@ def qemu_argv(inst):
     # so a VM saved back when they were settings still comes up as the same
     # machine.  A PC-9801 has none of them -- its machine type does not
     # carry the coregraph property at all -- so it gets the bare line.
-    machine_opts = (",pegc=on,ga98nb=on,coregraph=off,wab=off"
-                    if machine == "pc9821" else "")
+    # PEGC lives in the bundled compatibility BIOS only: QEMU refuses the
+    # pair outright, so a PC-9821 set to boot a real ROM dump gets the
+    # card and the two negatives, and takes its 256 colours from the
+    # dump's own PEGC support instead.
+    machine_opts = ""
+    if machine == "pc9821":
+        machine_opts = ((",pegc=on" if inst.get("bios") != "real" else "")
+                        + ",ga98nb=on,coregraph=off,wab=off")
     argv = [CONFIG["qemu"],
             "-M", "%s,accel=%s%s%s%s" % (
                 machine, accel,

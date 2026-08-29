@@ -1434,6 +1434,7 @@ async function detailView(name) {
     (i.machine === 'towns' ? '' :
      '<tr><td style="color:#8d99a5">Display</td><td>' +
      (i.machine === 'pc9801' ? 'PC-9801 standard'
+      : i.bios === 'real' ? 'GA-98NB (PEGC from the real ROM)'
       : 'PEGC + GA-98NB') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
     (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
@@ -2701,8 +2702,11 @@ function drawConfirm() {
                                 ? 'KVM (Experimental)'
                                                    : 'TCG only'],
                 ['Snapshot', v.snapshot ? 'yes' : 'no'],
+                ['BIOS', v.bios === 'real' ? 'real machine ROMs'
+                         : 'compatible'],
                 ['Display', v.machine === 'pc9801' ? 'PC-9801 standard'
                             : v.machine === 'towns' ? 'TOWNS'
+                            : v.bios === 'real' ? 'GA-98NB (PEGC from the real ROM)'
                             : 'PEGC + GA-98NB'],
                 ['Network', v.net === 'nat' ? 'NAT (LGY-98)'
                             : v.net === 'bridge' ? 'Bridge (LGY-98)'
