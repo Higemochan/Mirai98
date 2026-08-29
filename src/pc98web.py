@@ -3024,8 +3024,8 @@ def qemu_argv(inst):
     # so a VM saved back when they were settings still comes up as the same
     # machine.  A PC-9801 has none of them -- its machine type does not
     # carry the coregraph property at all -- so it gets the bare line.
-    display = (",pegc=on,ga98nb=on,coregraph=off,wab=off"
-               if machine == "pc9821" else "")
+    machine_opts = (",pegc=on,ga98nb=on,coregraph=off,wab=off"
+                    if machine == "pc9821" else "")
     argv = [CONFIG["qemu"],
             "-M", "%s,accel=%s%s%s%s" % (
                 machine, accel,
@@ -3036,7 +3036,7 @@ def qemu_argv(inst):
                 # same mix, so a machine with no board to hear it through
                 # has nowhere to put it either.
                 ",audiodev=snd" if sound else "",
-                display),
+                machine_opts),
             "-m", inst.get("memory") or "64M",
             # PC-98 is a JIS keyboard; use the Japanese VNC keymap
             "-k", "ja",
