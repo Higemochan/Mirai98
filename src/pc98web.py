@@ -1177,6 +1177,14 @@ _procs = {}                      # name -> Popen, for children we started
 _cpu_cache = {}                  # name -> (pid, ticks, when)
 
 
+def real_font_present():
+    """Whether the ROM shelf holds a font dumped from a real machine."""
+    try:
+        return os.path.isfile(os.path.join(CONFIG["roms"], "pc98font.bin"))
+    except (KeyError, OSError):
+        return False
+
+
 def load_instance(index):
     path = os.path.join(inst_dir(index), "vm.xml")
     try:
@@ -1190,6 +1198,7 @@ def load_instance(index):
             "net": root.findtext("net") or "",
             "machine": root.findtext("machine") or "pc9821",
             "bios": root.findtext("bios") or "compat",
+            "font": "real" if real_font_present() else "compat",
             "accel": root.findtext("accel") or "tcg",
             "sound": root.findtext("sound") or DEFAULT_SOUND,
             "midi": root.findtext("midi") or "",
@@ -3028,10 +3037,8 @@ def qemu_argv(inst):
     # pair outright, so a PC-9821 set to boot a real ROM dump gets the
     # card and the two negatives, and takes its 256 colours from the
     # dump's own PEGC support instead.
-    machine_opts = ""
-    if machine == "pc9821":
-        machine_opts = ((",pegc=on" if inst.get("bios") != "real" else "")
-                        + ",ga98nb=on,coregraph=off,wab=off")
+    machine_opts = (",pegc=on,ga98nb=on,coregraph=off,wab=off"
+                    if machine == "pc9821" else "")
     argv = [CONFIG["qemu"],
             "-M", "%s,accel=%s%s%s%s" % (
                 machine, accel,
@@ -3051,16 +3058,12 @@ def qemu_argv(inst):
             # every guest this runs -- shows the same wall clock as the
             # machine it is running on.
             "-rtc", "base=localtime"]
-    # QEMU searches -L paths in order, so putting the uploaded ROMs first
-    # lets a partial real set fall through to the compatible ones
-    if inst.get("bios") == "real":
-        # -L does not recurse, so the machine's own ROM directory has to be
-        # named outright; the shelf behind it still answers for what the
-        # machines share, and for a set dropped straight into it.
-        pc98_roms = (CONFIG.get("pc98_roms")
-                     or os.path.join(CONFIG["roms"], "pc98"))
-        if os.path.isdir(pc98_roms):
-            argv += ["-L", win_short(pc98_roms)]
+    # The compatibility BIOS is what this boots: PEGC lives in it, and a
+    # real dump refuses the pair outright.  The one piece of a real machine
+    # worth keeping is its font, so when the shelf holds one the shelf goes
+    # first -- QEMU takes the first -L that answers, and the shelf carries
+    # no BIOS of its own, so only the font comes from there.
+    if real_font_present():
         argv += ["-L", win_short(CONFIG["roms"])]
     # the boards play into a null backend; the VNC server captures that
     # mix and hands it to any client that asks, so the browser hears them

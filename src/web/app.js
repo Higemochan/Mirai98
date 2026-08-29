@@ -782,9 +782,9 @@ function hardwareTable(i) {
                 ['&#9881; Machine', esc(i.machine || 'pc9821') + ' (' +
                  (i.accel === 'tcg' ? 'TCG'
                   : 'KVM (Experimental)') + ')'],
-                ['&#9750; BIOS', i.bios === 'real'
-                 ? 'real machine ROMs, compatible for the rest'
-                 : 'compatible'],
+                ['&#9750; BIOS', 'compatible'],
+                ['&#9636; Font', i.font === 'real' ? 'real machine ROM'
+                                                   : 'compatible'],
                 ['&#9834; Sound', soundName(i.sound)],
                 ['&#9834; MIDI', midiName(i.midi)],
                 ['&#9635; Display', 'VNC :' + (i.ports[0] - 5900) +
@@ -818,7 +818,7 @@ function hardwareRows(rows) {
 function biosLabel(i) {
   const custom = window.MiraiPlugins.hardware[i.machine];
   const b = custom && custom(i, { esc }).bios;
-  return b || (i.bios === 'real' ? 'real machine ROMs' : 'compatible');
+  return b || 'compatible';
 }
 
 function editForm(i) {
@@ -842,11 +842,6 @@ function editForm(i) {
     '" placeholder="/data/share"> <span class="note">appears as an IDE ' +
     'disk (fat98)</span></div>' +
     portRows(i) +
-    '<div class="row"><label>BIOS</label><select name="bios">' +
-    [['compat','Compatible'], ['real','Real machine ROMs']].map(
-      ([v, label]) => '<option value="' + v + '"' +
-        ((i.bios || 'compat') === v ? ' selected' : '') + '>' + label +
-        '</option>').join('') + '</select></div>' +
     '<div class="row"><label>Memory</label><select name="memory">' +
     MEMS.map(m => '<option' + (i.memory === m ? ' selected' : '') + '>' +
              m + '</option>').join('') + '</select></div>' +
@@ -1415,6 +1410,9 @@ async function detailView(name) {
     '<div style="flex:1;min-width:18em"><dl>' +
     '<dt>Machine type</dt><dd>' + esc(i.machine || 'pc9821') + '</dd>' +
     '<dt>BIOS</dt><dd>' + biosLabel(i) + '</dd>' +
+    (i.machine === 'towns' ? '' :
+     '<dt>Font</dt><dd>' + (i.font === 'real' ? 'real machine ROM'
+                                              : 'compatible') + '</dd>') +
     '<dt>Acceleration</dt><dd>' + (i.accel === 'tcg' ? 'TCG'
                      : 'KVM (Experimental)') + '</dd>' +
     '<dt>Memory</dt><dd>' + esc(i.memory) + '</dd>' +
@@ -1434,7 +1432,6 @@ async function detailView(name) {
     (i.machine === 'towns' ? '' :
      '<tr><td style="color:#8d99a5">Display</td><td>' +
      (i.machine === 'pc9801' ? 'PC-9801 standard'
-      : i.bios === 'real' ? 'GA-98NB (PEGC from the real ROM)'
       : 'PEGC + GA-98NB') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
     (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
@@ -2693,8 +2690,10 @@ function drawConfirm() {
   const desc = hw ? hw(v, { esc }) : {};
   const rows = [['Name', v.name || '(unnamed)'],
                 ['Machine type', v.machine],
-                ['BIOS', desc.bios || (v.bios === 'real' ? 'real machine ROMs'
-                                                         : 'compatible')],
+                ['BIOS', desc.bios || 'compatible'],
+                ['Font', v.machine === 'towns' ? '-'
+                         : v.font === 'real' ? 'real machine ROM'
+                                             : 'compatible'],
                 ['Memory', v.memory],
                 ['Sound', desc.sound || soundName(v.sound)],
                 ['MIDI', midiName(v.midi)],
@@ -2702,11 +2701,12 @@ function drawConfirm() {
                                 ? 'KVM (Experimental)'
                                                    : 'TCG only'],
                 ['Snapshot', v.snapshot ? 'yes' : 'no'],
-                ['BIOS', v.bios === 'real' ? 'real machine ROMs'
-                         : 'compatible'],
+                ['BIOS', 'compatible'],
+                ['Font', v.machine === 'towns' ? '-'
+                         : v.font === 'real' ? 'real machine ROM'
+                                             : 'compatible'],
                 ['Display', v.machine === 'pc9801' ? 'PC-9801 standard'
                             : v.machine === 'towns' ? 'TOWNS'
-                            : v.bios === 'real' ? 'GA-98NB (PEGC from the real ROM)'
                             : 'PEGC + GA-98NB'],
                 ['Network', v.net === 'nat' ? 'NAT (LGY-98)'
                             : v.net === 'bridge' ? 'Bridge (LGY-98)'
