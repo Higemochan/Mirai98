@@ -263,8 +263,10 @@ JA['The extension is added for you. Anex86 .hdi cannot be made here: upload one 
   '取り込めば変換されます。';
 JA['PC-98 (FAT, flat)'] = 'PC-98 (FAT・ベタ)';
 JA['PC-98 (FAT, grows on demand)'] = 'PC-98 (FAT・必要に応じて拡大)';
-JA['.fdi or .raw. Formatted, empty.'] =
-  '.fdi または .raw。フォーマット済みの空ディスクです。';
+JA['The extension is added for you. Formatted, empty. A name already '
+   + 'ending in .raw, .img, .fdi, .nfd or .d88 keeps it.'] =
+  '拡張子はこちらで付けます。フォーマット済みの空ディスクです。'
+  + '.raw / .img / .fdi / .nfd / .d88 で終わる名前はそのまま使います。';
 JA['not uploaded, the compatible ROM stands in'] =
   '未アップロード（互換ROMで代用）';
 JA['A machine set to the real BIOS uses these and falls back to the ' +
@@ -1670,12 +1672,14 @@ function storageCard(kind, files) {
   else if (kind === 'fdd')
     create = '<h4>Create a floppy</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'fdd\')" class="row">' +
-      '<input type="text" name="name" placeholder="new-floppy.fdi" ' +
+      '<input type="text" name="name" placeholder="new-floppy" ' +
       'required style="min-width:11em"><select name="format">' +
-      '<option value="1.2">1.2 (PC-98)</option>' +
-      '<option value="1.44">1.44 (PC-98)</option>' + extraOpts + '</select>' +
+      '<option value="1.2">1.25MB 2HD (raw)</option>' +
+      '<option value="1.44">1.44MB 2HD (raw)</option>' + extraOpts + '</select>' +
       '<button class="primary">Create</button></form>' +
-      '<div class="note">.fdi or .raw. Formatted, empty.</div>' +
+      '<div class="note">The extension is added for you. Formatted, empty. ' +
+      'A name already ending in .raw, .img, .fdi, .nfd or .d88 keeps it.' +
+      '</div>' +
       extraNotes + '</div>';
   return '<div class="card" id="storage-' + kind + '"><h3>disks/' + kind +
     '/</h3>' +

@@ -173,6 +173,11 @@ PLUGIN_FIELDS = {}
 MACHINE_SANITIZE = {}
 # (kind, format) -> fn(dest, data): a plugin's own image builder for the
 # Storage "Create" form (kind is hdd or fdd; format the value it registered)
+# Containers a floppy on this shelf may already be named for.  A name
+# carrying anything else is given the shelf's own .raw, appended rather
+# than replaced, so a deliberate .fdi or .nfd survives.
+FDD_CONTAINERS = (".raw", ".img", ".fdi", ".nfd", ".d88")
+
 DISK_BUILDERS = {}
 # (machine, action) -> fn(inst, data) -> reply dict | (status, message):
 # a plugin's own POST /api/instances/<name>/x/<action>
@@ -5132,6 +5137,14 @@ class Handler(BaseHTTPRequestHandler):
             # guest it was made for.
             name = re.sub(r"\.(raw|img|hdi|qcow2)$", "", name, flags=re.I)
             name += ".qcow2" if fmt == "qcow2" else ".raw"
+        elif kind == "fdd" and (kind, fmt) not in DISK_BUILDERS:
+            # The courtesy the hard disk already had.  A floppy left
+            # without an extension was not merely unlabelled: virtpc98
+            # puts an Anex86 header in front of anything that is not
+            # .raw or .img, so the image came out with 4096 bytes ahead
+            # of its boot sector and no PC-98 could read it.
+            if os.path.splitext(name)[1].lower() not in FDD_CONTAINERS:
+                name += ".raw"
         if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return
