@@ -1187,10 +1187,6 @@ def load_instance(index):
                     or "vm-%d" % index, "index": index,
             "memory": root.findtext("memory") or "64M",
             "snapshot": (root.findtext("snapshot") or "no") == "yes",
-            "pegc": (root.findtext("pegc") or "no") == "yes",
-            "ga98nb": (root.findtext("ga98nb") or "no") == "yes",
-            "wab": (root.findtext("wab") or "no") == "yes",
-            "coregraph": (root.findtext("coregraph") or "no") == "yes",
             "net": root.findtext("net") or "",
             "machine": root.findtext("machine") or "pc9821",
             "bios": root.findtext("bios") or "compat",
@@ -1227,14 +1223,6 @@ def save_instance(inst):
         ET.SubElement(root, "midi").text = inst["midi"]
     ET.SubElement(root, "snapshot").text = ("yes" if inst.get("snapshot")
                                             else "no")
-    if inst.get("pegc"):
-        ET.SubElement(root, "pegc").text = "yes"
-    if inst.get("ga98nb"):
-        ET.SubElement(root, "ga98nb").text = "yes"
-    if inst.get("wab"):
-        ET.SubElement(root, "wab").text = "yes"
-    if inst.get("coregraph"):
-        ET.SubElement(root, "coregraph").text = "yes"
     if inst.get("net"):
         ET.SubElement(root, "net").text = inst["net"]
     for key in ("serial", "parallel", "gpib"):
@@ -1328,10 +1316,6 @@ def sanitize(data, taken_names=()):
     record = {"name": name,
               "memory": str(data.get("memory") or "64M"),
               "snapshot": bool(data.get("snapshot")),
-              "pegc": bool(data.get("pegc")),
-              "ga98nb": bool(data.get("ga98nb")),
-              "wab": bool(data.get("wab")),
-              "coregraph": bool(data.get("coregraph")),
               "net": str(data.get("net") or ""),
               "machine": str(data.get("machine") or "pc9821"),
               "bios": str(data.get("bios") or "compat"),
@@ -3033,9 +3017,18 @@ def qemu_argv(inst):
     fm, pcm = SOUNDS[sound_of(inst)]
     midi = MIDI_MODES.get(inst.get("midi") or "")
     sound = fm or pcm or midi
+    machine = inst.get("machine") or "pc9821"
+    # The PC-9821 this emulates is one machine rather than a menu: PEGC
+    # for its 256 colours and a GA-98NB beside it, and neither the window
+    # accelerator nor the built-in Cirrus.  Name all four either way round,
+    # so a VM saved back when they were settings still comes up as the same
+    # machine.  A PC-9801 has none of them -- its machine type does not
+    # carry the coregraph property at all -- so it gets the bare line.
+    display = (",pegc=on,ga98nb=on,coregraph=off,wab=off"
+               if machine == "pc9821" else "")
     argv = [CONFIG["qemu"],
-            "-M", "%s,accel=%s%s%s%s%s%s%s" % (
-                inst.get("machine") or "pc9821", accel,
+            "-M", "%s,accel=%s%s%s%s" % (
+                machine, accel,
                 ",pcspk-audiodev=snd" if sound else "",
                 # the CD-ROM drive plays a disc's audio tracks itself, and
                 # needs to be told where they go.  On the real machines that
@@ -3043,32 +3036,7 @@ def qemu_argv(inst):
                 # same mix, so a machine with no board to hear it through
                 # has nowhere to put it either.
                 ",audiodev=snd" if sound else "",
-                # PEGC (256-colour packed pixel) is what the Windows 9x
-                # display driver needs.  QEMU only implements it behind
-                # the bundled compatibility BIOS; asking for both is
-                # passed through so QEMU says so and stops, rather than
-                # starting a machine whose guest will never come up.
-                ",pegc=on" if inst.get("pegc") else "",
-                # The GA-98NB is a card rather than part of the
-                # machine, and a guest that finds one binds its own
-                # driver to it in place of the built-in display.
-                # Say which way round it is either way round: a VM
-                # saved before this setting existed has nothing
-                # recorded, and off is what it was running as.
-                ",ga98nb=on" if inst.get("ga98nb") else ",ga98nb=off",
-                # The window accelerator built into the later
-                # PC-9821s is found by Windows ahead of the display
-                # the machine would otherwise use, so it decides
-                # which driver the guest ends up running.  Named
-                # either way for the same reason the card above is.
-                ",wab=on" if inst.get("wab") else ",wab=off",
-                # The Cirrus GD5440 wired into the later PC-9821s is
-                # part of the machine rather than a card, and a guest
-                # that finds it binds to it ahead of the plain
-                # display.  Named either way round for the same
-                # reason the two above are.
-                ",coregraph=on" if inst.get("coregraph")
-                else ",coregraph=off"),
+                display),
             "-m", inst.get("memory") or "64M",
             # PC-98 is a JIS keyboard; use the Japanese VNC keymap
             "-k", "ja",

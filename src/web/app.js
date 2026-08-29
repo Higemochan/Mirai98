@@ -870,18 +870,6 @@ function editForm(i) {
       ([v, label]) => '<option value="' + v + '"' +
         ((i.net || '') === v ? ' selected' : '') + '>' + label +
         '</option>').join('') + '</select></div>' +
-    '<div class="row"><label>PEGC</label>' +
-    '<label class="check"><input type="checkbox" name="pegc"' +
-    (i.pegc ? ' checked' : '') + '> 256-colour packed pixel</label></div>' +
-    '<div class="row"><label>GA-98NB</label>' +
-    '<label class="check"><input type="checkbox" name="ga98nb"' +
-    (i.ga98nb ? ' checked' : '') + '> graphics accelerator</label></div>' +
-    '<div class="row"><label>WAB</label>' +
-    '<label class="check"><input type="checkbox" name="wab"' +
-    (i.wab ? ' checked' : '') + '> built-in window accelerator</label></div>' +
-    '<div class="row"><label>Core-Graph</label>' +
-    '<label class="check"><input type="checkbox" name="coregraph"' +
-    (i.coregraph ? ' checked' : '') + '> built-in PCI Cirrus GD5440</label></div>' +
     '<div class="row"><label>Snapshot</label>' +
     '<label class="check"><input type="checkbox" name="snapshot"' +
     (i.snapshot ? ' checked' : '') + '> discard changes</label></div>' +
@@ -1444,14 +1432,9 @@ async function detailView(name) {
     (disks.length + ' disk' + (disks.length === 1 ? '' : 's')) +
     (i.snapshot ? ', changes discarded at shutdown' : '') + '</td></tr>' +
     (i.machine === 'towns' ? '' :
-     '<tr><td style="color:#8d99a5">PEGC</td><td>' +
-     (i.pegc ? 'on, 256-colour packed pixel' : 'off') + '</td></tr>' +
-     '<tr><td style="color:#8d99a5">GA-98NB</td><td>' +
-     (i.ga98nb ? 'on, graphics accelerator' : 'off') + '</td></tr>' +
-     '<tr><td style="color:#8d99a5">WAB</td><td>' +
-     (i.wab ? 'on, built-in window accelerator' : 'off') + '</td></tr>' +
-     '<tr><td style="color:#8d99a5">Core-Graph</td><td>' +
-     (i.coregraph ? 'on, built-in PCI Cirrus GD5440' : 'off') + '</td></tr>') +
+     '<tr><td style="color:#8d99a5">Display</td><td>' +
+     (i.machine === 'pc9801' ? 'PC-9801 standard'
+      : 'PEGC + GA-98NB') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
     (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
     '<tr><td style="color:#8d99a5">Serial port</td><td>' +
@@ -2718,10 +2701,9 @@ function drawConfirm() {
                                 ? 'KVM (Experimental)'
                                                    : 'TCG only'],
                 ['Snapshot', v.snapshot ? 'yes' : 'no'],
-                ['PEGC', v.pegc ? 'on' : 'off'],
-                ['GA-98NB', v.ga98nb ? 'on' : 'off'],
-                ['WAB', v.wab ? 'on' : 'off'],
-                ['Core-Graph', v.coregraph ? 'on' : 'off'],
+                ['Display', v.machine === 'pc9801' ? 'PC-9801 standard'
+                            : v.machine === 'towns' ? 'TOWNS'
+                            : 'PEGC + GA-98NB'],
                 ['Network', v.net === 'nat' ? 'NAT (LGY-98)'
                             : v.net === 'bridge' ? 'Bridge (LGY-98)'
                             : 'none']];
