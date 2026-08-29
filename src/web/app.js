@@ -879,6 +879,9 @@ function editForm(i) {
     '<div class="row"><label>WAB</label>' +
     '<label class="check"><input type="checkbox" name="wab"' +
     (i.wab ? ' checked' : '') + '> built-in window accelerator</label></div>' +
+    '<div class="row"><label>Core-Graph</label>' +
+    '<label class="check"><input type="checkbox" name="coregraph"' +
+    (i.coregraph ? ' checked' : '') + '> built-in PCI Cirrus GD5440</label></div>' +
     '<div class="row"><label>Snapshot</label>' +
     '<label class="check"><input type="checkbox" name="snapshot"' +
     (i.snapshot ? ' checked' : '') + '> discard changes</label></div>' +
@@ -1446,7 +1449,9 @@ async function detailView(name) {
      '<tr><td style="color:#8d99a5">GA-98NB</td><td>' +
      (i.ga98nb ? 'on, graphics accelerator' : 'off') + '</td></tr>' +
      '<tr><td style="color:#8d99a5">WAB</td><td>' +
-     (i.wab ? 'on, built-in window accelerator' : 'off') + '</td></tr>') +
+     (i.wab ? 'on, built-in window accelerator' : 'off') + '</td></tr>' +
+     '<tr><td style="color:#8d99a5">Core-Graph</td><td>' +
+     (i.coregraph ? 'on, built-in PCI Cirrus GD5440' : 'off') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
     (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
     '<tr><td style="color:#8d99a5">Serial port</td><td>' +
@@ -2716,6 +2721,7 @@ function drawConfirm() {
                 ['PEGC', v.pegc ? 'on' : 'off'],
                 ['GA-98NB', v.ga98nb ? 'on' : 'off'],
                 ['WAB', v.wab ? 'on' : 'off'],
+                ['Core-Graph', v.coregraph ? 'on' : 'off'],
                 ['Network', v.net === 'nat' ? 'NAT (LGY-98)'
                             : v.net === 'bridge' ? 'Bridge (LGY-98)'
                             : 'none']];
