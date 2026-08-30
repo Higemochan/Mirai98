@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keyboard check</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  body { padding: 1em 1.4em; display: block !important; }
+  .card { display: block !important; width: auto !important;
+          float: none !important; margin: .8em 0; padding: .8em 1em; }
+  #last { font-size: 1.1em; }
+  table { border-collapse: collapse; margin: .4em 0; }
+  td, th { border: 1px solid #46505c; padding: .25em .7em; text-align: left; }
+  th { width: 8em; }
+  .hit { color: #7fc98f; font-weight: bold; }
+  .miss { color: #e06c5f; }
+  code { background: #222831; padding: .1em .35em; border-radius: .2em; }
+  #log { max-height: 14em; overflow: auto; font-family: monospace;
+         font-size: .85em; line-height: 1.5; }
+</style>
+
+<h2>Keyboard check</h2>
+
+<div class="card">
+  <p>Press a key. This page only reports what the browser calls it &mdash;
+  it talks to no machine, so it can be opened with none running.</p>
+  <p class="note">What matters for the Japanese keys: a Mac JIS keyboard
+  should report <code>Lang2</code> for 英数 and <code>Lang1</code> for かな.
+  Some browsers keep those keys for switching their own input source and
+  never tell the page at all; then nothing appears below when you press
+  them, and this manager cannot send them either.</p>
+</div>
+
+<div class="card">
+  <h3>Last key</h3>
+  <div id="last" class="note">nothing pressed yet</div>
+  <table>
+    <tr><th>event.code</th><td id="c">&mdash;</td></tr>
+    <tr><th>event.key</th><td id="k">&mdash;</td></tr>
+    <tr><th>event.keyCode</th><td id="w">&mdash;</td></tr>
+    <tr><th>event.location</th><td id="l">&mdash;</td></tr>
+    <tr><th>sent to the guest</th><td id="s">&mdash;</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Log</h3>
+  <div id="log"></div>
+  <p><button type="button" id="clear">Clear</button></p>
+</div>
+
+<script>
+  // What this manager makes of the two keys, once the console is open.
+  // Keep in step with patchXtScancodesForJIS() in app.js.
+  var SENT = {
+    Lang2: '\u7121\u5909\u63db (NFER) \u2014 AT set-1 0x7b \u2192 PC-98 0x51',
+    Lang1: '\u5909\u63db (XFER) \u2014 AT set-1 0x79 \u2192 PC-98 0x35',
+    NonConvert: '\u7121\u5909\u63db (NFER) \u2014 AT set-1 0x7b \u2192 PC-98 0x51',
+    Convert: '\u5909\u63db (XFER) \u2014 AT set-1 0x79 \u2192 PC-98 0x35'
+  };
+  var log = document.getElementById('log');
+  function show(e, kind) {
+    e.preventDefault();
+    var code = e.code || '(none)';
+    document.getElementById('c').textContent = code;
+    document.getElementById('k').textContent = e.key || '(none)';
+    document.getElementById('w').textContent = e.keyCode;
+    document.getElementById('l').textContent = e.location;
+    var sent = SENT[e.code];
+    var s = document.getElementById('s');
+    s.textContent = sent || 'the usual key for this code';
+    s.className = sent ? 'hit' : '';
+    var head = document.getElementById('last');
+    if (sent) {
+      head.textContent = code + ' \u2014 this one reaches the page';
+      head.className = 'hit';
+    } else {
+      head.textContent = code;
+      head.className = 'note';
+    }
+    var row = document.createElement('div');
+    row.textContent = kind + '  code=' + code + '  key=' + (e.key || '') +
+                      '  keyCode=' + e.keyCode;
+    if (sent) row.className = 'hit';
+    log.insertBefore(row, log.firstChild);
+    while (log.childNodes.length > 200) log.removeChild(log.lastChild);
+  }
+  window.addEventListener('keydown', function (e) { show(e, 'down'); });
+  window.addEventListener('keyup', function (e) { show(e, 'up  '); });
+  document.getElementById('clear').addEventListener('click', function () {
+    log.textContent = '';
+  });
+</script>

@@ -1161,6 +1161,21 @@ function patchRFBForRelativePointer() {
   RFB.messages._miraiRelPatched = true;
 }
 
+// A Mac's JIS keyboard has 英数 and かな where a PC/AT one has the Alt keys,
+// and the browser reports them as code "Lang2" and "Lang1".  noVNC's scan-code
+// table maps those two to the Korean Hanja/Hangeul codes (0x71/0x72), which
+// the PC-98 keyboard has no key for, so they arrive at the guest as nothing.
+// The PC-98 keys a Japanese typist wants there are 無変換 (NFER) and 変換
+// (XFER); QEMU already translates AT set-1 0x7b and 0x79 into those, so the
+// whole fix is to point the two entries at the codes that do land.
+let xtScancodes = null;
+async function patchXtScancodesForJIS() {
+  if (xtScancodes) return;
+  xtScancodes = (await import('/novnc/core/input/xtscancodes.js')).default;
+  xtScancodes['Lang2'] = 0x7b;   // 英数 -> 無変換 (NFER)
+  xtScancodes['Lang1'] = 0x79;   // かな -> 変換   (XFER)
+}
+
 function captureRelativePointer(rfb, target) {
   const RFB = rfb.constructor;
   const CENTER = 0x7FFF;
@@ -1263,6 +1278,7 @@ window.connectConsole = async (name, ws) => {
   // handshake advertises the client encodings, i.e. before the RFB object
   // exists; plugins get the same chance to prepare the connection
   patchRFBForRelativePointer();
+  await patchXtScancodesForJIS();
   for (const fn of (window.MiraiPlugins.consolePrep || [])) {
     try { await fn(name); } catch (e) { console.error('console prep', e); }
   }

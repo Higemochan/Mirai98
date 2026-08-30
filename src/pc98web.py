@@ -3544,10 +3544,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/":
             self.page("index.html")
-        elif path in ("/app.js", "/style.css", "/gamepad.html"):
+        elif path in ("/app.js", "/style.css", "/gamepad.html",
+                      "/keytest.html"):
             # gamepad.html answers one question on its own: whether this
             # browser will show a controller to a page at all.  It talks to
-            # no machine, so it can be opened with none running.
+            # no machine, so it can be opened with none running.  keytest.html
+            # answers the same kind of question for the keyboard: what this
+            # browser calls the key you just pressed.
             self.page(path[1:])
         elif (path.startswith("/plugins/") and path.endswith(".js")
               and ".." not in path):
