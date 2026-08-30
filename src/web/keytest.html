@@ -39,6 +39,7 @@
     <tr><th>event.keyCode</th><td id="w">&mdash;</td></tr>
     <tr><th>event.location</th><td id="l">&mdash;</td></tr>
     <tr><th>sent to the guest</th><td id="s">&mdash;</td></tr>
+    <tr><th>key macro mode</th><td id="m">&mdash;</td></tr>
   </table>
 </div>
 
@@ -57,6 +58,21 @@
     NonConvert: '\u7121\u5909\u63db (NFER) \u2014 AT set-1 0x7b \u2192 PC-98 0x51',
     Convert: '\u5909\u63db (XFER) \u2014 AT set-1 0x79 \u2192 PC-98 0x35'
   };
+  // Keep IME_KEY_MODE in step with app.js.  What each mode sends for the
+  // two keys, written the way a person would read it out.
+  var IME_KEY_MODE = 'passthrough';
+  var COMBOS = {
+    mac:    {Lang2: ['Shift+\u7121\u5909\u63db'],
+             Lang1: ['Shift+\u7121\u5909\u63db', 'Ctrl+\u5909\u63db']},
+    eisu:   {Lang2: ['Shift+\u7121\u5909\u63db']},
+    toggle: {Lang2: ['Ctrl+\u5909\u63db'], Lang1: ['Ctrl+\u5909\u63db']},
+    passthrough: null
+  };
+  function comboFor(code) {
+    var set = COMBOS[IME_KEY_MODE];
+    var steps = set && set[code];
+    return steps ? steps.join('  \u2192  ') : null;
+  }
   var log = document.getElementById('log');
   function show(e, kind) {
     e.preventDefault();
@@ -65,7 +81,8 @@
     document.getElementById('k').textContent = e.key || '(none)';
     document.getElementById('w').textContent = e.keyCode;
     document.getElementById('l').textContent = e.location;
-    var sent = SENT[e.code];
+    var combo = comboFor(e.code);
+    var sent = combo ? (combo + '   (' + IME_KEY_MODE + ')') : SENT[e.code];
     var s = document.getElementById('s');
     s.textContent = sent || 'the usual key for this code';
     s.className = sent ? 'hit' : '';
@@ -84,6 +101,8 @@
     log.insertBefore(row, log.firstChild);
     while (log.childNodes.length > 200) log.removeChild(log.lastChild);
   }
+  document.getElementById('m').textContent = IME_KEY_MODE +
+    (COMBOS[IME_KEY_MODE] ? '' : ' (one key for one key, no combinations)');
   window.addEventListener('keydown', function (e) { show(e, 'down'); });
   window.addEventListener('keyup', function (e) { show(e, 'up  '); });
   document.getElementById('clear').addEventListener('click', function () {

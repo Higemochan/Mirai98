@@ -121,6 +121,7 @@ const TABS = ["General","Disks","Host","Memory","Sound","Network",
 const view = document.getElementById('view');
 let rfb = null, consoleWatch = null, consoleFbWatch = null;
 let consolePointerStop = null;
+let imeKeyStop = null;
 let catalog = {hdd:[], fdd:[], cdrom:[]};
 let instances = [], hostFacts = {}, tab = 0;
 let hardware = {drives: [], serial: []}, autoConnect = '', facts = {};
@@ -1176,6 +1177,118 @@ async function patchXtScancodesForJIS() {
   xtScancodes['Lang1'] = 0x79;   // かな -> 変換   (XFER)
 }
 
+// The two keys above land on the guest, but on a PC-98 they are not what a
+// Mac typist means by them.  Measured on Windows 98 with MS-IME: 変換 on its
+// own does nothing at all, 無変換 walks the input mode round (hiragana ->
+// full-width katakana -> ...), Shift+無変換 goes to direct input, and
+// Ctrl+変換 turns the IME on or off.  Only Shift+無変換 names a state
+// outright; the rest move relative to wherever the IME already was.
+//
+// So the かな key drops the IME into direct input first and only then turns
+// it on: both keys then land on the same state however often they are
+// pressed.  A combination is sent as the DOM code noVNC wants, because
+// sendKey() uses the code for nothing but the XtScancode[] lookup, and the
+// two entries patched above already carry 変換 and 無変換.
+//
+// AltRight is deliberately absent from Grph: the guest's scan-code table
+// sends it as かな (a locking key), not GRPH, so it must never count as a
+// modifier that is already held.
+const IME_KEYS = {
+  Shift: {sym: 0xffe1, codes: ['ShiftLeft', 'ShiftRight']},
+  Ctrl:  {sym: 0xffe3, codes: ['ControlLeft', 'ControlRight']},
+  Grph:  {sym: 0xffe9, codes: ['AltLeft']},
+  Xfer:  {sym: 0xff23, codes: ['Lang1']},   // -> AT 0x79 -> PC-98 0x35 変換
+  Nfer:  {sym: 0xff22, codes: ['Lang2']}    // -> AT 0x7b -> PC-98 0x51 無変換
+};
+
+// Shift+無変換 takes two presses to reach direct input: a kana mode goes to
+// full-width alphanumeric first, and only that goes on to direct input.  So
+// the 英数 key sends it twice and lands there from anywhere.
+//
+// The かな key drops to direct input the same way, turns the IME back on, and
+// then walks whatever mode it came back in to hiragana: GRPH+無変換 pushes
+// every mode into the kana group, Shift+無変換 collapses that group onto
+// full-width alphanumeric, and 無変換 takes that to hiragana.
+const S = {mods: ['Shift'], key: 'Nfer'};   // Shift+無変換
+const C = {mods: ['Ctrl'],  key: 'Xfer'};   // Ctrl+変換
+const G = {mods: ['Grph'],  key: 'Nfer'};   // GRPH+無変換
+const N = {mods: [],        key: 'Nfer'};   // 無変換
+
+// GRPH+無変換 only does anything when SYSTEM.INI carries
+// [keyboard] MakeIMEVKey=yes; with the stock file it is inert, and without it
+// nothing measured brings the IME back out of direct input.  So 'mac' needs
+// that line in the guest, while 'eisu' works on a stock machine.
+const IME_MACRO_SETS = {
+  // 英数 -> direct input; かな -> hiragana.  Needs MakeIMEVKey=yes in the guest.
+  mac:    {Lang2: [S, S],
+           Lang1: [S, S, C, G, S, N]},
+  // only the 英数 key is redirected; かな keeps whatever it does today.
+  // Works on a stock guest: Shift+無変換 is the same with or without the line,
+  // and direct input is where it stops, so two presses land there from
+  // anywhere.
+  eisu:   {Lang2: [S, S]},
+  // both keys toggle the IME, which is not what a Mac keyboard promises
+  toggle: {Lang2: [C], Lang1: [C]},
+  // the one-to-one assignment patched above, untouched
+  passthrough: null
+};
+
+// 'mac' | 'eisu' | 'toggle' | 'passthrough'
+const IME_KEY_MODE = 'passthrough';
+
+// Wrapping _sendKeyEvent rather than onkeyevent is what makes the repeat
+// guard work: noVNC updates its own list of depressed keys before it calls
+// onkeyevent, so by then a first press and an auto-repeat look alike.  From
+// here the list is still untouched, and sharing it means the release noVNC
+// synthesises on blur (and the one Windows fakes for these keys) clears the
+// guard for free.
+function installImeKeyMacros(rfb) {
+  const macros = IME_MACRO_SETS[IME_KEY_MODE];
+  if (!macros) return null;
+  const kbd = rfb._keyboard;
+  const hadOwn = Object.prototype.hasOwnProperty.call(kbd, '_sendKeyEvent');
+  const prev = kbd._sendKeyEvent;
+  const orig = prev.bind(kbd);
+  const send = (name, down) => {
+    const k = IME_KEYS[name];
+    rfb.sendKey(k.sym, k.codes[0], down);
+  };
+  kbd._sendKeyEvent = function (keysym, code, down, numlock = null,
+                                capslock = null) {
+    // Without the QEMU extended key event only a keysym goes out, and a
+    // combination cannot be spelled that way; leave those connections alone.
+    const steps = rfb._qemuExtKeyEventSupported ? macros[code] : null;
+    if (!steps) return orig(keysym, code, down, numlock, capslock);
+    if (!down) {                            // the press already sent both
+      if (code in kbd._keyDownList) delete kbd._keyDownList[code];
+      return;
+    }
+    if (code in kbd._keyDownList) return;   // an auto-repeat, not a new press
+    kbd._keyDownList[code] = keysym;
+    for (const step of steps) {
+      // Modifiers the user is really holding are left alone.  Pressing one
+      // again makes QEMU insert a break first, so releasing it afterwards
+      // would let go of a key the user still has down.
+      const add = step.mods.filter(
+        m => !IME_KEYS[m].codes.some(c => c in kbd._keyDownList));
+      try {
+        for (const m of add) send(m, true);
+        send(step.key, true);
+        send(step.key, false);
+      } finally {
+        for (const m of add.slice().reverse()) send(m, false);
+      }
+    }
+  };
+  // Put the keyboard back the way it was found.  The method comes from the
+  // prototype, so undoing the wrap means taking away what was written over
+  // it rather than writing something else in its place.
+  return () => {
+    if (hadOwn) kbd._sendKeyEvent = prev;
+    else delete kbd._sendKeyEvent;
+  };
+}
+
 function captureRelativePointer(rfb, target) {
   const RFB = rfb.constructor;
   const CENTER = 0x7FFF;
@@ -1290,6 +1403,11 @@ window.connectConsole = async (name, ws) => {
   } catch (e) {
     console.error('pointer capture', e);
   }
+  try {
+    imeKeyStop = installImeKeyMacros(rfb);
+  } catch (e) {
+    console.error('ime key macros', e);
+  }
   // let plugins augment the console (e.g. the FM TOWNS gamepad)
   window._pluginConsoleCleanups = [];
   (window.MiraiPlugins.console || []).forEach(fn => {
@@ -1333,6 +1451,10 @@ window.disconnectConsole = () => {
   if (consolePointerStop) {
     try { consolePointerStop(); } catch (e) {}
     consolePointerStop = null;
+  }
+  if (imeKeyStop) {
+    try { imeKeyStop(); } catch (e) {}
+    imeKeyStop = null;
   }
   if (consoleWatch) { consoleWatch.disconnect(); consoleWatch = null; }
   if (consoleFbWatch) { consoleFbWatch.disconnect(); consoleFbWatch = null; }
