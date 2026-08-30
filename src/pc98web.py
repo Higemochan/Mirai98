@@ -3415,6 +3415,19 @@ class Handler(BaseHTTPRequestHandler):
         self.began = time.time()
         BaseHTTPRequestHandler.handle_one_request(self)
 
+    def parse_request(self):
+        # The request line is read before this, and on a connection that is
+        # being kept alive that read waits for the browser's next poll.
+        # Timing from before the wait made every request look as slow as the
+        # polling interval -- three seconds with the tab in front, a minute
+        # once the browser throttled it in the background -- which reads as a
+        # server that has slowed down when nothing has.  Start the clock once
+        # the request is actually in hand.  The stamp above stays as the one
+        # for requests that never get this far.
+        parsed = BaseHTTPRequestHandler.parse_request(self)
+        self.began = time.time()
+        return parsed
+
     def log_request(self, code="-", size="-"):
         # with the time it took: when the page feels slow, this says which
         # request to blame, which guessing does not
