@@ -1434,18 +1434,34 @@ window.connectConsole = async (name, ws) => {
     fitConsoleBox();
     enableAudioNow().catch(err => console.error('console sound', err));
   });
+  // Which connection this listener belongs to: a stale disconnect from a
+  // replaced one must not clear the connection that took its place.
+  const thisRfb = rfb;
   rfb.addEventListener('disconnect', () => {
     toast(name + ': console disconnected');
-    // the sound goes with it: left running, the worklet plays silence and
-    // reports it once a second for as long as the page is open
-    stopAudio();
+    if (rfb !== thisRfb) return;
+    // The guest powering itself off takes QEMU with it, and the socket
+    // closing is the only way the page hears about it.  Let go of the
+    // pointer and the keyboard before anything else, so the window is
+    // usable even if the reload below fails, and then ask the server what
+    // is actually running: that is what turns "Shut down" back into
+    // "Power on".  (The sound goes too: left running, the worklet plays
+    // silence and reports it once a second for as long as the page is open.)
+    rfb = null;
+    releaseConsoleHold();
+    render();
   });
   rfb.addEventListener('audiodata', e => audioChunk(e.detail.data));
   document.getElementById('btn-connect').style.display = 'none';
   for (const id of ['btn-disconnect','btn-cad','btn-expand','btn-audio'])
     document.getElementById(id).style.display = '';
 };
-window.disconnectConsole = () => {
+// Everything the console took hold of while it was open: the pointer, the
+// keyboard wrapper, the two observers, the sound.  A guest that powers itself
+// off closes the socket from its end, and then there is no connection left to
+// disconnect -- only these to let go of -- so this is separate from the
+// button's disconnect.  Calling it twice is harmless.
+function releaseConsoleHold() {
   (window._pluginConsoleCleanups || []).forEach(c => { try { c(); } catch (e) {} });
   window._pluginConsoleCleanups = [];
   if (consolePointerStop) {
@@ -1458,8 +1474,11 @@ window.disconnectConsole = () => {
   }
   if (consoleWatch) { consoleWatch.disconnect(); consoleWatch = null; }
   if (consoleFbWatch) { consoleFbWatch.disconnect(); consoleFbWatch = null; }
-  if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
   stopAudio();
+}
+window.disconnectConsole = () => {
+  releaseConsoleHold();
+  if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
 };
 window.toggleConsolePane = show => {
   const pane = document.getElementById('console-pane');
@@ -1643,6 +1662,15 @@ async function updateUsage(name) {
                       '/stats');
   if (!s || !document.getElementById('gauges')) return;
   const inst = instances.find(v => v.name === name) || {};
+  // The buttons and the state chip were drawn from the fleet list, which
+  // nothing refreshes while this view sits open.  A guest that stops on its
+  // own moves out from under them, and this reading is where the page finds
+  // out; redraw once so the machine can be started again from here.
+  if (inst.name !== undefined && inst.running !== undefined &&
+      inst.running !== s.running) {
+    render();
+    return;
+  }
   const gauge = (label, value, note) =>
     '<div style="display:flex;align-items:center;gap:.6em;' +
     'margin-bottom:.9em"><div style="flex:1;text-align:right">' +
