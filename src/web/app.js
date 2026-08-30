@@ -2618,8 +2618,22 @@ function sendSlice(url, blob) {
 // disc keeps the name it came with, kanji and spaces and all, and only
 // what would break something downstream is turned into '_'.  The length
 // is counted in bytes, as a filesystem counts it.
+// One spelling for a file name.  macOS hands the browser the decomposed
+// form -- the "de" of a title arrives as a bare "te" followed by a
+// combining voiced mark -- while the FILE line inside a .cue, and the
+// shelf's listing of the same disc uploaded from anywhere else, spell it
+// composed.  Compared as they come, one name reads as two: the check
+// below then says the sheet names a file that was not chosen, and the
+// upload is abandoned before a single request goes out.
+// nfcName composes and nothing else, for the places that told two names
+// apart by case and still should; nameKey also lowers, for the places
+// that already did.
+const nfcName = s => (s || '').normalize('NFC');
+const nameKey = s => nfcName(s).toLowerCase();
 function safeDiskName(name) {
-  let out = name.replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_')
+  // compose first: what is stored is the composed spelling, and the byte
+  // length below is the length of what is stored
+  let out = nfcName(name).replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, '_')
                 .trim().replace(/^\.+/, '').replace(/[ .]+$/, '');
   if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(out)) out = '_' + out;
   const bytes = new TextEncoder().encode(out);
@@ -2651,8 +2665,8 @@ async function uploadFiles(kind, files) {
   const plan = files.map(f => ({ file: f, name: safeDiskName(f.name) }));
   const cues = plan.filter(p => /\.(cue|mds|ccd)$/i.test(p.name));
   if (kind === 'cdrom' && cues.length) {
-    const have = new Set(plan.map(p => p.file.name.toLowerCase()));
-    const haveSafe = new Set(plan.map(p => p.name.toLowerCase()));
+    const have = new Set(plan.map(p => nameKey(p.file.name)));
+    const haveSafe = new Set(plan.map(p => nameKey(p.name)));
     for (const c of cues) {
       let refs;
       if (/\.(mds|ccd)$/i.test(c.name)) {
@@ -2663,9 +2677,9 @@ async function uploadFiles(kind, files) {
         refs = [...text.matchAll(/^\s*FILE\s+(?:"([^"]*)"|(\S+))/gim)]
           .map(m => (m[1] || m[2]).replace(/\\/g, '/').split('/').pop());
       }
-      const missing = refs.filter(r => !have.has(r.toLowerCase()) &&
-        !haveSafe.has(safeDiskName(r).toLowerCase()) &&
-        !(catalog[kind] || []).some(f => f.name.toLowerCase() === r.toLowerCase()));
+      const missing = refs.filter(r => !have.has(nameKey(r)) &&
+        !haveSafe.has(nameKey(safeDiskName(r))) &&
+        !(catalog[kind] || []).some(f => nameKey(f.name) === nameKey(r)));
       if (!refs.length) {
         if (!confirm(c.file.name + ' has no FILE line. Upload it anyway?')) return;
       } else if (missing.length) {
@@ -2675,7 +2689,12 @@ async function uploadFiles(kind, files) {
       }
     }
   }
-  const dupes = plan.filter(p => (catalog[kind] || []).some(f => f.name === p.name));
+  // composition only, as on the server: a name already on the shelf in
+  // the decomposed spelling is the same name, and without this the
+  // browser does not ask to overwrite and the upload is refused with 409.
+  // Case still tells two names apart, as it did.
+  const dupes = plan.filter(p => (catalog[kind] || [])
+    .some(f => nfcName(f.name) === nfcName(p.name)));
   let overwrite = '';
   if (dupes.length) {
     if (!confirm(dupes.map(p => p.name).join(', ') + ' exist(s). Overwrite?')) return;
