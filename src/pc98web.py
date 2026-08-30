@@ -73,6 +73,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -392,7 +393,38 @@ def disk_find(kind, name):
         there = os.path.join(root, group, name)
         if os.path.lexists(there):
             return there
+    # An image uploaded from a Mac before names were composed on the way
+    # in sits on the shelf decomposed, while the name it is now asked for
+    # by -- out of a .cue sheet, or typed -- is composed.  One name, two
+    # spellings: look again with the difference taken out.  Composition
+    # only; case still tells two names apart here, as it always has.
+    found = disk_match(kind, name)
+    if found:
+        return found
     return here
+
+
+def disk_match(kind, name):
+    """Where an image whose name differs from `name` only in composition
+    is, or None.  The exact lookup comes first and this answers after it
+    has failed, so nothing that used to be found is found differently."""
+    # Not "is this name already composed": the stored name is the one
+    # that may be decomposed, and it is the one being looked for.  An
+    # ASCII name is the only one with nothing to compose either side of.
+    if name.isascii():
+        return None
+    want = nfc(name)
+    root = disks_root(kind)
+    for folder in [root] + [os.path.join(root, g)
+                            for g in disk_groups(kind)]:
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            continue
+        for entry in entries:
+            if nfc(entry) == want:
+                return os.path.join(folder, entry)
+    return None
 
 
 def disk_taken(kind, name):
@@ -573,6 +605,34 @@ def listed_name(name):
     """Whether a name is one this may act on: see above."""
     return (bool(name) and len(name) < 256 and "/" not in name
             and "\\" not in name and not name.startswith("."))
+
+
+def nfc(name):
+    """A name in composed form.
+
+    macOS hands the browser the decomposed spelling -- the "de" of
+    "A-Ressha de Ikou" arrives as a bare "te" followed by a combining
+    voiced mark -- while a .cue sheet written anywhere else spells the
+    same name composed.  Linux stores whichever bytes it is handed and
+    compares them as bytes, so the two never meet: the sheet's FILE line
+    names a file that is sitting right there under a name made of
+    different bytes.  Compose on the way in and again before comparing,
+    and there is one name.
+
+    A name off the filesystem may hold lone surrogates and is not text
+    this can normalize; such a name is its own answer.
+    """
+    try:
+        return unicodedata.normalize("NFC", name)
+    except (TypeError, ValueError):
+        return name
+
+
+def name_key(name):
+    """The form two file names are compared in: composed, and lowered
+    because the shelf has always matched names without regard to case.
+    Use this wherever a name from outside meets a name off the disk."""
+    return nfc(name).lower()
 
 
 def given_name(name):
@@ -1004,8 +1064,9 @@ def point_cue_at(path, was, now):
     out = []
     for line in lines:
         m = CUE_FILE_RE.match(line)
-        if m and os.path.basename((m.group(1) or m.group(2))
-                                  .replace("\\", "/")).lower() == was.lower():
+        if m and name_key(os.path.basename((m.group(1) or m.group(2))
+                                           .replace("\\", "/"))) \
+                == name_key(was):
             nl = "\r\n" if line.endswith("\r\n") else "\n"
             line = 'FILE "%s" %s%s' % (now, m.group(3), nl)
         out.append(line)
@@ -1016,12 +1077,12 @@ def cdrom_pairs(root, names):
     """{data name: sidecar name} for the sheets whose data file is here,
     and {sidecar name: [missing files]} for the orphans."""
     pairs, orphans = {}, {}
-    lower = {n.lower(): n for n in names}
+    lower = {name_key(n): n for n in names}
     for name in names:
         if not is_sidecar(name):
             continue
         files, _, _ = sidecar_summary(os.path.join(root, name))
-        here = [lower.get(f.lower()) for f in files]
+        here = [lower.get(name_key(f)) for f in files]
         missing = [f for f, h in zip(files, here) if h is None]
         if files and not missing:
             for h in here:
@@ -4771,8 +4832,10 @@ class Handler(BaseHTTPRequestHandler):
         """(name, part path, query) for a chunked upload, or None."""
         from urllib.parse import parse_qs, urlparse
         query = parse_qs(urlparse(self.path).query)
-        name = (query.get("name") or [""])[0]
-        group = (query.get("group") or [""])[0]
+        # compose before the check, not after: the byte length the
+        # check enforces is the length of what will be stored
+        name = nfc((query.get("name") or [""])[0])
+        group = nfc((query.get("group") or [""])[0])
         if not given_name(name) or (group and not given_name(group)):
             return None, None, query
         # the part file waits where the image itself will end up, so the
@@ -4961,9 +5024,10 @@ class Handler(BaseHTTPRequestHandler):
         it to point at what was stored.  The stem is the whole of the
         pairing, and the lone data file that came up with it takes it,
         whatever rides with it following."""
-        present = {n.lower(): n for n in os.listdir(root)
+        present = {name_key(n): n for n in os.listdir(root)
                    if os.path.isfile(os.path.join(root, n))}
-        chosen = [present[f.lower()] for f in files if f.lower() in present]
+        chosen = [present[name_key(f)] for f in files
+                  if name_key(f) in present]
         data = [f for f in chosen if not f.lower().endswith(".sub")]
         if not data:
             self.fail(400, "%s came without its data file" % sheet)
@@ -5007,9 +5071,9 @@ class Handler(BaseHTTPRequestHandler):
         if cue.lower().endswith((".mds", ".ccd")):
             self.settle_stem_set(root, cue, files)
             return
-        present = {n.lower(): n for n in os.listdir(root)
+        present = {name_key(n): n for n in os.listdir(root)
                    if os.path.isfile(os.path.join(root, n))}
-        given = [f for f in files if f.lower() in present]
+        given = [f for f in files if name_key(f) in present]
         try:
             lines = read_cue(cue_path)
         except OSError as err:
@@ -5028,8 +5092,8 @@ class Handler(BaseHTTPRequestHandler):
                 continue
             ref = os.path.basename((m.group(1) or m.group(2))
                                    .replace("\\", "/"))
-            key = ref.lower()
-            safe = safe_disk_name(ref).lower()
+            key = name_key(ref)
+            safe = name_key(safe_disk_name(ref))
             pick = None
             for cand in (key, safe):
                 if cand in present:
