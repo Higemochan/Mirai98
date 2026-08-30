@@ -1175,6 +1175,10 @@ def disk_catalog():
 _lock = threading.Lock()
 _procs = {}                      # name -> Popen, for children we started
 _cpu_cache = {}                  # name -> (pid, ticks, when)
+# How often to look for machines that ended without being asked to.  Short
+# enough that the log line lands while whoever caused it is still watching,
+# long enough that an idle server is not measurably busy.
+REAP_INTERVAL = 3.0
 
 
 def real_font_present():
@@ -3250,6 +3254,38 @@ def stop_instance(inst):
         time.sleep(0.25)
     say("vm %s will not stop" % inst["name"], "vm")
     return "still answering; stop it by hand"
+
+
+def reap_children():
+    """Wait for machines that ended without being asked to.
+
+    stop_instance() waits for the ones it stops.  A guest that powers
+    itself off -- through APM, or the switch on the emulated front panel --
+    ends its QEMU with nobody waiting for it, and the system keeps the
+    process entry until someone does, for as long as this server runs.
+    poll() is what collects it; the loop is only here to call poll()
+    eventually.
+
+    Nothing is removed from _procs.  A handle whose process has ended is
+    already treated as gone -- pid_of and stop_instance both ask poll()
+    first -- and the next start of that machine replaces it, while removing
+    it here would race with a start happening at the same moment.  What is
+    said is marked on the handle instead, so a machine is named once.
+    """
+    while True:
+        time.sleep(REAP_INTERVAL)
+        for name, proc in list(_procs.items()):
+            try:
+                code = proc.poll()
+            except Exception:
+                # a handle in a state we did not expect is not worth
+                # taking the whole loop down for
+                continue
+            if code is None or getattr(proc, "reaped_said", False):
+                continue
+            proc.reaped_said = True
+            say("vm %s exited on its own (code %s, pid %d)"
+                % (name, code, proc.pid), "vm")
 
 
 def media_devices(inst):
@@ -5525,6 +5561,9 @@ def main(argv):
         watch_parent(parent)
     # machine plugins register after the config is settled, before serving
     load_plugins()
+    # a machine the guest shut down from inside leaves its QEMU waiting to
+    # be collected; nothing else in this program ever waits for one
+    threading.Thread(target=reap_children, daemon=True).start()
     # --port=0 means "any free one", which only a program would ask for
     started_by_program = bool(APP_TOKEN) or port == 0
     if not os.path.isfile(os.path.join(CONFIG["web"], "index.html")):
