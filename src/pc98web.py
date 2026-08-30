@@ -3478,20 +3478,36 @@ _pages = {}
 
 
 def page_bytes(name):
-    """A file from web/, read once and kept unless --dev is on.
+    """A file from web/, kept in memory until the file itself changes.
+
+    A copy that outlives the file it came from is a trap.  This used to
+    hold the first read for the life of the process unless --dev was on,
+    so a page replaced while the server was up went on being served in
+    its old form, with nothing on either side to say so -- and the fault
+    was then looked for in the browser, which was faithfully running what
+    it had been sent.  The modification time and the size together say
+    whether the file is still the one that was read: the time alone
+    misses an edit that lands inside one tick, and the size alone misses
+    an edit that does not change the length.
 
     Two threads racing here just read the file twice, which is why there
     is no lock.
     """
-    if not DEV and name in _pages:
-        return _pages[name]
     base = os.path.realpath(CONFIG["web"])
     full = os.path.realpath(os.path.join(base, name))
     if not full.startswith(base + os.sep):
         raise ValueError("outside web/: %s" % name)
+    # before the cache is consulted, so a file that has gone away is an
+    # error the caller turns into 404 rather than a stale copy
+    stat = os.stat(full)
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    if not DEV:
+        held = _pages.get(name)
+        if held is not None and held[0] == stamp:
+            return held[1]
     with open(full, "rb") as f:
         blob = f.read()
-    _pages[name] = blob
+    _pages[name] = (stamp, blob)
     return blob
 
 
