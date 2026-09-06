@@ -78,6 +78,9 @@ cpu_use_dynarec = 1
 fpu_type = internal
 mem_size = 65536
 
+[Input devices]
+mouse_type = ps2
+
 [Video]
 gfxcard = virge_dx_pci
 voodoo = 1
