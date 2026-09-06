@@ -12,11 +12,16 @@ const loadRFB = async () => RFB ||
 // console hook (returning a cleanup function).
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
-    hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {} };
+    hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {},
+    platform: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
   (p.machines || []).forEach(m => { if (!P.machines.includes(m)) P.machines.push(m); });
+  // which Storage shelf (disks/<platform>/) this plugin's machine(s) draw
+  // from; core PC-98 machines need none, being disks/<kind>/ itself
+  P.platform = P.platform || {};
+  if (p.platform) (p.machines || []).forEach(m => { P.platform[m] = p.platform; });
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
@@ -30,7 +35,11 @@ window.registerMachinePlugin = (p) => {
   Object.assign(P.labels, p.labels || {});       // machine id -> shown name
   P.diskFormats = P.diskFormats || {};           // Storage "Create" formats
   for (const kind of Object.keys(p.diskFormats || {})) {
-    P.diskFormats[kind] = (P.diskFormats[kind] || []).concat(p.diskFormats[kind]);
+    // tagged with the plugin's own platform, so Storage offers a format
+    // only on the shelf it actually belongs to
+    const tagged = (p.diskFormats[kind] || [])
+      .map(f => Object.assign({}, f, {platform: p.platform || 'pc98'}));
+    P.diskFormats[kind] = (P.diskFormats[kind] || []).concat(tagged);
   }
   if (p.console) P.console.push(p.console);
   if (p.consolePrep) P.consolePrep.push(p.consolePrep);
@@ -122,7 +131,19 @@ const view = document.getElementById('view');
 let rfb = null, consoleWatch = null, consoleFbWatch = null;
 let consolePointerStop = null;
 let imeKeyStop = null;
-let catalog = {hdd:[], fdd:[], cdrom:[]};
+// one shelf of images per platform (pc98, and one more per plugin that
+// registered its own -- towns, dosv); a machine of one platform is never
+// shown, and can never resolve, an image that lives on another's
+let catalog = {pc98: {hdd:[], fdd:[], cdrom:[]}};
+// which shelf the Storage page is showing; every /api/disk(s)/... call
+// api() makes carries this along, so no button on that page had to
+// change to learn about platforms at all -- see api() below
+let storagePlatform = 'pc98';
+// every platform a registered plugin machine draws its disks from, pc98
+// always included; recomputed whenever a plugin registers (loadPlugins
+// runs once, at startup, well before the first render)
+const platformList = () =>
+  ['pc98', ...new Set(Object.values(window.MiraiPlugins.platform || {}))];
 let instances = [], hostFacts = {}, tab = 0;
 let hardware = {drives: [], serial: []}, autoConnect = '', facts = {};
 
@@ -396,13 +417,28 @@ function task(what, status) {
       '">' + esc(x.status) + '</td></tr>').join('');
 }
 
+// every /api/disk or /api/disks call (and /api/fs, a look inside one of
+// their images) is about one shelf; the Storage page itself is the only
+// thing that ever changes which one (storagePlatform), so tagging it on
+// here means none of that page's own buttons had to learn the word
+// "platform" at all. A caller that already named one (the per-machine
+// disk pickers, which know their own machine's platform regardless of
+// which shelf Storage happens to be showing) is left alone.
+function diskApiPath(path) {
+  if (!/^\/api\/(disks?(\/|$)|fs\/)/.test(path) ||
+      /[?&]platform=/.test(path)) {
+    return path;
+  }
+  return path + (path.includes('?') ? '&' : '?') +
+    'platform=' + encodeURIComponent(storagePlatform);
+}
 async function apiResult(path, opts) {
   // every caller is written for "data, or null"; a fetch that rejects --
   // the server restarting, the tunnel dropping -- used to reach none of
   // them and leave the screen sitting on whatever it last said
   let r;
   try {
-    r = await fetch(path, opts);
+    r = await fetch(diskApiPath(path), opts);
   } catch (err) {
     return {ok: false, data: null, error: 'no answer from the server'};
   }
@@ -672,12 +708,13 @@ function diskOptions(files, value) {
 // missing, o.empty names the first entry, o.filter narrows the rest.
 function diskBody(kind, value, o) {
   o = o || {};
+  const shelf = catalog[o.platform || 'pc98'] || {};
   const q = (o.filter || '').trim().toLowerCase();
   // whatever is already picked survives the filter: a narrowed list that
   // dropped the pick would quietly change what the form submits
   const hit = (name, text) =>
     name === value || !q || text.toLowerCase().includes(q);
-  const all = (catalog[kind] || []).filter(f => o.orphans || !f.orphan);
+  const all = (shelf[kind] || []).filter(f => o.orphans || !f.orphan);
   const files = all.filter(f => hit(f.name, f.name + ' ' + (f.group || '')));
   // real drives of the matching sort come after the images, so a guest
   // can be pointed at the host's own CD or floppy
@@ -707,7 +744,8 @@ function diskBody(kind, value, o) {
 function diskCount(kind, o) {
   const q = (o.filter || '').trim().toLowerCase();
   if (!q) return '';
-  const all = (catalog[kind] || []).filter(f => o.orphans || !f.orphan);
+  const shelf = catalog[o.platform || 'pc98'] || {};
+  const all = (shelf[kind] || []).filter(f => o.orphans || !f.orphan);
   const shown = all.filter(f => (f.name + ' ' + (f.group || ''))
                                 .toLowerCase().includes(q)).length;
   return shown + ' of ' + all.length + ' shown';
@@ -722,6 +760,7 @@ function diskPicker(kind, value, o) {
   return '<input type="text" class="disk-filter" placeholder="filter" ' +
     'title="narrow the list of images" oninput="filterDiskSelect(this)" ' +
     'value="' + esc(o.filter || '') + '" data-kind="' + esc(kind) + '"' +
+    ' data-platform="' + esc(o.platform || 'pc98') + '"' +
     (o.drives ? ' data-drives="1"' : '') +
     (o.orphans ? ' data-orphans="1"' : '') +
     ' data-empty="' + esc(o.empty || '(none)') + '"' + (o.box || '') + '>' +
@@ -735,7 +774,7 @@ window.filterDiskSelect = (box) => {
   if (!sel || sel.tagName !== 'SELECT') return;
   const d = box.dataset;
   const o = {filter: box.value, drives: !!d.drives, orphans: !!d.orphans,
-             empty: d.empty};
+             empty: d.empty, platform: d.platform};
   const value = sel.value;
   sel.innerHTML = diskBody(d.kind, value, o);
   sel.value = value;          // redrawing the list must not move the pick
@@ -744,9 +783,13 @@ window.filterDiskSelect = (box) => {
     note.textContent = diskCount(d.kind, o);
 };
 
-function diskSelect(key, kind, value, name) {
+// platform is the machine's own (towns.js/box86.js pass their fixed one);
+// left off, a picker shows the pc98 shelf, which is what every call from
+// before platforms existed already meant
+function diskSelect(key, kind, value, name, platform) {
   return diskPicker(kind, value,
-                    {drives: true, attrs: 'name="' + (name || key) + '"'});
+                    {drives: true, platform,
+                     attrs: 'name="' + (name || key) + '"'});
 }
 
 function serialSelect(value, name) {
@@ -1767,6 +1810,7 @@ function storageCard(kind, files) {
       '<button type="button" onclick="showTree(\'' + kind + '\',\'' +
       esc(jsq(f.name)) + '\')">Contents</button> ' +
       '<a href="/disks/' + kind + '/' + encodeURIComponent(f.name) +
+      '?platform=' + encodeURIComponent(storagePlatform) +
       '" download><button type="button">Download</button></a> ' +
       targets.map(t => '<button type="button" onclick="convertDisk(\'' +
         kind + '\',\'' + esc(jsq(f.name)) + '\',\'' + t + '\')">to ' + t +
@@ -1809,8 +1853,10 @@ function storageCard(kind, files) {
     '<button type="button" onclick="suggestGroups(\'' + kind +
     '\')">Group by name...</button></div>';
   let create = '';
-  // a machine plugin may add image formats of its own (label, note)
-  const extra = window.MiraiPlugins.diskFormats[kind] || [];
+  // a machine plugin may add image formats of its own (label, note), only
+  // ever on the shelf its own platform actually uses
+  const extra = (window.MiraiPlugins.diskFormats[kind] || [])
+    .filter(f => (f.platform || 'pc98') === storagePlatform);
   const extraOpts = extra.map(f => '<option value="' + esc(f.value) + '">' +
                                    esc(f.label) + '</option>').join('');
   const extraNotes = extra.filter(f => f.note).map(f =>
@@ -2047,7 +2093,8 @@ function fsWire(box, path, partition) {
       if (a.dataset.dir === '1') { fsLoad(where); return; }
       location.href = '/fsfile/' + here.kind + '/' +
         encodeURIComponent(here.name) + '?partition=' + here.partition +
-        '&path=' + encodeURIComponent(where);
+        '&path=' + encodeURIComponent(where) +
+        '&platform=' + encodeURIComponent(storagePlatform);
     };
   });
   box.querySelectorAll('[data-rename]').forEach(b => {
@@ -2188,8 +2235,10 @@ async function diskView(kind, name) {
      ? '<span class="state on">in use</span>' : '') + '</div>' +
     actionBar([
       '<a href="/disks/' + kind + '/' + encodeURIComponent(name) +
+      '?platform=' + encodeURIComponent(storagePlatform) +
       '" download><button>Download image</button></a>',
       '<a href="/zip/' + kind + '/' + encodeURIComponent(name) +
+      '?platform=' + encodeURIComponent(storagePlatform) +
       '"><button>Download contents as ZIP</button></a>',
       '<button onclick="pickZip(\'' + kind + '\',\'' + esc(jsq(name)) +
       '\')">Write a ZIP into it...</button>',
@@ -2301,8 +2350,10 @@ window.pickZip = (kind, name) => {
     if (!file) return;
     toast('writing ' + file.name + ' into ' + name + '...');
     const xhr = new XMLHttpRequest();
+    // another raw XMLHttpRequest, for the same reason sendSlice is: named
+    // here rather than relying on api()'s tagging, which this bypasses
     xhr.open('POST', '/api/disk/' + kind + '/' + encodeURIComponent(name) +
-             '/unzip');
+             '/unzip?platform=' + encodeURIComponent(storagePlatform));
     xhr.onload = () => {
       let r = {};
       try { r = JSON.parse(xhr.response); } catch (e) {}
@@ -2321,15 +2372,36 @@ window.pickZip = (kind, name) => {
   input.click();
 };
 
+// pc98/towns/dosv label the same way a machine type does, since each is
+// exactly one plugin's own platform (or none, for pc98 itself)
+const PLATFORM_LABELS = { pc98: 'PC-98' };
+const platformLabel = (p) => PLATFORM_LABELS[p] ||
+  Object.entries(window.MiraiPlugins.platform || {})
+    .filter(([, v]) => v === p).map(([m]) => machineLabel(m))[0] || p;
+window.setStoragePlatform = (p) => {
+  storagePlatform = p;
+  fillDiskDatalists();
+  render();
+};
 async function storageView() {
   // asked for alongside the rest rather than after it: three round trips
   // one behind the other is what made opening this page feel slow
   const roms = await romsSoon;
+  const platforms = platformList();
+  const shelf = catalog[storagePlatform] || {hdd:[], fdd:[], cdrom:[]};
   view.innerHTML = '<div class="topbar"><h2>Storage</h2>' +
     '<span class="note">' + (hostFacts.disk_total
       ? fmtBytes(hostFacts.disk_free) + ' free of ' +
         fmtBytes(hostFacts.disk_total) : '') + '</span></div>' +
-    ['hdd','fdd','cdrom'].map(k => storageCard(k, catalog[k])).join('') +
+    // one shelf, never another's: a machine of one platform cannot open
+    // an image that lives under a different one, so browsing them
+    // together read as one list would have shown images half of which
+    // no machine on screen could ever actually use
+    (platforms.length > 1 ? '<div class="tabs">' + platforms.map(p =>
+      '<span class="' + (p === storagePlatform ? 'on' : '') +
+      '" onclick="setStoragePlatform(\'' + p + '\')">' +
+      esc(platformLabel(p)) + '</span>').join('') + '</div>' : '') +
+    ['hdd','fdd','cdrom'].map(k => storageCard(k, shelf[k] || [])).join('') +
     (roms ? romCard(roms) : '');
   // the rows were written folded; this is what a filter left on from
   // before does to them, once they are in the document
@@ -2732,7 +2804,12 @@ async function uploadFiles(kind, files) {
 // one file, in slices; resolves to the stored name or null when it failed
 async function uploadOne(kind, file, name, overwrite, prefix, group) {
     const base = '/api/disks/' + kind;
+    // sendSlice below goes straight through XMLHttpRequest, bypassing the
+    // api() helper (and the platform tagging it otherwise does for every
+    // other /api/disks call) since it needs upload progress events -- so
+    // the shelf is named here instead, once
     const q = 'name=' + encodeURIComponent(name) + '&total=' + file.size +
+              '&platform=' + encodeURIComponent(storagePlatform) +
               (group ? '&group=' + encodeURIComponent(group) : '');
     uploadBox(file, kind, prefix + name);
     const bar = document.getElementById('upload-bar');
@@ -3017,13 +3094,26 @@ let romsSoon = Promise.resolve(null);
 async function refreshDisks() {
   romsSoon = api('/api/roms');
   await refreshGear();
-  const disks = await api('/api/disks');
-  if (!disks) return;
-  catalog = disks;
+  // one shelf per platform, in parallel: a machine's disk picker (edit
+  // form) needs its own platform's catalog even when Storage itself is
+  // showing a different one
+  const platforms = platformList();
+  const fetched = await Promise.all(
+    platforms.map(p => api('/api/disks?platform=' + encodeURIComponent(p))));
+  const next = {};
+  platforms.forEach((p, n) => { if (fetched[n]) next[p] = fetched[n]; });
+  if (!Object.keys(next).length) return;
+  catalog = next;
+  fillDiskDatalists();
+}
+// the shelf storagePlatform is currently showing, offered as suggestions
+// to whatever text field on the page still asks for one (fetch/import)
+function fillDiskDatalists() {
+  const disks = catalog[storagePlatform] || {hdd:[], fdd:[], cdrom:[]};
   document.getElementById('datalists').innerHTML =
     ['hdd','fdd','cdrom'].map(kind => '<datalist id="dl-' + kind + '">' +
-      disks[kind].map(f => '<option value="' + esc(f.name) + '">').join('') +
-      '</datalist>').join('');
+      (disks[kind] || []).map(f => '<option value="' + esc(f.name) + '">')
+        .join('') + '</datalist>').join('');
 }
 // --------------------------------------------------------- system view
 function meter(label, used, total, extra) {

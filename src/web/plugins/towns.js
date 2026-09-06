@@ -35,17 +35,17 @@ function townsEditForm(i, h) {
     '>' + label + '</option>').join('');
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
     '<div class="row"><label>CD-ROM</label>' +
-      h.diskSelect('cd', 'cdrom', i.cd) +
+      h.diskSelect('cd', 'cdrom', i.cd, null, 'towns') +
       note('built-in FM TOWNS CD drive; a .cue/.bin, .ccd/.img/.sub or ' +
            '.mds/.mdf set keeps the CD-DA audio tracks') + '</div>' +
     '<div class="row"><label>Floppy A</label>' +
-      h.diskSelect('fdd1', 'fdd', i.fdd1) +
+      h.diskSelect('fdd1', 'fdd', i.fdd1, null, 'towns') +
       note('internal 3-mode drive; raw dump or D77/D88 image') + '</div>' +
     '<div class="row"><label>Floppy B</label>' +
-      h.diskSelect('fdd2', 'fdd', i.fdd2) + '</div>' +
+      h.diskSelect('fdd2', 'fdd', i.fdd2, null, 'towns') + '</div>' +
     ['scsi1', 'scsi2', 'scsi3', 'scsi4'].map((k, n) =>
       '<div class="row"><label>SCSI HDD ' + n + '</label>' +
-      h.diskSelect(k, 'hdd', i[k]) +
+      h.diskSelect(k, 'hdd', i[k], null, 'towns') +
       (n === 0 ? note('SCSI ID ' + n + '; a raw image (e.g. a Tsugaru .h0)')
                : note('SCSI ID ' + n)) + '</div>').join('') +
     '<div class="row"><label>CPU speed</label>' +
@@ -292,17 +292,17 @@ window.townsResetCmos = async (name) => {
 
 function townsWizardDisks(h) {
   return '<div class="row"><label>CD-ROM</label>' +
-      h.diskSelect('cd', 'cdrom', '') +
+      h.diskSelect('cd', 'cdrom', '', null, 'towns') +
       h.note('built-in drive; a .cue/.bin, .ccd/.img/.sub or .mds/.mdf ' +
              'set keeps the CD-DA tracks') + '</div>' +
     '<div class="row"><label>Floppy A</label>' +
-      h.diskSelect('fdd1', 'fdd', '') +
+      h.diskSelect('fdd1', 'fdd', '', null, 'towns') +
       h.note('internal 3-mode drive; raw dump or D77/D88 image') + '</div>' +
     '<div class="row"><label>Floppy B</label>' +
-      h.diskSelect('fdd2', 'fdd', '') + '</div>' +
+      h.diskSelect('fdd2', 'fdd', '', null, 'towns') + '</div>' +
     ['scsi1', 'scsi2', 'scsi3', 'scsi4'].map((k, n) =>
       '<div class="row"><label>SCSI HDD ' + n + '</label>' +
-      h.diskSelect(k, 'hdd', '') +
+      h.diskSelect(k, 'hdd', '', null, 'towns') +
       (n === 0 ? h.note('SCSI ID 0; a raw image (e.g. a Tsugaru .h0)')
                : h.note('SCSI ID ' + n)) + '</div>').join('') +
     '<div class="note">Images live in Storage. Disks can be changed while ' +
@@ -673,6 +673,8 @@ async function prepTownsConsole(name) {
 
 window.registerMachinePlugin({
   machines: ['towns'],
+  // its own Storage shelf (disks/towns/), never the flat pc98 one
+  platform: 'towns',
   defaults: {
     towns: { memory: '16M', sound: 'none', bios: 'real',
              lockSound: true, lockBios: true }
