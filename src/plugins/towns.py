@@ -62,7 +62,7 @@ PAD_PORTS = {"": None, "b": "b", "a": "a", "both": "both", "off": "off"}
 
 
 def register(api):
-    api.add_machine("towns")
+    api.add_machine("towns", platform="towns")
     api.machine_argv("towns", lambda inst: towns_argv(api, inst))
     api.add_field("boot", lambda v: None if v in BOOT_KEYS
                   else "boot must be empty, cd, fd or hd")
@@ -180,8 +180,8 @@ def towns_reset_cmos(api, inst):
     return {"result": "cmos reset", "seed": CMOS_SEEDS.get(
         inst.get("cmos") or "", "towns.cmos")}
     for fmt in TOWNS_FLOPPIES:
-        api.disk_builder("fdd", fmt, towns_new_floppy)
-    api.disk_builder("hdd", "towns", towns_new_hard_disk)
+        api.disk_builder("towns", "fdd", fmt, towns_new_floppy)
+    api.disk_builder("towns", "hdd", "towns", towns_new_hard_disk)
 
 
 # FM TOWNS floppy layouts (MS-DOS FAT12 as the Towns FORMAT command lays

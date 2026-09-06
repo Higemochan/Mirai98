@@ -101,7 +101,7 @@ hdd_01_vhd_blocksize = 4096
 
 
 def register(api):
-    api.add_machine("box86")
+    api.add_machine("box86", platform="dosv")
     api.add_engine("box86", {
         "on_start": lambda inst: on_start(api, inst),
         "on_stop": lambda inst: on_stop(api, inst),

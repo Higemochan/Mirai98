@@ -59,6 +59,7 @@ Either way the first run asks where the machines should live and what
 the password should be, and nothing else happens until it is answered.
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -162,6 +163,14 @@ DISK_DIR = {"hdd1": "hdd", "hdd2": "hdd", "fdd1": "fdd", "fdd2": "fdd",
             "cd": "cdrom"}
 NETWORKS = ("", "nat", "bridge")
 MACHINES = ("pc9821", "pc9801")
+# machine name -> which disk shelf it draws from (disks/<platform>/<kind>/).
+# "pc98" is special: it is the tree that already existed before platforms
+# were a thing, disks/<kind>/ with no platform level in the path at all, so
+# every PC-98 image already on a shelf keeps working without being moved.
+# Anything else is a new, separate tree that starts out empty: an image
+# already on the pc98 shelf that really belongs to another platform is
+# never guessed into one, only moved by a deliberate, later action.
+MACHINE_PLATFORM = {"pc9821": "pc98", "pc9801": "pc98"}
 
 # --- machine plugins -------------------------------------------------------
 # Extra machine types (e.g. FM TOWNS) live as self-contained plugins under
@@ -227,10 +236,12 @@ class PluginAPI:
     def disk_path(self, inst, kind):
         return disk_path(inst, kind)
 
-    def add_machine(self, name):
+    def add_machine(self, name, platform=None):
         global MACHINES
         if name not in MACHINES:
             MACHINES = MACHINES + (name,)
+        if platform:
+            MACHINE_PLATFORM[name] = platform
 
     def machine_argv(self, name, builder):
         MACHINE_ARGV[name] = builder
@@ -272,9 +283,10 @@ class PluginAPI:
         """
         save_instance(inst)
 
-    def disk_builder(self, kind, fmt, fn):
-        """Offer a disk image format of the plugin's own in Storage."""
-        DISK_BUILDERS[(kind, fmt)] = fn
+    def disk_builder(self, platform, kind, fmt, fn):
+        """Offer a disk image format of the plugin's own in Storage, on
+        that platform's own shelf."""
+        DISK_BUILDERS[(platform, kind, fmt)] = fn
 
     def machine_sanitize(self, name, fn):
         """A final check/trim of an instance record for this machine."""
@@ -340,8 +352,41 @@ def sound_of(inst):
 
 # ------------------------------------------------------- the rule tree
 
+# Which platform's shelf disks_root/disk_find/etc. resolve against for the
+# call in progress -- one flavour of "which one" per request thread, so a
+# handler sets it once at the top and everything it calls, however deep,
+# reaches the same shelf without a platform argument threaded through
+# every single function down to disk_find. disk_path(inst, key) is the one
+# place that overrides it mid-call, to the instance's OWN platform, since
+# a Storage page browsing "towns" still has to resolve what a "box86"
+# instance's own hdd1 points at correctly when listing who has it open.
+_platform_ctx = threading.local()
+
+
+def current_platform():
+    return getattr(_platform_ctx, "value", "pc98")
+
+
+@contextlib.contextmanager
+def use_platform(platform):
+    prior = current_platform()
+    _platform_ctx.value = platform or "pc98"
+    try:
+        yield
+    finally:
+        _platform_ctx.value = prior
+
+
+def platform_of(inst):
+    """Which shelf an instance's images live on, from its machine type."""
+    return MACHINE_PLATFORM.get(inst.get("machine") or "pc9821", "pc98")
+
+
 def disks_root(kind):
-    return os.path.join(CONFIG["root"], "disks", kind)
+    platform = current_platform()
+    if platform == "pc98":
+        return os.path.join(CONFIG["root"], "disks", kind)
+    return os.path.join(CONFIG["root"], "disks", platform, kind)
 
 
 def vm_root():
@@ -356,6 +401,10 @@ def ensure_tree():
     for path in [vm_root()] + [disks_root(k) for k in ("hdd", "fdd",
                                                        "cdrom")]:
         os.makedirs(path, exist_ok=True)
+    for platform in set(MACHINE_PLATFORM.values()) - {"pc98"}:
+        with use_platform(platform):
+            for k in ("hdd", "fdd", "cdrom"):
+                os.makedirs(disks_root(k), exist_ok=True)
 
 
 def disk_dir_of(key):
@@ -485,13 +534,20 @@ def disk_drop_group(kind, group):
 def disk_path(inst, key):
     """A device's image file: a bare name lives in the rule tree, and
     anything with a separator in it is taken as a path of its own,
-    which is how a real drive like /dev/sr0 gets through."""
+    which is how a real drive like /dev/sr0 gets through.
+
+    Resolved against this instance's OWN platform, not whichever one the
+    caller's request happens to be browsing -- a Storage page open on
+    "towns" still has to find where a "box86" instance's own hdd1 really
+    is, to know whether it is the file someone is about to touch.
+    """
     value = inst.get(key) or ""
     if not value:
         return ""
     if "/" in value or value.startswith("~"):
         return os.path.expanduser(value)
-    return disk_find(disk_dir_of(key), value)
+    with use_platform(platform_of(inst)):
+        return disk_find(disk_dir_of(key), value)
 
 
 def is_device(path):
@@ -3693,6 +3749,11 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------------- GET
     def do_GET(self):
         path = url_path(self.path)
+        # Which platform's disk shelf this request resolves against, for
+        # every route below that ends up at disks_root/disk_find: reset
+        # on every request, so a stale value from an earlier request on
+        # the same keep-alive connection never lingers into this one.
+        _platform_ctx.value = self.query_platform()
         # A password does not exist until the first run sets one, so the
         # wizard below has to be reachable without it.  A token does exist
         # from the start, and so covers the wizard too.
@@ -3833,8 +3894,17 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.fail(404, "no such page")
 
+    def query_platform(self):
+        """The ?platform= a Storage request names, "pc98" by default --
+        the shelf that existed before platforms did, and every request
+        from before this had one."""
+        from urllib.parse import parse_qs, urlparse
+        return (parse_qs(urlparse(self.path).query).get("platform")
+                or ["pc98"])[0]
+
     def disk_ref(self, rest):
-        """(kind, name, full path) out of a disks/<kind>/<name> URL."""
+        """(kind, name, full path) out of a disks/<kind>/<name> URL, on
+        the platform already current for this request."""
         kind, _, name = rest.partition("/")
         if kind not in DISK_KINDS or not listed_name(name):
             return None
@@ -3969,6 +4039,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = url_path(self.path)
+        _platform_ctx.value = self.query_platform()
         if APP_TOKEN and not self.signed_in():
             self.refuse(401, "no token")
             return
@@ -5325,7 +5396,8 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(400, "a group is named like an image: " + NAME_RULE)
             return
         fmt = str(data.get("format") or "")
-        if kind == "hdd" and (kind, fmt) not in DISK_BUILDERS:
+        platform = current_platform()
+        if kind == "hdd" and (platform, kind, fmt) not in DISK_BUILDERS:
             # The container is decided here rather than typed.  A name
             # that ended in .hdi made an Anex86 image -- a 4096 byte
             # header in front of the disk -- and every image but a qcow2
@@ -5335,7 +5407,7 @@ class Handler(BaseHTTPRequestHandler):
             # guest it was made for.
             name = re.sub(r"\.(raw|img|hdi|qcow2)$", "", name, flags=re.I)
             name += ".qcow2" if fmt == "qcow2" else ".raw"
-        elif kind == "fdd" and (kind, fmt) not in DISK_BUILDERS:
+        elif kind == "fdd" and (platform, kind, fmt) not in DISK_BUILDERS:
             # The courtesy the hard disk already had.  A floppy left
             # without an extension was not merely unlabelled: virtpc98
             # puts an Anex86 header in front of anything that is not
@@ -5355,7 +5427,8 @@ class Handler(BaseHTTPRequestHandler):
         quiet = lambda *a: None
         try:
             import virtpc98
-            builder = DISK_BUILDERS.get((kind, str(data.get("format") or "")))
+            builder = DISK_BUILDERS.get(
+                (platform, kind, str(data.get("format") or "")))
             if builder:
                 builder(dest, data)
             elif kind == "hdd":
@@ -5442,6 +5515,7 @@ class Handler(BaseHTTPRequestHandler):
             self.refuse(401, "sign in first")
             return
         path = url_path(self.path)
+        _platform_ctx.value = self.query_platform()
         if path.startswith("/api/roms/"):
             name = path[len("/api/roms/"):]
             if name not in ROM_FILES:
