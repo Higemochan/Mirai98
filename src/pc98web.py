@@ -94,6 +94,10 @@ BASE = os.getcwd() if WINDOWS else HERE
 VNC_DISPLAY_BASE = 20            # display :20 = tcp 5920
 WEBSOCKET_BASE = 5820
 QMP_BASE = 4820
+# a non-QEMU engine's own audio stream (Opus/WebM over a websocket); QEMU
+# machines carry their sound over the VNC/websocket console instead and
+# never open this one
+AUDIO_WS_BASE = 4720
 
 THUMB_AGE = 5                    # seconds a screen thumbnail stays fresh
 
@@ -165,6 +169,12 @@ MACHINES = ("pc9821", "pc9801")
 # register(api) may add a machine name and a builder returning its QEMU argv;
 # everything else (create/start/console/snapshot) is the unchanged PC-98 flow.
 MACHINE_ARGV = {}
+# machine name -> engine dict for a plugin whose machine is not QEMU at all
+# (on_start(inst) -> "started" | a failure reason, on_stop(inst) -> a status
+# word, is_up(inst) -> bool).  start_instance/stop_instance/is_running defer
+# to this in full instead of the QEMU argv/QMP flow when a machine has one;
+# a machine with none of this keeps behaving exactly as before.
+MACHINE_ENGINE = {}
 # instance fields a plugin adds (name -> validator(value) -> complaint|None);
 # they ride through sanitize()/save_instance()/load_instance() untouched
 # otherwise, so a machine type may keep settings of its own in vm.xml
@@ -224,6 +234,17 @@ class PluginAPI:
 
     def machine_argv(self, name, builder):
         MACHINE_ARGV[name] = builder
+
+    def add_engine(self, name, engine):
+        """Register a non-QEMU backend for machine `name`.
+
+        `engine` is a dict of on_start(inst) -> "started" | a failure
+        reason, on_stop(inst) -> a status word, is_up(inst) -> bool.
+        start_instance/stop_instance/is_running call these instead of the
+        QEMU argv/QMP flow for any instance whose machine is registered
+        here; everything else (create/edit/console/Storage) is unchanged.
+        """
+        MACHINE_ENGINE[name] = engine
 
     def instance_action(self, machine, action, fn):
         """A POST /api/instances/<name>/x/<action> of the plugin's own."""
@@ -1369,7 +1390,9 @@ def next_index(instances):
 
 
 def ports_of(inst):
-    """The three ports a machine keeps for life, from its index.
+    """The four ports a machine keeps for life, from its index: VNC,
+    websocket console, QMP, and a non-QEMU engine's own audio stream (a
+    QEMU machine never opens that last one).
 
     The bases can be moved in the config, which is what lets a second copy
     run beside an appliance that is already using the usual ones.
@@ -1377,7 +1400,8 @@ def ports_of(inst):
     index = inst["index"]
     return (5900 + CONFIG.get("vnc_display", VNC_DISPLAY_BASE) + index,
             CONFIG.get("websocket", WEBSOCKET_BASE) + index,
-            CONFIG.get("qmp", QMP_BASE) + index)
+            CONFIG.get("qmp", QMP_BASE) + index,
+            CONFIG.get("audio_ws", AUDIO_WS_BASE) + index)
 
 
 def sanitize(data, taken_names=()):
@@ -1508,7 +1532,7 @@ def migrate_legacy():
 
 def qmp(inst, command, arguments=None, timeout=3.0):
     """One QMP command against an instance; None when unreachable."""
-    _vnc, _ws, port = ports_of(inst)
+    _vnc, _ws, port, _audio = ports_of(inst)
     try:
         with socket.create_connection(("127.0.0.1", port),
                                       timeout=timeout) as sock:
@@ -1534,8 +1558,15 @@ def qmp(inst, command, arguments=None, timeout=3.0):
 
 def is_running(inst):
     """The QMP port answers: even after this server restarts, a machine
-    started by an earlier run is still found and controllable."""
-    _vnc, _ws, port = ports_of(inst)
+    started by an earlier run is still found and controllable.
+
+    A machine with its own engine (no QMP at all) defers to that engine's
+    own liveness check instead.
+    """
+    engine = MACHINE_ENGINE.get(inst.get("machine"))
+    if engine:
+        return engine["is_up"](inst)
+    _vnc, _ws, port, _audio = ports_of(inst)
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.3):
             return True
@@ -1544,11 +1575,23 @@ def is_running(inst):
 
 
 def pid_of(inst):
-    """The QEMU pid, even for one an earlier server run started."""
+    """The QEMU pid, even for one an earlier server run started.
+
+    A machine with its own engine has no QMP port to find it by; the
+    engine is asked for the pid of whatever it considers its main
+    process instead, if it offers one (its "pid" key is optional --
+    without it a machine of that kind just has no /proc-based usage
+    figures, the way a PC-98 guest with no QMP answer at all does not
+    either).
+    """
     proc = _procs.get(inst["name"])
     if proc is not None and proc.poll() is None:
         return proc.pid
-    _vnc, _ws, port = ports_of(inst)
+    engine = MACHINE_ENGINE.get(inst.get("machine"))
+    if engine:
+        get_pid = engine.get("pid")
+        return get_pid(inst) if get_pid else None
+    _vnc, _ws, port, _audio = ports_of(inst)
     try:
         out = subprocess.run(
             ["pgrep", "-f", "qmp tcp:127.0.0.1:%d," % port],
@@ -3084,7 +3127,7 @@ def qemu_argv(inst):
     builder = MACHINE_ARGV.get(inst.get("machine") or "pc9821")
     if builder:
         return builder(inst)
-    vnc, ws, qmp_port = ports_of(inst)
+    vnc, ws, qmp_port, _audio = ports_of(inst)
     display = vnc - 5900
     accel = "kvm:tcg" if inst.get("accel", "tcg") == "kvm" else "tcg"
     # the boards this machine has anything to play through
@@ -3222,6 +3265,15 @@ def start_instance(inst):
         result = "; ".join(trouble)
         say("vm %s not started: %s" % (inst["name"], result), "vm")
         return result
+    engine = MACHINE_ENGINE.get(inst.get("machine"))
+    if engine:
+        result = engine["on_start"](inst)
+        if result == "started":
+            say("vm %s started (%s)" % (inst["name"], inst["machine"]),
+                "vm")
+        else:
+            say("vm %s not started: %s" % (inst["name"], result), "vm")
+        return result
     # QEMU's own complaint about a missing ROM says which files it wanted
     # but not where it looked, which leaves a real answer out of reach.
     # This says it before starting, and names the directory.
@@ -3277,6 +3329,11 @@ def stop_instance(inst):
     if not is_running(inst):
         forget_pid(inst)
         return "not running"
+    engine = MACHINE_ENGINE.get(inst.get("machine"))
+    if engine:
+        result = engine["on_stop"](inst)
+        say("vm %s %s" % (inst["name"], result), "vm")
+        return result
     qmp(inst, "quit")
     proc = _procs.pop(inst["name"], None)
     if proc:
