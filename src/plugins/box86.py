@@ -228,12 +228,25 @@ def on_start(api, inst):
         spawn("websockify_video",
               ["websockify", str(ws), "127.0.0.1:%d" % vnc],
               stdout=log, stderr=log)
+        # ffmpeg's own "-listen 1" serves exactly one TCP client for its
+        # whole life: once that client (websockify_audio, on the far side
+        # of the browser's own connection) goes away, its write fails
+        # with a broken pipe and ffmpeg exits rather than waiting for a
+        # next one -- confirmed live, 2026-09-07: a single browser
+        # connect/disconnect cycle left the bridge permanently dead until
+        # the whole instance was restarted. A tiny shell loop respawns it
+        # the moment that happens, so the next connection is only ever a
+        # fraction of a second behind, not gone for good; it shares
+        # ffmpeg's own process group (this whole line runs under one
+        # spawn(), one setsid()), so stopping this instance's "ffmpeg"
+        # entry by process GROUP, not just its top pid, takes the loop
+        # and whichever ffmpeg it is currently running down together.
         spawn("ffmpeg",
-              ["ffmpeg", "-nostdin", "-loglevel", "error",
-               "-f", "pulse", "-i", "%s.monitor" % sink,
-               "-c:a", "libopus", "-b:a", "64k",
-               "-f", "webm", "-listen", "1",
-               "tcp://127.0.0.1:%d" % audio_tcp],
+              ["bash", "-c",
+               "while true; do ffmpeg -nostdin -loglevel error "
+               "-f pulse -i '%s.monitor' -c:a libopus -b:a 64k "
+               "-f webm -listen 1 tcp://127.0.0.1:%d; sleep 0.2; done"
+               % (sink, audio_tcp)],
               stdout=log, stderr=log)
         spawn("websockify_audio",
               ["websockify", str(audio_ws), "127.0.0.1:%d" % audio_tcp],
@@ -281,13 +294,22 @@ def _kill_pids(pids):
     """SIGTERM every process this instance started, then SIGKILL whatever
     is still standing after a moment -- in pid order they were started,
     so 86Box (the one told to actually shut down cleanly) is asked
-    first, before Xvfb pulls the display out from under it."""
+    first, before Xvfb pulls the display out from under it.
+
+    By process GROUP, not just the one pid spawn() handed back: every
+    entry here called its own setsid() (spawn's start_new_session=True),
+    so its pid is also its pgid, and killpg reaches a child that pid
+    itself spawned without becoming a group leader of its own -- the
+    "ffmpeg" entry is actually a small shell loop respawning ffmpeg
+    each time it exits, and killing only the shell would leave whichever
+    ffmpeg it had just started running on its own.
+    """
     for key in ("86box", "websockify_audio", "ffmpeg",
                 "websockify_video", "x11vnc", "xvfb"):
         pid = pids.get(key)
         if pid and _alive(pid):
             try:
-                os.kill(pid, 15)
+                os.killpg(pid, 15)
             except OSError:
                 pass
     deadline = time.time() + 5
@@ -298,7 +320,7 @@ def _kill_pids(pids):
     for pid in pids.values():
         if _alive(pid):
             try:
-                os.kill(pid, 9)
+                os.killpg(pid, 9)
             except OSError:
                 pass
 

@@ -45,7 +45,34 @@ function startBox86Audio(target, port) {
     return () => audio.remove();
   }
   const queue = [];
-  let sb = null;
+  let sb = null, jumped = false;
+  // ffmpeg's own timestamps are wall-clock ones, not zero-based, so the
+  // first bytes this SourceBuffer ever gets already sit far past time 0
+  // -- an <audio> element left sitting at currentTime 0 then has nothing
+  // buffered there at all (HAVE_METADATA, and it never once advances).
+  // The live edge is wherever the buffer's own last range ends; jumping
+  // there the first time anything arrives is what every live player does
+  // with a stream that carries real timestamps instead of relative ones.
+  //
+  // The very first range to show up is not that edge, though: the ffmpeg
+  // supervisor loop's own restarts (see box86.py) leave tiny fragments
+  // behind from whichever WebM init segment arrived most recently, and
+  // jumping into one of those the moment it appears (confirmed live,
+  // 2026-09-07: end - 0.1 on a [0, 0.061] range clamps to 0 and latches
+  // there for good) never advances at all. So this waits for a range
+  // actually worth playing from -- half a second of it, at least -- and
+  // lands 1.5s short of its end rather than right at it, which is
+  // however far ahead a moment of decode/append jitter can eat into
+  // before playback would otherwise catch up to nothing yet buffered.
+  const jumpToLiveEdge = () => {
+    if (jumped || !sb.buffered.length) return;
+    const last = sb.buffered.length - 1;
+    const start = sb.buffered.start(last), end = sb.buffered.end(last);
+    if (end - start < 0.5) return;
+    jumped = true;
+    audio.currentTime = Math.max(start + 0.05, end - 1.5);
+    audio.play().catch(() => {});
+  };
   const pump = () => {
     if (stopped || !sb || sb.updating || !queue.length) return;
     try { sb.appendBuffer(queue.shift()); }
@@ -61,7 +88,7 @@ function startBox86Audio(target, port) {
       console.error('box86 audio: addSourceBuffer failed', e);
       return;
     }
-    sb.addEventListener('updateend', pump);
+    sb.addEventListener('updateend', () => { jumpToLiveEdge(); pump(); });
     ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
     ws.binaryType = 'arraybuffer';
     ws.onmessage = (ev) => { queue.push(new Uint8Array(ev.data)); pump(); };
