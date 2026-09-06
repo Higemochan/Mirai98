@@ -1851,7 +1851,10 @@ function storageCard(kind, files) {
     '<button type="button" onclick="moveChecked(\'' + kind +
     '\')">Move checked...</button>' +
     '<button type="button" onclick="suggestGroups(\'' + kind +
-    '\')">Group by name...</button></div>';
+    '\')">Group by name...</button>' +
+    (platformList().length > 1
+     ? '<button type="button" onclick="reclassifyChecked(\'' + kind +
+       '\')">Reclassify checked...</button>' : '') + '</div>';
   let create = '';
   // a machine plugin may add image formats of its own (label, note), only
   // ever on the shelf its own platform actually uses
@@ -2476,8 +2479,8 @@ window.filterDisks = (kind, text) => {
 // so nothing that named it has to be told, and a CD dump takes its sheet
 // with it.
 function askGroup(kind, what) {
-  const groups = [...new Set((catalog[kind] || []).map(f => f.group)
-                                                  .filter(Boolean))];
+  const groups = [...new Set(((catalog[storagePlatform] || {})[kind] || [])
+                             .map(f => f.group).filter(Boolean))];
   const to = prompt('move ' + what + ' into which group?' +
     (groups.length ? '\n\nthere is already: ' + groups.join(', ') : '') +
     '\n\nleave it empty to take it out of its group', '');
@@ -2503,8 +2506,8 @@ window.moveOne = (kind, name) => {
   if (to !== null) doMove(kind, [name], to);
 };
 window.moveGroup = (kind, group) => {
-  const names = (catalog[kind] || []).filter(f => f.group === group)
-                                     .map(f => f.name);
+  const names = ((catalog[storagePlatform] || {})[kind] || [])
+    .filter(f => f.group === group).map(f => f.name);
   const to = askGroup(kind, group + ' (' + names.length + ')');
   if (to !== null) doMove(kind, names, to);
 };
@@ -2515,6 +2518,35 @@ window.moveChecked = kind => {
   if (!names.length) { toast('nothing is checked'); return; }
   const to = askGroup(kind, names.length + ' images');
   if (to !== null) doMove(kind, names, to);
+};
+// An image already on a shelf from before platforms existed is never put
+// on the right one by a guess -- this is the one place that decision is
+// actually made, one image (or CD set) at a time, by someone looking at
+// it. The server keeps an exact copy of what it was before moving it, in
+// disks/.reclassify-backup/, so a wrong pick here is not a lost image.
+window.reclassifyChecked = async kind => {
+  const card = document.getElementById('storage-' + kind);
+  const names = [...card.querySelectorAll('input.pick:checked')]
+    .map(i => i.value);
+  if (!names.length) { toast('nothing is checked'); return; }
+  const targets = platformList().filter(p => p !== storagePlatform);
+  const to = prompt('move ' + names.length + ' image(s) from the ' +
+    platformLabel(storagePlatform) + ' shelf to which platform?\n\n' +
+    targets.map(p => p + ' = ' + platformLabel(p)).join('\n'));
+  if (to === null) return;
+  if (!targets.includes(to)) { toast('no such platform: ' + to); return; }
+  let moved = 0, failed = [];
+  for (const name of names) {
+    const r = await api('/api/disks/' + kind + '/reclassify',
+      {method: 'POST', body: JSON.stringify({name, to})});
+    if (r) moved += r.files.length; else failed.push(name);
+  }
+  if (moved) {
+    toast(moved + ' moved to ' + platformLabel(to));
+    task('Storage ' + kind + ' - reclassify', 'OK (' + moved + ')');
+  }
+  if (failed.length) toast('could not move: ' + failed.join(', '));
+  render();
 };
 // What the names suggest, put one group at a time so each can be turned
 // down: a name is a hint about what a disc belongs to, not a statement.
@@ -2635,7 +2667,8 @@ async function pollJobs() {
           : esc(j.name) + ': done' +
             (j.verified ? ', read back and checked' : '')).join('<br>');
     if (mine.some(j => j.state === 'done' &&
-                       !catalog[kind].some(f => f.name === j.name)))
+                       !((catalog[storagePlatform] || {})[kind] || [])
+                         .some(f => f.name === j.name)))
       render();
   }
 }
@@ -2751,7 +2784,8 @@ async function uploadFiles(kind, files) {
       }
       const missing = refs.filter(r => !have.has(nameKey(r)) &&
         !haveSafe.has(nameKey(safeDiskName(r))) &&
-        !(catalog[kind] || []).some(f => nameKey(f.name) === nameKey(r)));
+        !((catalog[storagePlatform] || {})[kind] || [])
+          .some(f => nameKey(f.name) === nameKey(r)));
       if (!refs.length) {
         if (!confirm(c.file.name + ' has no FILE line. Upload it anyway?')) return;
       } else if (missing.length) {
@@ -2765,7 +2799,7 @@ async function uploadFiles(kind, files) {
   // the decomposed spelling is the same name, and without this the
   // browser does not ask to overwrite and the upload is refused with 409.
   // Case still tells two names apart, as it did.
-  const dupes = plan.filter(p => (catalog[kind] || [])
+  const dupes = plan.filter(p => ((catalog[storagePlatform] || {})[kind] || [])
     .some(f => nfcName(f.name) === nfcName(p.name)));
   let overwrite = '';
   if (dupes.length) {
