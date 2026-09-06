@@ -4208,6 +4208,10 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             self.rename_disk(m.group(1))
             return
+        m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/reclassify$", path)
+        if m:
+            self.reclassify_disk(m.group(1))
+            return
         m = re.match(r"^/api/disks/(hdd|fdd|cdrom)/move$", path)
         if m:
             self.move_disks(m.group(1))
@@ -4595,6 +4599,91 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200, {"result": "renamed", "name": to,
                          "files": [t for _, t in moves], "vms": touched,
                          "left": os.path.basename(left) if left else ""})
+
+    def reclassify_disk(self, kind):
+        """Move an image already on one platform's shelf to another's --
+        the deliberate, human half of introducing platforms: an image
+        already on the pc98 shelf that is really a towns (or dosv) image
+        sits there until someone here says so file by file. Nothing here
+        ever guesses; the query's platform names where it is now, the
+        body's "to" names where it should be instead.
+
+        A plain copy of the file as it was goes into disks/
+        .reclassify-backup/ first, so a mistake here is a matter of
+        copying it back rather than starting over. Nothing named here is
+        removed from that folder automatically -- it is a human's to
+        clear out once the move it backs up is trusted.
+        """
+        data = self.body_json() or {}
+        name = str(data.get("name") or "")
+        from_platform = current_platform()
+        to_platform = str(data.get("to") or "")
+        if not listed_name(name):
+            self.fail(404, "no such disk")
+            return
+        known = {"pc98"} | set(MACHINE_PLATFORM.values())
+        if to_platform not in known:
+            self.fail(400, "no such platform: %s (know: %s)"
+                      % (to_platform, ", ".join(sorted(known))))
+            return
+        if to_platform == from_platform:
+            self.fail(400, "already on the %s shelf" % from_platform)
+            return
+        root = os.path.dirname(disk_find(kind, name))
+        with _lock:
+            if not os.path.isfile(os.path.join(root, name)):
+                self.fail(404, "no such disk")
+                return
+            files = disc_set(root, name) if kind == "cdrom" else [name]
+            with use_platform(to_platform):
+                for f in files:
+                    if disk_taken(kind, f):
+                        self.fail(409, "%s already exists on the %s shelf"
+                                  % (f, to_platform))
+                        return
+            # an attached image is refused rather than followed: unlike a
+            # rename, the shelf it ends up on is a different platform's,
+            # and a machine on the platform it just left would be pointed
+            # at a name that platform's shelf no longer has at all
+            was = {os.path.join(root, f) for f in files}
+            users = sorted(i["name"] for i in load_instances()
+                          if any(disk_path(i, k) in was for k in DISK_KEYS))
+            if users:
+                self.fail(409, "attached to %s: detach it first"
+                          % ", ".join(users))
+                return
+            backup_dir = os.path.join(CONFIG["root"], "disks",
+                                      ".reclassify-backup")
+            os.makedirs(backup_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%S")
+            orig_group = disk_group_of(kind, name)
+            done = []
+            try:
+                for f in files:
+                    src = os.path.join(root, f)
+                    shutil.copy2(src, os.path.join(
+                        backup_dir, "%s-%s-%s-%s" % (stamp, from_platform,
+                                                     kind, f)))
+                    with use_platform(to_platform):
+                        dest = disk_dest(kind, f, "", make=True)
+                    os.replace(src, dest)
+                    done.append(f)
+            except OSError as err:
+                for f in done:
+                    with use_platform(to_platform):
+                        back = disk_find(kind, f)
+                    try:
+                        os.replace(back, os.path.join(root, f))
+                    except OSError:
+                        pass
+                self.fail(500, "could not reclassify: %s" % err)
+                return
+            disk_drop_group(kind, orig_group)
+        say("%s: %s moved from %s to the %s shelf"
+            % (name, ", ".join(done), from_platform, to_platform), "disk")
+        self.reply(200, {"result": "reclassified", "files": done,
+                         "to": to_platform,
+                         "backup": backup_dir})
 
     # --------------------------------------------------- inside an image
     def fs_target(self, rest, writable=False):
