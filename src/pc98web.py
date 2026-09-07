@@ -383,6 +383,14 @@ def platform_of(inst):
 
 
 def disks_root(kind):
+    # pc98 alone sits flat (disks/<kind>/, not disks/pc98/<kind>/) rather
+    # than nested like every platform after it: it is the shelf every
+    # existing image and every existing instance's own record already
+    # names, from before "platform" existed as a concept at all, and
+    # nesting it the same way now would mean moving every one of those
+    # files (and fixing up what points at them) for a naming symmetry
+    # nothing functional actually needs -- pc98 not being nested breaks
+    # nothing, so it stays the one exception.
     platform = current_platform()
     if platform == "pc98":
         return os.path.join(CONFIG["root"], "disks", kind)
@@ -3897,10 +3905,17 @@ class Handler(BaseHTTPRequestHandler):
     def query_platform(self):
         """The ?platform= a Storage request names, "pc98" by default --
         the shelf that existed before platforms did, and every request
-        from before this had one."""
+        from before this had one. An unlisted value falls back to pc98
+        rather than being trusted as-is: disks_root joins it straight
+        into a filesystem path, and this is the one place that value
+        comes from the request rather than a machine's own registered
+        platform (reclassify_disk's "to" is checked the same way, for
+        the same reason)."""
         from urllib.parse import parse_qs, urlparse
-        return (parse_qs(urlparse(self.path).query).get("platform")
-                or ["pc98"])[0]
+        platform = (parse_qs(urlparse(self.path).query).get("platform")
+                   or ["pc98"])[0]
+        known = {"pc98"} | set(MACHINE_PLATFORM.values())
+        return platform if platform in known else "pc98"
 
     def disk_ref(self, rest):
         """(kind, name, full path) out of a disks/<kind>/<name> URL, on
@@ -5180,6 +5195,14 @@ class Handler(BaseHTTPRequestHandler):
             target = os.path.splitext(dest)[0] + ".qcow2"
         elif (kind, ext) in (("fdd", ".fdi"), ("fdd", ".nfd")):
             target = stem + ".raw"
+        elif kind == "fdd" and ext == ".raw" and current_platform() == "dosv":
+            # 86Box's own fdd.c loaders[] table has no entry for .raw at
+            # all and silently ejects it rather than failing to load
+            # (confirmed live, 2026-09-08) -- so a name landing on this
+            # shelf under the extension every other one defaults its own
+            # uploads to would sit here looking normal and not actually
+            # work. .img is in that table.
+            target = stem + ".img"
         else:
             return os.path.basename(dest)
         # not just "is it here": a name this kind already holds in a group
@@ -5504,6 +5527,15 @@ class Handler(BaseHTTPRequestHandler):
             # of its boot sector and no PC-98 could read it.
             if os.path.splitext(name)[1].lower() not in FDD_CONTAINERS:
                 name += ".raw"
+        if kind == "fdd" and platform == "dosv" \
+                and os.path.splitext(name)[1].lower() != ".img":
+            # A registered builder (box86.py's own) skips the naming
+            # above entirely, so a name typed with no extension, or the
+            # .raw every other shelf's floppies default to, would
+            # otherwise reach 86Box's fdd.c under an extension its own
+            # loaders[] table has no entry for at all -- confirmed live,
+            # 2026-09-08, that this is a silent eject, not a load error.
+            name += ".img"
         if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return

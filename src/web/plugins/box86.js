@@ -3,10 +3,13 @@
 // Registers the "box86" machine: a single fixed Socket 7/Voodoo2 preset
 // (nothing about it is a per-instance field yet -- see box86.py), a list
 // badge, a minimal create wizard (only the panes that mean anything for
-// this machine), and the one thing no other console here needs: a second,
-// audio-only websocket the video console has nothing to do with. The
-// relative-pointer mouse capture every console already gets from the core
-// (app.js) needs nothing added here at all.
+// this machine), Storage formats for its own dosv shelf, and the one
+// thing no other console here needs: a second, audio-only websocket the
+// video console has nothing to do with. The relative-pointer mouse
+// capture every other console here gets from the core (app.js) is opted
+// out of below (relativePointer: false) -- see that flag's own comment
+// for why a real X11 console needs the plain, unmodified VNC pointer
+// the core would otherwise not send it.
 
 // ---- which console belongs to a box86 machine, and its audio port --------
 // consolePrep runs once, before the RFB video connection is even made
@@ -134,7 +137,7 @@ function box86Hardware(i, h) {
       ['&#9707; CD-ROM', i.cd ? h.esc(i.cd) : '(empty)'],
       ['&#9635; Display', i.ports && i.ports.length
        ? 'VNC :' + (i.ports[0] - 5900) + ', websocket ' + i.ports[1] +
-         ', audio websocket ' + i.ports[3]
+         (i.ports.length > 3 ? ', audio websocket ' + i.ports[3] : '')
        : '(not started yet)'],
     ],
   };
@@ -217,6 +220,22 @@ window.registerMachinePlugin({
   labels: { box86: 'DOS/V PC (86Box, Voodoo2)' },
   editForm: { box86: box86EditForm },
   hardware: { box86: box86Hardware },
+  // Storage "Create": standard IBM-compatible FAT12 floppy layouts (box86
+  // is a stock Socket 7 FDC, not PC-98's or FM TOWNS' own non-standard
+  // media) and a blank IDE hard disk to partition and format from the
+  // guest OS. .img throughout, not .raw: fdd.c's own loaders[] table
+  // (box86.py's FDD_EXTS) never matches .raw at all and silently ejects
+  // it instead of erroring -- confirmed live, 2026-09-08 -- so a name
+  // this shelf hands back from here has to already be one it knows.
+  diskFormats: {
+    fdd: [{ value: 'box86-144', label: '1.44M (.img)' },
+          { value: 'box86-120', label: '1.2M (.img)' },
+          { value: 'box86-720', label: '720K (.img)' },
+          { value: 'box86-360', label: '360K (.img)' }],
+    hdd: [{ value: 'box86-hdd', label: 'Blank (.img)',
+            note: 'all zeros: partition and format it from the guest ' +
+                  'OS, as on real hardware' }]
+  },
   // Disks is its own pane now; Host/Memory/Network/Options still have
   // no field box86.py reads, so only General/Disks/Confirm stay
   wizard: { box86: { panes: { Disks: box86WizardDisks, Host: null,

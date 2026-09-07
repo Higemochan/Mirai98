@@ -126,6 +126,101 @@ FDD_EXTS = {"001", "002", "003", "004", "005", "006", "007", "008", "009",
            "ddi", "dsk", "fdi", "fdf", "flp", "hdm", "ima", "imd", "img",
            "json", "mfm", "td0", "vfd", "xdf"}
 
+# Standard MS-DOS FAT12 floppy layouts (the same ones FORMAT.COM has laid
+# out on real PC/AT hardware since the 1980s -- box86 is a Socket 7 board
+# with a stock FDC, not FM TOWNS' or PC-98's own non-standard media, so
+# these are the ordinary IBM-compatible geometries, not something to
+# invent per platform the way towns.py's TOWNS_FLOPPIES table has to.
+# Same 8-tuple shape as that table: bytes/sector, sectors/cluster, root
+# entries, total sectors, media byte, sectors/FAT, sectors/track, heads.
+BOX86_FLOPPIES = {
+    "box86-144": (512, 1, 224, 2880, 0xf0, 9, 18, 2),   # 3.5" 1.44M
+    "box86-120": (512, 1, 224, 2400, 0xf9, 7, 15, 2),   # 5.25" 1.2M
+    "box86-720": (512, 2, 112, 1440, 0xf9, 3, 9, 2),    # 3.5" 720K
+    "box86-360": (512, 2, 112, 720, 0xfd, 2, 9, 2),     # 5.25" 360K
+}
+
+
+def box86_new_floppy(dest, data):
+    """An empty FAT12 floppy image, .img so fdd.c's own loaders[] table
+    (FDD_EXTS above) opens it directly -- no _fdd_compatible_path
+    symlink needed for one made here."""
+    import struct
+    fmt = str(data.get("format") or "")
+    bps, spc, root, total, media, spf, spt, heads = BOX86_FLOPPIES[fmt]
+    label = (str(data.get("label") or "NO NAME").upper()[:11]).ljust(11)
+    boot = bytearray(bps)
+    boot[0:3] = b"\xeb\x3c\x90"
+    boot[3:11] = b"MSDOS5.0"
+    struct.pack_into("<HBHBHHBHHHII", boot, 11, bps, spc, 1, 2, root, total,
+                     media, spf, spt, heads, 0, 0)
+    boot[36] = 0x00                       # drive number
+    boot[38] = 0x29                       # extended boot signature
+    struct.pack_into("<I", boot, 39, 0x12345678)
+    boot[43:54] = label.encode("ascii", "replace")
+    boot[54:62] = b"FAT12   "
+    boot[bps - 2:bps] = b"\x55\xaa"
+    fat = bytearray(spf * bps)
+    fat[0:3] = bytes([media, 0xff, 0xff])
+    root_dir = bytearray(root * 32)
+    root_dir[0:11] = label.encode("ascii", "replace")
+    root_dir[11] = 0x08                   # volume label entry
+    image = bytearray(total * bps)
+    image[0:bps] = boot
+    off = bps
+    for _ in range(2):
+        image[off:off + len(fat)] = fat
+        off += len(fat)
+    image[off:off + len(root_dir)] = root_dir
+    with open(dest, "wb") as f:
+        f.write(image)
+
+
+def hdd_chs(size_mb):
+    """86Box's own geometry for a size, not invented here: the exact
+    algorithm hdd_image_calc_chs (src/disk/hdd_image.c) uses, itself
+    the Virtual Hard Disk Image Format Specification's own CHS
+    calculation appendix. A freshly made image's own hdd_01_parameters
+    (see _sync_disks) has to agree with what 86Box would compute for
+    it, or the two disagreeing on where the disk ends is exactly the
+    kind of mismatch a flat, headerless image has no other way to
+    catch.
+    """
+    ts = size_mb << 11
+    if ts > 65535 * 16 * 255:
+        ts = 65535 * 16 * 255
+    if ts >= 65535 * 16 * 63:
+        spt, heads = 255, 16
+        cth = ts // spt
+    else:
+        spt = 17
+        cth = ts // spt
+        heads = (cth + 1023) // 1024
+        if heads < 4:
+            heads = 4
+        if cth >= (heads * 1024) or heads > 16:
+            spt, heads = 31, 16
+            cth = ts // spt
+        if cth >= (heads * 1024):
+            spt, heads = 63, 16
+            cth = ts // spt
+    cyl = cth // heads
+    return cyl, heads, spt
+
+
+def box86_new_hard_disk(dest, data):
+    """A blank IDE hard disk image: all zeros, sized to exactly what
+    hdd_chs's own geometry for the requested size adds up to (not just
+    the requested megabytes rounded down) -- to partition and format
+    from the guest OS, as on real hardware. .img, never .vhd: the
+    latter needs a real footer (image_is_vhd, hdd_image.c, picks the
+    container purely off that one extension) an all-zero file does not
+    have, and this shelf's own images already are not the SEED_HDD.vhd
+    box86.py copies in on a fresh instance's own first start."""
+    cyl, heads, spt = hdd_chs(int(data.get("size") or 40))
+    with open(dest, "wb") as f:
+        f.truncate(cyl * heads * spt * 512)
+
 
 def register(api):
     api.add_machine("box86", platform="dosv")
@@ -135,6 +230,20 @@ def register(api):
         "is_up": lambda inst: is_up(api, inst),
         "pid": lambda inst: _load_pids(_box_dir(api, inst)).get("86box"),
     })
+    api.machine_sanitize("box86", box86_sanitize)
+    for fmt in BOX86_FLOPPIES:
+        api.disk_builder("dosv", "fdd", fmt, box86_new_floppy)
+    api.disk_builder("dosv", "hdd", "box86-hdd", box86_new_hard_disk)
+
+
+def box86_sanitize(record):
+    """What a box86 record may hold: hdd1/fdd1/fdd2/cd are all
+    _sync_disks ever reads (see _disk_paths); hdd2 and the four SCSI
+    slots are QEMU-machine fields that would sit there validated and
+    saved but never actually reach 86Box's cfg at all."""
+    for key in ("hdd2", "scsi1", "scsi2", "scsi3", "scsi4"):
+        record[key] = ""
+    return None
 
 
 # ------------------------------------------------------------- lifecycle
@@ -203,9 +312,23 @@ def _sync_disks(api, inst, cfg_path, d):
         cp.read(cfg_path, encoding="utf-8")
     if not cp.has_section("Hard disks"):
         cp.add_section("Hard disks")
+    # A real VHD (SEED_HDD's own copy) carries its own footer and 86Box
+    # reads its geometry from that, ignoring this string entirely once
+    # loaded (hdd_image.c) -- but a flat .img made by box86_new_hard_disk
+    # has no such footer, and needs this to be right, computed the same
+    # way 86Box's own hdd_chs would for whatever size the attached file
+    # actually is; sizing it off the file rather than trusting some
+    # fixed value is what makes either case correct without telling
+    # them apart here at all.
+    try:
+        size_mb = os.path.getsize(hdd) >> 20 if hdd else 0
+    except OSError:
+        size_mb = 0
+    cyl, heads, spt = hdd_chs(size_mb or 40)
     cp.set("Hard disks", "hdd_01_fn", hdd)
     cp.set("Hard disks", "hdd_01_ide_channel", "0:0")
-    cp.set("Hard disks", "hdd_01_parameters", "63, 16, 4161, 0, ide")
+    cp.set("Hard disks", "hdd_01_parameters",
+           "%d, %d, %d, 0, ide" % (spt, heads, cyl))
     cp.set("Hard disks", "hdd_01_speed", "ramdisk")
     cp.set("Hard disks", "hdd_01_vhd_blocksize", "4096")
     fc = "Floppy and CD-ROM drives"

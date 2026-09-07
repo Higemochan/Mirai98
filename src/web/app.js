@@ -1827,7 +1827,10 @@ function storageCard(kind, files) {
   files.forEach(f => { stems[stemOf(f.name)] = (stems[stemOf(f.name)] || 0) + 1; });
   const fileRow = f => {
     const used = f.used_by.join(', ');
-    const targets = CONVERT_TARGETS[kind + ':' + extOf(f.name)] || [];
+    // PC-98's own container formats (Anex86/T98-Next); meaningless on a
+    // shelf that never held one to begin with
+    const targets = storagePlatform === 'pc98'
+      ? (CONVERT_TARGETS[kind + ':' + extOf(f.name)] || []) : [];
     const g = f.group || '';
     return '<tr data-name="' + esc(f.name) + '" data-groupname="' + esc(g) +
       '"' + (g && !groupOpen(kind, g) ? ' style="display:none"' : '') +
@@ -1897,6 +1900,10 @@ function storageCard(kind, files) {
                                    esc(f.label) + '</option>').join('');
   const extraNotes = extra.filter(f => f.note).map(f =>
     '<div class="note">' + esc(f.label) + ': ' + esc(f.note) + '</div>').join('');
+  // the built-in options below (and their note) are PC-98's own formats
+  // -- Anex86 flat/qcow2 hdd, raw 2HD fdd -- and make no sense on a
+  // shelf a plugin's own diskFormats already covers for its platform
+  const pc98Shelf = storagePlatform === 'pc98';
   if (kind === 'hdd')
     create = '<h4>Create a disk</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'hdd\')" class="row">' +
@@ -1905,25 +1912,28 @@ function storageCard(kind, files) {
       [40,80,160,320,640,1200,1600,2100,4300].map(s => '<option' +
         (s === 40 ? ' selected' : '') + '>' + s + '</option>').join('') +
       '</select><span class="note">MB</span>' +
-      '<select name="format"><option value="">PC-98 (FAT, flat)</option>' +
-      '<option value="qcow2">PC-98 (FAT, grows on demand)</option>' +
+      '<select name="format">' +
+      (pc98Shelf ? '<option value="">PC-98 (FAT, flat)</option>' +
+       '<option value="qcow2">PC-98 (FAT, grows on demand)</option>' : '') +
       extraOpts + '</select>' +
       '<label class="check"><input type="checkbox" name="fat32"> FAT32' +
       '</label><button class="primary">Create</button></form>' +
-      '<div class="note">The extension is added for you. Anex86 .hdi ' +
-      'cannot be made here: upload one and it is converted.</div>' +
+      (pc98Shelf ? '<div class="note">The extension is added for you. ' +
+       'Anex86 .hdi cannot be made here: upload one and it is converted.' +
+       '</div>' : '') +
       extraNotes + '</div>';
   else if (kind === 'fdd')
     create = '<h4>Create a floppy</h4><div class="body">' +
       '<form onsubmit="return createDisk(this,\'fdd\')" class="row">' +
       '<input type="text" name="name" placeholder="new-floppy" ' +
       'required style="min-width:11em"><select name="format">' +
-      '<option value="1.2">1.25MB 2HD (raw)</option>' +
-      '<option value="1.44">1.44MB 2HD (raw)</option>' + extraOpts + '</select>' +
+      (pc98Shelf ? '<option value="1.2">1.25MB 2HD (raw)</option>' +
+       '<option value="1.44">1.44MB 2HD (raw)</option>' : '') +
+      extraOpts + '</select>' +
       '<button class="primary">Create</button></form>' +
-      '<div class="note">The extension is added for you. Formatted, empty. ' +
-      'A name already ending in .raw, .img, .fdi, .nfd or .d88 keeps it.' +
-      '</div>' +
+      (pc98Shelf ? '<div class="note">The extension is added for you. ' +
+       'Formatted, empty. A name already ending in .raw, .img, .fdi, ' +
+       '.nfd or .d88 keeps it.</div>' : '') +
       extraNotes + '</div>';
   return '<div class="card" id="storage-' + kind + '"><h3>disks/' + kind +
     '/</h3>' +
@@ -2348,8 +2358,11 @@ window.writeToDrive = async (kind, name) => {
 window.readFromDrive = async kind => {
   const drive = await askDrive(kind, 'Read which drive into a new image?');
   if (!drive) return;
+  // .raw is every shelf's own floppy convention except dosv's, whose
+  // engine (86Box's fdd.c) has no loader for that extension at all
   const guess = drive.path.split('/').pop() +
-                (kind === 'fdd' ? '.raw' : '.raw');
+                (kind === 'fdd' && storagePlatform === 'dosv' ? '.img'
+                                                              : '.raw');
   const name = prompt('name for the new image', guess);
   if (!name) return;
   api('/api/disks/' + kind + '/from-drive',
@@ -2410,7 +2423,7 @@ window.pickZip = (kind, name) => {
 
 // pc98/towns/dosv label the same way a machine type does, since each is
 // exactly one plugin's own platform (or none, for pc98 itself)
-const PLATFORM_LABELS = { pc98: 'PC-98' };
+const PLATFORM_LABELS = { pc98: 'PC-98', dosv: 'DOS/V' };
 const platformLabel = (p) => PLATFORM_LABELS[p] ||
   Object.entries(window.MiraiPlugins.platform || {})
     .filter(([, v]) => v === p).map(([m]) => machineLabel(m))[0] || p;

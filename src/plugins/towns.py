@@ -79,6 +79,9 @@ def register(api):
                         lambda inst, data: towns_boot_reset(api, inst, data))
     api.instance_action("towns", "pad-port",
                         lambda inst, data: towns_pad_port(api, inst, data))
+    for fmt in TOWNS_FLOPPIES:
+        api.disk_builder("towns", "fdd", fmt, towns_new_floppy)
+    api.disk_builder("towns", "hdd", "towns", towns_new_hard_disk)
 
 
 # where a machine's CMOS starts from when it has none yet: "" = the ROM
@@ -179,9 +182,6 @@ def towns_reset_cmos(api, inst):
         return (500, "could not remove the CMOS: %s" % err)
     return {"result": "cmos reset", "seed": CMOS_SEEDS.get(
         inst.get("cmos") or "", "towns.cmos")}
-    for fmt in TOWNS_FLOPPIES:
-        api.disk_builder("towns", "fdd", fmt, towns_new_floppy)
-    api.disk_builder("towns", "hdd", "towns", towns_new_hard_disk)
 
 
 # FM TOWNS floppy layouts (MS-DOS FAT12 as the Towns FORMAT command lays
