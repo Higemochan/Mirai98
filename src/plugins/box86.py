@@ -41,6 +41,7 @@ MVP: one machine, a fixed hardware preset, a seed disk copied in on
 first start. The matching front-end lives in web/plugins/box86.js.
 """
 
+import configparser
 import json
 import os
 import shutil
@@ -93,14 +94,16 @@ type = 2
 framebuffer_memory = 4
 texture_memory = 4
 render_threads = 4
-
-[Hard disks]
-hdd_01_fn = hdd/hdd0.vhd
-hdd_01_ide_channel = 0:0
-hdd_01_parameters = 63, 16, 4161, 0, ide
-hdd_01_speed = ramdisk
-hdd_01_vhd_blocksize = 4096
 """
+# The disks live in their own section, [Hard disks] plus [Floppy and
+# CD-ROM drives], written by _sync_disks below instead of living in this
+# template: unlike everything above (which 86Box negotiates for itself
+# after this seeds it once and is then left alone), what is in each
+# drive is Mirai98's own to say, from the instance's own hdd1/fdd1/fdd2/
+# cd fields the same way any PC-98 or Towns machine's are -- and has to
+# be re-written every start to track whatever Storage was last told to
+# attach, not just seeded once.
+FDD_TYPE = "35_2hd"    # 3.5" 1.44M -- fdd.c's own internal_name, verified
 
 
 def register(api):
@@ -121,20 +124,78 @@ def _box_dir(api, inst):
     return d
 
 
+def _disk_paths(api, inst, d):
+    """(hdd, fdd1, fdd2, cd): each resolved the same way any PC-98 or
+    Towns machine's own hdd1/fdd1/fdd2/cd would be, against this
+    instance's own (dosv) Storage shelf. hdd1 alone still falls back to
+    a private copy of the seed image when nothing was attached -- the
+    one field this MVP still defaults on its own, so an instance nobody
+    has touched Storage for still boots to something."""
+    hdd = api.disk_path(inst, "hdd1")
+    if not hdd:
+        seed_dir = os.path.join(d, "hdd")
+        os.makedirs(seed_dir, exist_ok=True)
+        hdd = os.path.join(seed_dir, "hdd0.vhd")
+        if not os.path.exists(hdd) and os.path.exists(SEED_HDD):
+            shutil.copy2(SEED_HDD, hdd)
+    return (hdd, api.disk_path(inst, "fdd1"), api.disk_path(inst, "fdd2"),
+            api.disk_path(inst, "cd"))
+
+
+def _sync_disks(api, inst, cfg_path, d):
+    """Write this instance's own attached disks into its cfg. Read with
+    configparser and written back whole, so [Machine]/[Video]/etc(
+    whatever 86Box itself last negotiated there) survive untouched --
+    only [Hard disks] and [Floppy and CD-ROM drives] are ever touched
+    here, and every start, not just the first: Storage may have
+    attached something different since the last one.
+    """
+    hdd, fdd1, fdd2, cd = _disk_paths(api, inst, d)
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if os.path.exists(cfg_path):
+        cp.read(cfg_path, encoding="utf-8")
+    if not cp.has_section("Hard disks"):
+        cp.add_section("Hard disks")
+    cp.set("Hard disks", "hdd_01_fn", hdd)
+    cp.set("Hard disks", "hdd_01_ide_channel", "0:0")
+    cp.set("Hard disks", "hdd_01_parameters", "63, 16, 4161, 0, ide")
+    cp.set("Hard disks", "hdd_01_speed", "ramdisk")
+    cp.set("Hard disks", "hdd_01_vhd_blocksize", "4096")
+    fc = "Floppy and CD-ROM drives"
+    if not cp.has_section(fc):
+        cp.add_section(fc)
+    for n, path in ((1, fdd1), (2, fdd2)):
+        key_type, key_fn = "fdd_%02i_type" % n, "fdd_%02i_fn" % n
+        cp.set(fc, key_type, FDD_TYPE if path else "none")
+        if path:
+            cp.set(fc, key_fn, path)
+        elif cp.has_option(fc, key_fn):
+            cp.remove_option(fc, key_fn)
+    # sound_on=1 on the first drive unmutes CD audio, matching 86Box's
+    # own default when this key is absent at all
+    cp.set(fc, "cdrom_01_parameters", "1, ide")
+    cp.set(fc, "cdrom_01_ide_channel", "1:0")
+    cp.set(fc, "cdrom_01_image_path", cd or "")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=True)
+
+
 def _ensure_cfg(api, inst):
-    """The instance's own 86box.cfg and seed disk, written once. 86Box
-    rewrites its cfg on exit with whatever it actually negotiated (CPU
-    speed included), so this only ever creates the file -- it never
-    overwrites one already there, the same way towns.py seeds a CMOS
-    file once and then leaves the machine's own copy alone."""
+    """The instance's own 86box.cfg. Everything but the disks is
+    written once (86Box rewrites its cfg on exit with whatever it
+    actually negotiated, CPU speed included, the same way towns.py
+    seeds a CMOS file once and then leaves the machine's own copy
+    alone) -- the disks themselves are re-synced on every call, in
+    _sync_disks, since which ones are attached is Storage's to say and
+    can change between one start and the next.
+    """
     d = _box_dir(api, inst)
     cfg_path = os.path.join(d, "86box.cfg")
-    hdd_path = os.path.join(d, "hdd", "hdd0.vhd")
     if not os.path.exists(cfg_path):
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(CFG_TEMPLATE)
-    if not os.path.exists(hdd_path) and os.path.exists(SEED_HDD):
-        shutil.copy2(SEED_HDD, hdd_path)
+    _sync_disks(api, inst, cfg_path, d)
     return d
 
 

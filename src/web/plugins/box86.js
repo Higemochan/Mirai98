@@ -106,9 +106,10 @@ function startBox86Audio(target, port) {
 }
 
 // ---- hardware (read-only) --------------------------------------------
-// Every field box86.py's CFG_TEMPLATE fixes is fixed for every instance
-// today, so the table says exactly that rather than offering a form for
-// settings that would not actually go anywhere yet.
+// The board/CPU/video preset is still fixed for every instance -- that
+// part of the table says exactly that -- but the disks are this
+// instance's own now, box86.py syncs them into its cfg from hdd1/fdd1/
+// fdd2/cd (the dosv shelf) the same as any PC-98 or Towns machine's.
 const BOX86_BIOS = 'tx97 (430TX), 86Box’s own BIOS';
 const BOX86_SOUND = 'OpenAL/PulseAudio, carried over its own audio websocket';
 if (typeof JA === 'object') {
@@ -125,9 +126,12 @@ function box86Hardware(i, h) {
       ['&#9636; CPU', 'Pentium MMX (pentium_p55c), 200MHz'],
       ['&#9635; Video', 'S3 ViRGE/DX + 3Dfx Voodoo2 (passthrough)'],
       ['&#9834; Sound', BOX86_SOUND],
-      ['&#9707; Disk', 'a private copy of a seed image, made the first ' +
-       'time this instance starts' + note(
-         '(not the shared Storage shelf yet: see disks/dosv/)')],
+      ['&#9707; Hard disk', i.hdd1 ? h.esc(i.hdd1)
+       : 'a private copy of a seed image' + note('(nothing attached ' +
+         'from Storage; made the first time this instance starts)')],
+      ['&#9707; Floppy A', i.fdd1 ? h.esc(i.fdd1) : '(empty)'],
+      ['&#9707; Floppy B', i.fdd2 ? h.esc(i.fdd2) : '(empty)'],
+      ['&#9707; CD-ROM', i.cd ? h.esc(i.cd) : '(empty)'],
       ['&#9635; Display', i.ports && i.ports.length
        ? 'VNC :' + (i.ports[0] - 5900) + ', websocket ' + i.ports[1] +
          ', audio websocket ' + i.ports[3]
@@ -137,19 +141,35 @@ function box86Hardware(i, h) {
 }
 
 // ---- edit form ---------------------------------------------------------
-// Nothing here is a field box86.py's engine reads except machine and
-// name: the preset is fixed for now, so the form does not pretend to let
-// any of it be changed.
+// Machine, name and the four disks are all box86.py's engine actually
+// reads; everything else about the preset is still fixed, so the form
+// does not pretend to let it be changed. A running machine keeps the
+// disks it started with -- box86 has no QMP media-change of its own,
+// so like a rename, a swap needs it stopped first (its cfg is only
+// re-synced from these fields at the next start).
 function box86EditForm(i, h) {
   const machineOpts = h.machineList().map(m =>
     '<option value="' + m + '"' +
     ((i.machine || 'box86') === m ? ' selected' : '') + '>' +
     h.esc(h.machineLabel ? h.machineLabel(m) : m) + '</option>').join('');
+  const note = (t) => ' <span class="note">' + t + '</span>';
   return '<form onsubmit="return saveVm(this,\'' + i.name + '\')">' +
+    '<div class="row"><label>Hard disk</label>' +
+      h.diskSelect('hdd1', 'hdd', i.hdd1, null, 'dosv') +
+      note('empty: a private copy of the seed image is made instead') +
+      '</div>' +
+    '<div class="row"><label>Floppy A</label>' +
+      h.diskSelect('fdd1', 'fdd', i.fdd1, null, 'dosv') + '</div>' +
+    '<div class="row"><label>Floppy B</label>' +
+      h.diskSelect('fdd2', 'fdd', i.fdd2, null, 'dosv') + '</div>' +
+    '<div class="row"><label>CD-ROM</label>' +
+      h.diskSelect('cd', 'cdrom', i.cd, null, 'dosv') + '</div>' +
+    (i.running ? '<div class="note">stop it first to change a disk; ' +
+     'a running instance keeps the ones it started with</div>' : '') +
     '<div class="row"><label>Machine type</label>' +
     '<select name="machine">' + machineOpts + '</select></div>' +
     '<div class="row"><label></label><span class="note">tx97, Pentium ' +
-    'MMX 200MHz, Voodoo2 -- the one preset this MVP offers; hardware ' +
+    'MMX 200MHz, Voodoo2 -- the one preset this MVP offers; CPU/video ' +
     'options come later</span></div>' +
     '<input type="hidden" name="memory" value="' + h.esc(i.memory || '64M') +
     '"><input type="hidden" name="sound" value="none">' +
@@ -158,6 +178,23 @@ function box86EditForm(i, h) {
     (i.running ? ' disabled title="stop it first"' : '') + '>Save</button>' +
     '<button type="button" onclick="removeVm(\'' + i.name + '\')"' +
     (i.running ? ' disabled' : '') + '>Delete</button></div></form>';
+}
+
+// ---- create wizard: disks ----------------------------------------------
+function box86WizardDisks(h) {
+  return '<div class="row"><label>Hard disk</label>' +
+      h.diskSelect('hdd1', 'hdd', '', null, 'dosv') +
+      h.note('empty: a private copy of the seed image is made instead') +
+      '</div>' +
+    '<div class="row"><label>Floppy A</label>' +
+      h.diskSelect('fdd1', 'fdd', '', null, 'dosv') + '</div>' +
+    '<div class="row"><label>Floppy B</label>' +
+      h.diskSelect('fdd2', 'fdd', '', null, 'dosv') + '</div>' +
+    '<div class="row"><label>CD-ROM</label>' +
+      h.diskSelect('cd', 'cdrom', '', null, 'dosv') + '</div>' +
+    '<div class="note">Images live in Storage, on their own dosv shelf. ' +
+    'box86 has no live media change yet: stop the machine to swap a ' +
+    'disk, the next start picks up whatever is attached then.</div>';
 }
 
 window.registerMachinePlugin({
@@ -173,10 +210,11 @@ window.registerMachinePlugin({
   labels: { box86: 'DOS/V PC (86Box, Voodoo2)' },
   editForm: { box86: box86EditForm },
   hardware: { box86: box86Hardware },
-  // nothing here has a field to fill in yet: only General (name, machine
-  // type) and Confirm stay, the panes every machine keeps
-  wizard: { box86: { panes: { Disks: null, Host: null, Memory: null,
-                              Network: null, Options: null } } },
+  // Disks is its own pane now; Host/Memory/Network/Options still have
+  // no field box86.py reads, so only General/Disks/Confirm stay
+  wizard: { box86: { panes: { Disks: box86WizardDisks, Host: null,
+                              Memory: null, Network: null,
+                              Options: null } } },
   consolePrep: prepBox86Console,
   console: (rfb, target, name) => {
     const port = box86AudioPort.get(name);
