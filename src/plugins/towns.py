@@ -82,6 +82,25 @@ def register(api):
     for fmt in TOWNS_FLOPPIES:
         api.disk_builder("towns", "fdd", fmt, towns_new_floppy)
     api.disk_builder("towns", "hdd", "towns", towns_new_hard_disk)
+    # the exact set towns_argv's own -L points at (mem_init_rom,
+    # qemu-pc98towns's hw/i386/towns-mem.c): 4 the emulator refuses to
+    # start at all without (exit(1), "could not load the FM TOWNS ROM
+    # set"), one (the font extension) it starts fine missing -- not
+    # guessed, read from that source and the real files this appliance
+    # already ships under this same directory
+    cfg = api.CONFIG
+    towns_roms = cfg.get("towns_roms") or api.os.path.join(cfg["roms"],
+                                                           "towns")
+    api.add_rom_set("towns", towns_roms, [
+        ("FMT_SYS.ROM", True), ("FMT_DOS.ROM", True),
+        ("FMT_FNT.ROM", True), ("FMT_DIC.ROM", True),
+        ("FMT_F20.ROM", False),
+    ], note="a real machine's own ROMs, with no compatible set of its "
+            "own to stand in for a missing one the way PC-98's bios: "
+            "compat does -- towns_sanitize holds bios at real "
+            "unconditionally, and the emulator itself refuses to start "
+            "at all (exit 1) missing any of the four marked required "
+            "here")
 
 
 # where a machine's CMOS starts from when it has none yet: "" = the ROM

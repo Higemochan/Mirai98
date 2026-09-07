@@ -1773,13 +1773,25 @@ const extOf = n => { const i = n.lastIndexOf('.');
 // in the type column already, and the name column is for reading
 const stemOf = n => { const i = n.lastIndexOf('.');
                       return i > 0 ? n.slice(0, i) : n; };
+// Each target names which platform shelves it makes sense on: a QEMU
+// machine's own drive_backing (pc98web.py) reads format= off the
+// extension generically, so raw<->qcow2 is any QEMU-backed platform's
+// own (pc98, towns; not dosv -- 86Box's engine has no qcow2 reader of
+// its own), while .hdi/.fdi/.nfd are PC-98-only container formats
+// (Anex86/T98-Next) no other platform's shelf ever held one of.
 const CONVERT_TARGETS = {
   // no raw->hdi: an Anex86 image on this shelf is handed to QEMU flat,
   // which reads its header as the first sectors of the disk
-  'hdd:.hdi': ['raw'], 'hdd:.raw': ['qcow2'],
-  'hdd:.img': ['qcow2'], 'hdd:.qcow2': ['raw'],
-  'fdd:.fdi': ['raw'], 'fdd:.nfd': ['raw'],
-  'fdd:.raw': ['fdi', 'nfd'], 'fdd:.img': ['fdi', 'nfd'],
+  'hdd:.hdi': [{ to: 'raw', platforms: ['pc98'] }],
+  'hdd:.raw': [{ to: 'qcow2', platforms: ['pc98', 'towns'] }],
+  'hdd:.img': [{ to: 'qcow2', platforms: ['pc98', 'towns'] }],
+  'hdd:.qcow2': [{ to: 'raw', platforms: ['pc98', 'towns'] }],
+  'fdd:.fdi': [{ to: 'raw', platforms: ['pc98'] }],
+  'fdd:.nfd': [{ to: 'raw', platforms: ['pc98'] }],
+  'fdd:.raw': [{ to: 'fdi', platforms: ['pc98'] },
+              { to: 'nfd', platforms: ['pc98'] }],
+  'fdd:.img': [{ to: 'fdi', platforms: ['pc98'] },
+              { to: 'nfd', platforms: ['pc98'] }],
 };
 
 // what a catalog entry is: its type, and for a CD dump the state of its
@@ -1827,10 +1839,8 @@ function storageCard(kind, files) {
   files.forEach(f => { stems[stemOf(f.name)] = (stems[stemOf(f.name)] || 0) + 1; });
   const fileRow = f => {
     const used = f.used_by.join(', ');
-    // PC-98's own container formats (Anex86/T98-Next); meaningless on a
-    // shelf that never held one to begin with
-    const targets = storagePlatform === 'pc98'
-      ? (CONVERT_TARGETS[kind + ':' + extOf(f.name)] || []) : [];
+    const targets = (CONVERT_TARGETS[kind + ':' + extOf(f.name)] || [])
+      .filter(t => t.platforms.includes(storagePlatform)).map(t => t.to);
     const g = f.group || '';
     return '<tr data-name="' + esc(f.name) + '" data-groupname="' + esc(g) +
       '"' + (g && !groupOpen(kind, g) ? ' style="display:none"' : '') +
@@ -1916,8 +1926,9 @@ function storageCard(kind, files) {
       (pc98Shelf ? '<option value="">PC-98 (FAT, flat)</option>' +
        '<option value="qcow2">PC-98 (FAT, grows on demand)</option>' : '') +
       extraOpts + '</select>' +
-      '<label class="check"><input type="checkbox" name="fat32"> FAT32' +
-      '</label><button class="primary">Create</button></form>' +
+      (pc98Shelf ? '<label class="check"><input type="checkbox" ' +
+       'name="fat32"> FAT32</label>' : '') +
+      '<button class="primary">Create</button></form>' +
       (pc98Shelf ? '<div class="note">The extension is added for you. ' +
        'Anex86 .hdi cannot be made here: upload one and it is converted.' +
        '</div>' : '') +
@@ -1935,8 +1946,13 @@ function storageCard(kind, files) {
        'Formatted, empty. A name already ending in .raw, .img, .fdi, ' +
        '.nfd or .d88 keeps it.</div>' : '') +
       extraNotes + '</div>';
-  return '<div class="card" id="storage-' + kind + '"><h3>disks/' + kind +
-    '/</h3>' +
+  // pc98 alone sits flat (disks/<kind>/); every platform after it nests
+  // under its own name (disks_root, pc98web.py) -- matching that here
+  // rather than always showing the pre-platform path
+  const shelfPath = 'disks/' + (pc98Shelf ? '' : storagePlatform + '/') +
+    kind + '/';
+  return '<div class="card" id="storage-' + kind + '"><h3>' +
+    esc(shelfPath) + '</h3>' +
     '<h4>Images</h4>' + shelf + '<table>' +
     '<tr><th>Name</th><th>Type</th><th>Size</th><th>Modified</th>' +
     '<th>Used by</th><th></th></tr>' +
@@ -1969,21 +1985,46 @@ function storageCard(kind, files) {
 }
 
 function romCard(data) {
-  const rows = data.roms.map(r =>
-    '<tr><td>' + esc(r.name) + '</td><td>' +
-    (r.present ? fmtBytes(r.size) : '<span class="note">not uploaded, ' +
-     'the compatible ROM stands in</span>') + '</td>' +
-    '<td style="text-align:right">' +
-    '<button type="button" onclick="pickRom(\'' + r.name + '\')">' +
-    (r.present ? 'Replace...' : 'Upload...') + '</button>' +
-    (r.present ? ' <button type="button" onclick="deleteRom(\'' + r.name +
-     '\')">Remove</button>' : '') + '</td></tr>').join('');
+  // dosv has no ROM set of its own (86Box's own BIOS needs no external
+  // ROM at all) -- no rows at all is this card's own sign there is
+  // nothing here to show, not an error
+  if (!data.roms.length) return '';
+  const pc98Shelf = storagePlatform === 'pc98';
+  const missingRequired = data.roms.some(r => r.required && !r.present);
+  const rows = data.roms.map(r => {
+    // pc98's own rows never carried a required/optional distinction (it
+    // has always had a compatible fallback for every one of them); a
+    // plugin's own set (towns') does, since the emulator itself refuses
+    // to start at all missing one marked required here
+    const tag = pc98Shelf ? '' : (r.required
+      ? ' <span class="note" style="color:#e06c5f">required</span>'
+      : ' <span class="note">optional</span>');
+    const missing = r.present ? fmtBytes(r.size)
+      : pc98Shelf
+        ? '<span class="note">not uploaded, the compatible ROM stands in</span>'
+        : (r.required
+           ? '<span style="color:#e06c5f">not uploaded, the machine will not start</span>'
+           : '<span class="note">not uploaded</span>');
+    return '<tr><td>' + esc(r.name) + tag + '</td><td>' + missing + '</td>' +
+      '<td style="text-align:right">' +
+      '<button type="button" onclick="pickRom(\'' + r.name + '\')">' +
+      (r.present ? 'Replace...' : 'Upload...') + '</button>' +
+      (r.present ? ' <button type="button" onclick="deleteRom(\'' + r.name +
+       '\')">Remove</button>' : '') + '</td></tr>';
+  }).join('');
+  const note = pc98Shelf
+    ? 'A machine set to the real BIOS uses these and falls back to the ' +
+      'compatible ROMs. N88 BASIC needs pc98basic.bin. No compatible ' +
+      'version yet.'
+    : 'A real machine\'s own ROMs, with no compatible set of its own to ' +
+      'stand in for a missing one: the emulator refuses to start at ' +
+      'all without every one marked required' +
+      (missingRequired ? ', which this instance is currently missing.'
+                        : '.');
   return '<div class="card"><h3>Real machine ROMs &mdash; ' +
     esc(data.dir) + '</h3><table>' +
     '<tr><th>File</th><th>State</th><th></th></tr>' + rows + '</table>' +
-    '<div class="body note">A machine set to the real BIOS uses these ' +
-    'and falls back to the compatible ROMs. N88 BASIC needs ' +
-    'pc98basic.bin. No compatible version yet.</div></div>';
+    '<div class="body note">' + esc(note) + '</div></div>';
 }
 
 window.pickRom = name => {
@@ -1993,7 +2034,8 @@ window.pickRom = name => {
     const file = input.files[0];
     if (!file) return;
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/roms?name=' + encodeURIComponent(name));
+    xhr.open('POST', '/api/roms?name=' + encodeURIComponent(name) +
+             '&platform=' + encodeURIComponent(storagePlatform));
     xhr.onload = () => {
       let r = {};
       try { r = JSON.parse(xhr.response); } catch (e) {}
@@ -2012,7 +2054,8 @@ window.pickRom = name => {
 };
 window.deleteRom = name => {
   if (!confirm('remove ' + name + '?')) return;
-  api('/api/roms/' + name, {method: 'DELETE'})
+  api('/api/roms/' + name + '?platform=' + encodeURIComponent(storagePlatform),
+      {method: 'DELETE'})
     .then(r => { if (r) { toast('removed ' + name);
                           task('ROM ' + name + ' - remove', 'OK'); }
                  render(); });
@@ -3172,7 +3215,7 @@ async function refreshFleet() {
 let romsSoon = Promise.resolve(null);
 
 async function refreshDisks() {
-  romsSoon = api('/api/roms');
+  romsSoon = api('/api/roms?platform=' + encodeURIComponent(storagePlatform));
   await refreshGear();
   // one shelf per platform, in parallel: a machine's disk picker (edit
   // form) needs its own platform's catalog even when Storage itself is

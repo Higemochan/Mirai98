@@ -202,6 +202,12 @@ DISK_BUILDERS = {}
 # (machine, action) -> fn(inst, data) -> reply dict | (status, message):
 # a plugin's own POST /api/instances/<name>/x/<action>
 PLUGIN_ACTIONS = {}
+# platform -> {"dir": CONFIG["roms"] subdirectory name, "files": [(name,
+# required), ...], "note": str}. pc98 itself is not in here: it predates
+# this registry (ROM_FILES, rom_catalog) and keeps its own hardcoded
+# form rather than being migrated for a symmetry nothing needs, the
+# same reasoning disks_root's own comment gives for pc98 staying flat.
+ROM_SETS = {}
 
 
 class PluginAPI:
@@ -291,6 +297,18 @@ class PluginAPI:
     def machine_sanitize(self, name, fn):
         """A final check/trim of an instance record for this machine."""
         MACHINE_SANITIZE[name] = fn
+
+    def add_rom_set(self, platform, dir, files, note=""):
+        """This platform's own real ROM set, shown and uploaded to in
+        Storage the way pc98's has been all along: `dir` is a name
+        under CONFIG["roms"] of its own (pc98 itself has none -- its
+        ROMs sit in CONFIG["roms"] directly, from before platforms), and
+        `files` is [(filename, required), ...] -- a set the emulator
+        refuses to start at all without every required one present,
+        the rest loaded if there but not missed if not.
+        """
+        ROM_SETS[platform] = {"dir": dir, "files": list(files),
+                              "note": str(note or "")}
 
     def add_field(self, name, validator=None):
         """Declare an instance field of the plugin's own (kept in vm.xml)."""
@@ -873,18 +891,43 @@ def zip_into_disk(kind, name, archive, log=lambda *a: None):
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def rom_catalog():
-    """The real ROM set, and which parts of it are actually here."""
+def rom_files_for(platform):
+    """[(name, required), ...] for this platform's own ROM set: pc98's
+    hardcoded one (ROM_FILES, every file required, from before this
+    registry existed) for pc98 itself, whatever a plugin registered
+    (add_rom_set) for any other platform, or none at all -- 86Box's own
+    dosv has no external ROM set of its own to show or upload to."""
+    if platform == "pc98":
+        return [(name, True) for name in ROM_FILES]
+    rom_set = ROM_SETS.get(platform)
+    return list(rom_set["files"]) if rom_set else []
+
+
+def rom_dir_for(platform):
+    """Where this platform's own ROM set lives: CONFIG["roms"] itself
+    for pc98, a subdirectory of it (add_rom_set's own "dir") for any
+    other platform that registered one."""
+    if platform != "pc98":
+        rom_set = ROM_SETS.get(platform)
+        if rom_set:
+            return os.path.join(CONFIG["roms"], rom_set["dir"])
+    return CONFIG["roms"]
+
+
+def rom_catalog(platform):
+    """This platform's own real ROM set, and which parts of it are
+    actually here."""
+    roms_dir = rom_dir_for(platform)
     out = []
-    for name in ROM_FILES:
-        full = os.path.join(CONFIG["roms"], name)
+    for name, required in rom_files_for(platform):
+        full = os.path.join(roms_dir, name)
         try:
             st = os.stat(full)
             out.append({"name": name, "present": True, "size": st.st_size,
-                        "mtime": int(st.st_mtime)})
+                        "mtime": int(st.st_mtime), "required": required})
         except OSError:
             out.append({"name": name, "present": False, "size": 0,
-                        "mtime": 0})
+                        "mtime": 0, "required": required})
     return out
 
 
@@ -3822,7 +3865,9 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 self.reply(200, disk_catalog())
         elif path == "/api/roms":
-            self.reply(200, {"roms": rom_catalog(), "dir": CONFIG["roms"]})
+            platform = current_platform()
+            self.reply(200, {"roms": rom_catalog(platform),
+                             "dir": rom_dir_for(platform)})
         elif path == "/api/hardware":
             self.reply(200, {"drives": host_drives(),
                              "serial": serial_ports()})
@@ -5246,16 +5291,19 @@ class Handler(BaseHTTPRequestHandler):
             size = int(self.headers.get("Content-Length", 0))
         except ValueError:
             size = 0
-        if name not in ROM_FILES:
+        platform = current_platform()
+        names = [n for n, _ in rom_files_for(platform)]
+        if name not in names:
             self.refuse_upload(size, 400, "the ROM must be one of: %s"
-                               % ", ".join(ROM_FILES))
+                               % ", ".join(names))
             return
         if not 0 < size <= (4 << 20):
             self.refuse_upload(size, 400, "a ROM image is a few hundred "
                                           "kilobytes, not %d bytes" % size)
             return
-        os.makedirs(CONFIG["roms"], exist_ok=True)
-        dest = os.path.join(CONFIG["roms"], name)
+        roms_dir = rom_dir_for(platform)
+        os.makedirs(roms_dir, exist_ok=True)
+        dest = os.path.join(roms_dir, name)
         blob = b""
         while len(blob) < size:
             chunk = self.rfile.read(min(1 << 20, size - len(blob)))
@@ -5535,7 +5583,9 @@ class Handler(BaseHTTPRequestHandler):
             # otherwise reach 86Box's fdd.c under an extension its own
             # loaders[] table has no entry for at all -- confirmed live,
             # 2026-09-08, that this is a silent eject, not a load error.
-            name += ".img"
+            # Whatever extension is already there is replaced, not kept:
+            # "+=" here left a name typed as "x.raw" as "x.raw.img".
+            name = os.path.splitext(name)[0] + ".img"
         if disk_taken(kind, name):
             self.fail(409, "%s already exists" % name)
             return
@@ -5639,11 +5689,12 @@ class Handler(BaseHTTPRequestHandler):
         _platform_ctx.value = self.query_platform()
         if path.startswith("/api/roms/"):
             name = path[len("/api/roms/"):]
-            if name not in ROM_FILES:
+            platform = current_platform()
+            if name not in [n for n, _ in rom_files_for(platform)]:
                 self.fail(404, "no such ROM")
                 return
             try:
-                os.remove(os.path.join(CONFIG["roms"], name))
+                os.remove(os.path.join(rom_dir_for(platform), name))
             except OSError as err:
                 self.fail(404, str(err))
                 return
