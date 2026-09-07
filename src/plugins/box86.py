@@ -173,8 +173,15 @@ def _sync_disks(api, inst, cfg_path, d):
         elif cp.has_option(fc, key_fn):
             cp.remove_option(fc, key_fn)
     # sound_on=1 on the first drive unmutes CD audio, matching 86Box's
-    # own default when this key is absent at all
-    cp.set(fc, "cdrom_01_parameters", "1, ide")
+    # own default when this key is absent at all. The bus string here is
+    # hdd_string_to_bus's own vocabulary, not the [Hard disks] one --
+    # "ide" resolves to HDD_BUS_IDE, which a CD-ROM drive never matches
+    # (config.c only reads cdrom_01_ide_channel/image_path once bus_type
+    # == CDROM_BUS_ATAPI); "atapi" is the real, distinct string that
+    # actually gets there. Confirmed live, 2026-09-07: "1, ide" left the
+    # drive listed as "(Unknown Bus)" in 86Box's own Media menu, with no
+    # channel and no image ever accepted.
+    cp.set(fc, "cdrom_01_parameters", "1, atapi")
     cp.set(fc, "cdrom_01_ide_channel", "1:0")
     cp.set(fc, "cdrom_01_image_path", cd or "")
     with open(cfg_path, "w", encoding="utf-8") as f:
