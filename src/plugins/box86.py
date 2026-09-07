@@ -240,7 +240,15 @@ def box86_sanitize(record):
     """What a box86 record may hold: hdd1/fdd1/fdd2/cd are all
     _sync_disks ever reads (see _disk_paths); hdd2 and the four SCSI
     slots are QEMU-machine fields that would sit there validated and
-    saved but never actually reach 86Box's cfg at all."""
+    saved but never actually reach 86Box's cfg at all.
+
+    midi is deliberately left alone here: sanitize() (pc98web.py) has
+    already validated it against MIDI_MODES for every machine before
+    this ever runs, and _sync_midi below is what gives "synth" its own
+    real meaning for box86 -- a standalone MPU-401 into 86Box's own
+    FluidSynth, not pc98/towns' MPU-PC98II -- so unlike the QEMU-only
+    fields above, this is one box86 actually reads and must keep.
+    """
     for key in ("hdd2", "scsi1", "scsi2", "scsi3", "scsi4"):
         record[key] = ""
     return None
@@ -358,14 +366,81 @@ def _sync_disks(api, inst, cfg_path, d):
         cp.write(f, space_around_delimiters=True)
 
 
+# "synth" (inst["midi"]) is the same abstract choice pc98/towns' own midi
+# field already means -- MIDI_MODES, pc98web.py, untouched here -- box86
+# just wires it to different, real hardware of its own: a standalone
+# MPU-401 (snd_mpu401.c, independent of any sound card) into 86Box's own
+# built-in FluidSynth MIDI-out device (midi_fluidsynth.c). Both confirmed
+# against 86Box's own source (/root/86box-src), not guessed:
+#   - config.c's load_sound()/save_sound() read and write midi_device and
+#     mpu401_standalone as plain [Sound] keys, the same section sndcard
+#     already lives in; mpu401_standalone=1 alone is enough for 86Box to
+#     add the device itself (sound.c: "if (mpu401_standalone_enable)
+#     mpu401_device_add();"), no other wiring needed.
+#   - each device's own settings live in a section named after its own
+#     device_t.name verbatim -- the same pattern CFG_TEMPLATE's own
+#     [S3 ViRGE/DX PCI] and [3Dfx Voodoo Graphics] sections already use --
+#     giving "FluidSynth" (sound_font) and "Roland MPU-IPC-T" (base, irq,
+#     receive_input), the device_t names snd_mpu401.c/midi_fluidsynth.c
+#     themselves declare for the standalone (non-MCA) ISA device and the
+#     synth device respectively.
+#   - FluidSynth's rendered PCM reaches 86Box's own central mixer through
+#     the same generic path any other sound source does (sound.c:
+#     "midi_poll();", called every mix cycle) -- already flowing out
+#     through the very PulseAudio null-sink/ffmpeg capture _sink_name/
+#     _spawn wire up per instance, so none of that needs touching either.
+MPU401_SECTION = "Roland MPU-IPC-T"    # snd_mpu401.c's own device_t.name
+
+
+def _sync_midi(api, inst, cfg_path):
+    """Like _sync_disks: read whole, touch only what this owns, write
+    whole back, every start -- whether this is on is Storage's own
+    instance field to say and can change between one start and the
+    next, the same as which disks are attached.
+    """
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if os.path.exists(cfg_path):
+        cp.read(cfg_path, encoding="utf-8")
+    if not cp.has_section("Sound"):
+        cp.add_section("Sound")
+    if inst.get("midi") == "synth":
+        cp.set("Sound", "midi_device", "fluidsynth")
+        cp.set("Sound", "mpu401_standalone", "1")
+        if not cp.has_section("FluidSynth"):
+            cp.add_section("FluidSynth")
+        # The same shared SoundFont pc98/towns' own MIDI synth already
+        # plays through (pc98web.py/towns.py: cfg.get("soundfont")) --
+        # read from config, never hardcoded, so this resolves correctly
+        # on the scratch server's own config too, not just production's.
+        cp.set("FluidSynth", "sound_font", api.CONFIG.get("soundfont") or "")
+        if not cp.has_section(MPU401_SECTION):
+            cp.add_section(MPU401_SECTION)
+        cp.set(MPU401_SECTION, "base", "0x330")
+        cp.set(MPU401_SECTION, "irq", "2")
+        # No real MIDI-in device exists to feed this; 1 (86Box's own
+        # default) would just have it probe for one that is never there.
+        cp.set(MPU401_SECTION, "receive_input", "0")
+    else:
+        for key in ("midi_device", "mpu401_standalone"):
+            if cp.has_option("Sound", key):
+                cp.remove_option("Sound", key)
+        for section in ("FluidSynth", MPU401_SECTION):
+            if cp.has_section(section):
+                cp.remove_section(section)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=True)
+
+
 def _ensure_cfg(api, inst):
-    """The instance's own 86box.cfg. Everything but the disks is
-    written once (86Box rewrites its cfg on exit with whatever it
+    """The instance's own 86box.cfg. Everything but the disks and MIDI
+    is written once (86Box rewrites its cfg on exit with whatever it
     actually negotiated, CPU speed included, the same way towns.py
     seeds a CMOS file once and then leaves the machine's own copy
-    alone) -- the disks themselves are re-synced on every call, in
-    _sync_disks, since which ones are attached is Storage's to say and
-    can change between one start and the next.
+    alone) -- the disks and whether a MIDI module is fitted are
+    re-synced on every call (_sync_disks, _sync_midi), since both are
+    Storage/the instance record's own to say and can change between
+    one start and the next.
     """
     d = _box_dir(api, inst)
     cfg_path = os.path.join(d, "86box.cfg")
@@ -373,6 +448,7 @@ def _ensure_cfg(api, inst):
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(CFG_TEMPLATE)
     _sync_disks(api, inst, cfg_path, d)
+    _sync_midi(api, inst, cfg_path)
     return d
 
 
