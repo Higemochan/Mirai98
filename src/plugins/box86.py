@@ -104,6 +104,18 @@ render_threads = 4
 # be re-written every start to track whatever Storage was last told to
 # attach, not just seeded once.
 FDD_TYPE = "35_2hd"    # 3.5" 1.44M -- fdd.c's own internal_name, verified
+# fdd_load (src/floppy/fdd.c) picks a loader purely off the file's own
+# extension against this fixed table (loaders[], same file) and, on no
+# match, clears the drive's filename outright rather than refusing to
+# start it or falling back to a generic raw loader -- confirmed live,
+# 2026-09-08, by strace: a plain, valid, correctly-sized raw image named
+# .raw (the PC-98/Towns shelf's own usual floppy extension) was opened,
+# probed and closed once at boot and never touched again, because ".raw"
+# is not one of these and 86Box silently drops it instead of erroring.
+FDD_EXTS = {"001", "002", "003", "004", "005", "006", "007", "008", "009",
+           "010", "12", "144", "360", "720", "86f", "bin", "cq", "cqm",
+           "ddi", "dsk", "fdi", "fdf", "flp", "hdm", "ima", "imd", "img",
+           "json", "mfm", "td0", "vfd", "xdf"}
 
 
 def register(api):
@@ -142,6 +154,31 @@ def _disk_paths(api, inst, d):
             api.disk_path(inst, "cd"))
 
 
+def _fdd_compatible_path(d, slot, path):
+    """A path box86.py can actually put in fdd_0<slot>_fn: unchanged if
+    its own extension is already one fdd.c's loaders[] table knows,
+    otherwise a symlink to it, in this instance's own box86/ directory,
+    under a name whose extension (.img) that table does know -- so a
+    dosv-shelf image keeps the name Storage gave it (a PC-98/Towns-style
+    .raw among them) and 86Box still opens it. Purely an internal
+    implementation detail of what this instance hands 86Box: Storage's
+    own bookkeeping (disk_path, used_by) still only ever knows the real
+    shelf file, never this symlink.
+    """
+    if not path:
+        return ""
+    if os.path.splitext(path)[1].lstrip(".").lower() in FDD_EXTS:
+        return path
+    link = os.path.join(d, "fdd%d.img" % slot)
+    try:
+        if os.path.lexists(link):
+            os.remove(link)
+        os.symlink(path, link)
+    except OSError:
+        return path
+    return link
+
+
 def _sync_disks(api, inst, cfg_path, d):
     """Write this instance's own attached disks into its cfg. Read with
     configparser and written back whole, so [Machine]/[Video]/etc(
@@ -166,6 +203,7 @@ def _sync_disks(api, inst, cfg_path, d):
     if not cp.has_section(fc):
         cp.add_section(fc)
     for n, path in ((1, fdd1), (2, fdd2)):
+        path = _fdd_compatible_path(d, n, path)
         key_type, key_fn = "fdd_%02i_type" % n, "fdd_%02i_fn" % n
         cp.set(fc, key_type, FDD_TYPE if path else "none")
         if path:
