@@ -45,15 +45,21 @@ import configparser
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import time
 
-# where the appliance keeps 86Box itself: the extracted AppImage and the
-# ROM set it was launched from during development. A packaged appliance
-# will want these under its own tree; this is the one place that changes.
+# where the appliance keeps 86Box's ROM set from development, and the
+# binary itself: no longer the stock AppImage this MVP started from, but
+# our own build of the same v6.0 source, from /root/86box-src, carrying
+# the xinput2_mouse.cpp and qt_main.cpp patches described where they are
+# applied (SIGUSR1 -> a real ACPI power-button press, and no re-centering
+# warp for the VNC/XTEST pointer specifically). A packaged appliance will
+# want these under its own tree; this is the one place that changes.
 BOX86_ROOT = os.environ.get("BOX86_ROOT", "/root/86box-poc")
-BOX86_BIN = os.path.join(BOX86_ROOT, "squashfs-root", "AppRun")
+BOX86_BIN = os.environ.get("BOX86_BIN_PATH",
+                           "/root/86box-src/build/src/86Box")
 BOX86_ROMS = os.path.join(BOX86_ROOT, "roms")
 # a known-good Windows 95 install, copied in as an instance's disk the
 # first time it starts, so a fresh instance boots to a desktop rather
@@ -382,8 +388,28 @@ def on_start(api, inst):
 
 
 def on_stop(api, inst):
+    """Ask 86Box's own guest to shut down first (a real ACPI/APM power
+    button press, over SIGUSR1 -- a patch to our own build, since 86Box
+    offers no QMP-like control socket of its own to ask for one any
+    other way), and only fall back to _kill_pids's SIGTERM/SIGKILL
+    escalation for whatever is left once that either finishes or times
+    out.  A machine simply killed mid-run never gets to tell its own OS
+    it is shutting down, and Windows in particular boots back into its
+    own crash recovery next time as a direct result -- confirmed live,
+    2026-09-08.
+    """
     d = _box_dir(api, inst)
     pids = _load_pids(d)
+    box_pid = pids.get("86box")
+    if box_pid and _alive(box_pid):
+        try:
+            os.kill(box_pid, signal.SIGUSR1)
+        except OSError:
+            pass
+        else:
+            deadline = time.time() + 15
+            while time.time() < deadline and _alive(box_pid):
+                time.sleep(0.3)
     _kill_pids(pids)
     _save_pids(d, {})
     subprocess.run(["pactl", "unload-module",
