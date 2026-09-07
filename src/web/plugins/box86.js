@@ -268,6 +268,15 @@ window.registerMachinePlugin({
   // live, 2026-09-08 (a precise hover and click on Windows 95's own
   // Start button, captured, using nothing but noVNC's stock behaviour).
   relativePointer: false,
+  // Same reasoning as relativePointer just above, a different QEMU-only
+  // extension: rfb.enableAudio (app.js) is QEMU's own VNC message type
+  // 255, which a plain RFB server (86Box's own x11vnc) has no defined
+  // way to safely ignore -- it just closes the connection, which is
+  // exactly what tore the console back down again ~1.5s after every
+  // connect until this existed (confirmed live, 2026-09-08, Opus/fc).
+  // box86 loses nothing opting out: its own audio already rides its own
+  // separate websocket (the console hook below), never the VNC channel.
+  vncAudio: false,
   defaults: {
     box86: { memory: '64M', sound: 'none', bios: 'real',
              lockSound: true, lockBios: true }

@@ -13,7 +13,7 @@ const loadRFB = async () => RFB ||
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
     hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {},
-    platform: {}, relativePointer: {} };
+    platform: {}, relativePointer: {}, vncAudio: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -37,6 +37,22 @@ window.registerMachinePlugin = (p) => {
   P.relativePointer = P.relativePointer || {};
   if (p.relativePointer === false)
     (p.machines || []).forEach(m => { P.relativePointer[m] = false; });
+  // opt out of the core's own VNC-audio extension (rfb.enableAudio, QEMU's
+  // own message type 255): every existing machine here is QEMU's own VNC
+  // server, which implements it, but a non-QEMU one (box86, on 86Box's
+  // generic x11vnc) has no idea what that message type even is -- and,
+  // unlike an encoding a server can simply never send, there is no way
+  // for a client to ask first: sending it at all is what a plain RFB
+  // server has no defined way to safely ignore, so it closes the
+  // connection outright -- confirmed live, 2026-09-08 (Opus/fc): the
+  // console connects, renders, and is torn down again well under two
+  // seconds later purely from enableAudioNow's own unconditional call on
+  // every "connect" event. box86 needs none of this anyway: its own
+  // audio already rides its own separate websocket (box86.js's console
+  // hook), never the VNC channel at all.
+  P.vncAudio = P.vncAudio || {};
+  if (p.vncAudio === false)
+    (p.machines || []).forEach(m => { P.vncAudio[m] = false; });
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
@@ -1209,6 +1225,10 @@ function fitConsoleBox() {
 // particular connection actually asks for -257 is read from a plain
 // variable connectConsole sets right before connecting, not decided here.
 let wantsRelativePointer = true;
+// same idea as wantsRelativePointer above: set right before connecting,
+// read wherever the console decides whether to touch the VNC channel's
+// own audio extension at all (see registerMachinePlugin's vncAudio).
+let wantsVncAudio = true;
 function patchRFBForRelativePointer() {
   if (!RFB || RFB.messages._miraiRelPatched) return;
   const orig = RFB.messages.clientEncodings;
@@ -1461,6 +1481,7 @@ window.connectConsole = async (name, ws) => {
     machine = (inst && inst.machine) || '';
   } catch (e) { /* unknown machine: default (relative) stands */ }
   wantsRelativePointer = window.MiraiPlugins.relativePointer[machine] !== false;
+  wantsVncAudio = window.MiraiPlugins.vncAudio[machine] !== false;
   // the relative-pointer negotiation must be in place before the VNC
   // handshake advertises the client encodings, i.e. before the RFB object
   // exists; plugins get the same chance to prepare the connection
@@ -1508,7 +1529,8 @@ window.connectConsole = async (name, ws) => {
   rfb.addEventListener('connect', () => {
     toast(name + ': console connected');
     fitConsoleBox();
-    enableAudioNow().catch(err => console.error('console sound', err));
+    if (wantsVncAudio)
+      enableAudioNow().catch(err => console.error('console sound', err));
   });
   // Which connection this listener belongs to: a stale disconnect from a
   // replaced one must not clear the connection that took its place.
@@ -1527,10 +1549,21 @@ window.connectConsole = async (name, ws) => {
     releaseConsoleHold();
     render();
   });
-  rfb.addEventListener('audiodata', e => audioChunk(e.detail.data));
+  if (wantsVncAudio)
+    rfb.addEventListener('audiodata', e => audioChunk(e.detail.data));
   document.getElementById('btn-connect').style.display = 'none';
   for (const id of ['btn-disconnect','btn-cad','btn-expand','btn-audio'])
     document.getElementById(id).style.display = '';
+  // btn-audio toggles the VNC channel's own audio extension (toggleAudio,
+  // enableAudioNow) -- with none to toggle here, showing it would just be
+  // another way to trigger the same fatal type-255 message. A machine
+  // opted out of it (box86) has its own audio playing on its own already,
+  // without this button (box86.js's own console hook, an autoplay <audio>
+  // element on a separate websocket entirely) -- explicitly re-hidden
+  // since the loop above, run unconditionally, just showed it, and a
+  // stale show from a previous, VNC-audio-capable console otherwise
+  // outlives disconnectConsole (it touches no button styles at all).
+  if (!wantsVncAudio) document.getElementById('btn-audio').style.display = 'none';
 };
 // Everything the console took hold of while it was open: the pointer, the
 // keyboard wrapper, the two observers, the sound.  A guest that powers itself
