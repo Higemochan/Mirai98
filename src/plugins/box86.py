@@ -44,6 +44,7 @@ first start. The matching front-end lives in web/plugins/box86.js.
 import configparser
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -75,6 +76,8 @@ SEED_HDD = os.path.join(BOX86_ROOT, "vm", "hdd", "hdd0.vhd")
 # internal_name; "pentium_mmx" is not a name 86Box knows at all.
 CFG_TEMPLATE = """[General]
 vid_renderer = qt_software
+start_in_fullscreen = 1
+video_fullscreen_scale = 0
 
 [Machine]
 machine = tx97
@@ -292,6 +295,55 @@ def _sink_name(inst):
     return "box86_%d" % inst["index"]
 
 
+# start_in_fullscreen (CFG_TEMPLATE, [General]) hides 86Box's own menu
+# bar and toolbar, but on a bare Xvfb with no window manager at all
+# there is nobody to grant its _NET_WM_STATE_FULLSCREEN request either
+# -- the top-level window is left at its natural, guest-resolution-
+# sized geometry (640x472+0+0 for a 640x480 VGA mode, confirmed live
+# via xwininfo, 2026-09-07) inside the larger 1024x768 Xvfb screen
+# x11vnc used to export whole. That gap is exactly the "black bars"
+# a real-browser test found: noVNC's canvas spanned the full 1024x768,
+# so a click anywhere past the guest's own small corner of it landed
+# nowhere near what the user was looking at.
+#
+# The fix is not to make 86Box's window bigger (there is still no WM
+# to ask), but to stop exporting anything past it: x11vnc's -id tracks
+# one window's own real pixels instead of the whole display, and (per
+# its own -help text) engages the same -xrandr mechanism to follow
+# that window if it resizes later -- a guest switching to a taller
+# SVGA mode mid-session keeps working, with no static clip rectangle
+# to fall out of date. With the canvas now exactly the window's own
+# client area, a click's canvas coordinates and the guest's own screen
+# coordinates are the same numbers -- confirmed live: 2026-09-07.
+_WIN_RE = re.compile(
+    r'^\s*(0x[0-9a-fA-F]+)\s+"[^"]*":\s*\([^)]*"86Box"\)\s+'
+    r'(\d+)x(\d+)\+', re.MULTILINE)
+
+
+def _find_box_window(display_num):
+    """The real, on-screen 86Box top-level -- not the 1x1 placeholder
+    window or the 3x3 "Qt Selection Owner" xwininfo -tree also lists
+    under the same WM_CLASS, which are 86Box's own Qt frontend's
+    business and never what a viewer should see. Picked by WM_CLASS
+    ("86Box", the second, class element xwininfo -tree prints) and a
+    minimum size, not by title -- the title is "<vmname> - 86Box
+    <version>" and vmname is whatever this instance's own 86box.cfg
+    [General] vmname happens to be (or absent entirely).
+    """
+    try:
+        out = subprocess.run(
+            ["xwininfo", "-root", "-tree", "-display", ":%d" % display_num],
+            capture_output=True, text=True, timeout=5, check=False).stdout
+    except OSError:
+        return None
+    best, best_area = None, 0
+    for m in _WIN_RE.finditer(out):
+        w, h = int(m.group(2)), int(m.group(3))
+        if w > 50 and h > 50 and w * h > best_area:
+            best, best_area = m.group(1), w * h
+    return best
+
+
 def on_start(api, inst):
     index = inst["index"]
     vnc, ws, _qmp, audio_ws = api.ports_of(inst)
@@ -336,10 +388,26 @@ def on_start(api, inst):
                          [BOX86_BIN, "-P", d, "-R", BOX86_ROMS],
                          cwd=d, env=env, stdout=log, stderr=log)
 
-        spawn("x11vnc",
-              ["x11vnc", "-display", ":%d" % display_num, "-forever",
-               "-shared", "-rfbport", str(vnc), "-nopw", "-q"],
-              stdout=log, stderr=log)
+        # Wait for 86Box's own top-level window to exist before
+        # starting x11vnc, so it can be told to track that window (-id)
+        # instead of the whole Xvfb screen -- see _find_box_window.
+        # A window that never shows up (a startup failure of some kind)
+        # is not fatal here: falling back to exporting the whole
+        # display keeps this instance debuggable instead of wedging
+        # the start on a window that will never appear.
+        win_id = None
+        for _ in range(50):
+            win_id = _find_box_window(display_num)
+            if win_id or box_proc.poll() is not None:
+                break
+            time.sleep(0.2)
+
+        x11vnc_argv = ["x11vnc", "-display", ":%d" % display_num]
+        if win_id:
+            x11vnc_argv += ["-id", win_id]
+        x11vnc_argv += ["-forever", "-shared", "-rfbport", str(vnc),
+                        "-nopw", "-q"]
+        spawn("x11vnc", x11vnc_argv, stdout=log, stderr=log)
         spawn("websockify_video",
               ["websockify", str(ws), "127.0.0.1:%d" % vnc],
               stdout=log, stderr=log)
