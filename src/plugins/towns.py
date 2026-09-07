@@ -277,7 +277,11 @@ def towns_cmos(api, inst, towns_roms):
 def towns_argv(api, inst):
     os = api.os
     cfg = api.CONFIG
-    vnc, ws, qmp_port = api.ports_of(inst)
+    # ports_of hands back a fourth port now (box86's own audio
+    # websocket, unused by a QEMU machine's own VNC-carried audio) --
+    # towns has never read it, so it is only unpacked here to be
+    # dropped, not because towns needs it.
+    vnc, ws, qmp_port, _audio_ws = api.ports_of(inst)
     display = vnc - 5900
     accel = "kvm:tcg" if inst.get("accel", "tcg") == "kvm" else "tcg"
     towns_roms = cfg.get("towns_roms") or os.path.join(cfg["roms"], "towns")
