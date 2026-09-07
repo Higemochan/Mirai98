@@ -200,6 +200,24 @@ function box86WizardDisks(h) {
     'disk, the next start picks up whatever is attached then.</div>';
 }
 
+// ---- create wizard: confirm --------------------------------------------
+// The stock confirm rows (drawConfirm, app.js) are PC-98/towns wording
+// throughout -- BIOS "compatible", Font "real machine ROM", Display
+// "PEGC + GA-98NB", Network "LGY-98" -- none of which box86 has any of;
+// falling through to them (no confirm here at all) would just repeat
+// the same kind of leak MIDI's own row was giving before this existed.
+// Only Name/Machine type/the four dosv disks/Snapshot are box86's own
+// actual choices right now.
+function box86WizardConfirm(v, h) {
+  const rows = [['Name', h.esc(v.name || '(unnamed)')],
+                ['Machine type', 'DOS/V PC (86Box, Voodoo2)']];
+  for (const [k, label] of [['hdd1', 'Hard disk'], ['fdd1', 'Floppy A'],
+                             ['fdd2', 'Floppy B'], ['cd', 'CD-ROM']])
+    if (v[k]) rows.push([label, h.esc(v[k])]);
+  rows.push(['Snapshot', v.snapshot ? 'yes' : 'no']);
+  return rows;
+}
+
 window.registerMachinePlugin({
   machines: ['box86'],
   // its own Storage shelf (disks/dosv/); a pc98 or towns image can never
@@ -236,11 +254,21 @@ window.registerMachinePlugin({
             note: 'all zeros: partition and format it from the guest ' +
                   'OS, as on real hardware' }]
   },
-  // Disks is its own pane now; Host/Memory/Network/Options still have
-  // no field box86.py reads, so only General/Disks/Confirm stay
+  // Disks is its own pane now; Host/Memory/Network/Options never had a
+  // field box86.py reads, and Sound didn't either -- its stock PC-98
+  // pane (Sound board *and* MIDI board, both PC-98-only hardware) was
+  // never gated here before this, only sound itself was (locked, via
+  // defaults.lockSound above), leaving MIDI board's own "MPU-PC98II +
+  // SoundFont" fully live and selectable for a machine with no such
+  // thing and no code anywhere that reads what it was set to. Hiding
+  // it here instead of just disabling it (as lockSound/lockBios do for
+  // fields box86 fixes rather than lacks outright) is deliberate: this
+  // stays until box86 gets its own real MIDI pane of its own to show
+  // in its place, not just a disabled copy of PC-98's.
   wizard: { box86: { panes: { Disks: box86WizardDisks, Host: null,
-                              Memory: null, Network: null,
-                              Options: null } } },
+                              Memory: null, Sound: null,
+                              Network: null, Options: null },
+                     confirm: box86WizardConfirm } },
   consolePrep: prepBox86Console,
   console: (rfb, target, name) => {
     const port = box86AudioPort.get(name);
