@@ -260,6 +260,12 @@ class PluginAPI:
         start_instance/stop_instance/is_running call these instead of the
         QEMU argv/QMP flow for any instance whose machine is registered
         here; everything else (create/edit/console/Storage) is unchanged.
+        Two more keys are read if present, neither required: pid(inst)
+        -> the running engine's own top process id (usage stats read
+        this instead of QEMU's own, which an engine has none of), and
+        thumbnail(inst, png_path) -> None, writing this instance's own
+        screen there however this engine can, in place of the QMP
+        screendump thumbnail() otherwise asks for (see thumbnail()).
         """
         MACHINE_ENGINE[name] = engine
 
@@ -3613,6 +3619,15 @@ def thumbnail(inst):
     except OSError:
         pass
     if not is_running(inst):
+        return png if os.path.exists(png) else None
+    # An engine with no QMP of its own (box86, on 86Box) has no
+    # screendump command to ask either; give it the same chance to
+    # write this instance's own thumb.png its own way, the one place
+    # this function's own caller (thumb(), below) reads from either way.
+    engine = MACHINE_ENGINE.get(inst.get("machine"))
+    make_thumb = engine.get("thumbnail") if engine else None
+    if make_thumb:
+        make_thumb(inst, png)
         return png if os.path.exists(png) else None
     ppm = png + ".ppm"
     reply = qmp(inst, "screendump", {"filename": ppm})

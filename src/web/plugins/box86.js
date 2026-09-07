@@ -277,6 +277,18 @@ window.registerMachinePlugin({
   // box86 loses nothing opting out: its own audio already rides its own
   // separate websocket (the console hook below), never the VNC channel.
   vncAudio: false,
+  // A third QEMU-only capability box86 opts out of, this one nothing to
+  // do with the VNC channel at all: the detail view's own live media
+  // swap (drawMedia/swapMedia, app.js) reads /api/instances/<name>/media,
+  // a QMP-backed endpoint that always answers an engine with no QMP at
+  // all (86Box) with an empty drive list -- rendered, until this flag
+  // existed, as "no floppy or CD-ROM drive", which box86 very much has
+  // (hdd1/fdd1/fdd2/cd) -- a false negative, not a true one. Detach/
+  // reattach still works exactly as box86WizardDisks' own note already
+  // says: stop the machine, change it in Edit, the next start picks up
+  // whatever is attached then -- there just isn't a QMP-backed live
+  // dropdown for it the way a QEMU machine's own drives get.
+  liveMedia: false,
   defaults: {
     box86: { memory: '64M', sound: 'none', bios: 'real',
              lockSound: true, lockBios: true }

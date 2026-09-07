@@ -229,6 +229,7 @@ def register(api):
         "on_stop": lambda inst: on_stop(api, inst),
         "is_up": lambda inst: is_up(api, inst),
         "pid": lambda inst: _load_pids(_box_dir(api, inst)).get("86box"),
+        "thumbnail": lambda inst, png: box86_thumbnail(api, inst, png),
     })
     api.machine_sanitize("box86", box86_sanitize)
     for fmt in BOX86_FLOPPIES:
@@ -541,6 +542,36 @@ def _find_box_window(display_num):
         if w > 50 and h > 50 and w * h > best_area:
             best, best_area = m.group(1), w * h
     return best
+
+
+def box86_thumbnail(api, inst, png):
+    """This instance's own screen, the same job thumbnail() (pc98web.py)
+    otherwise does with QMP's screendump -- 86Box has no QMP at all, so
+    this captures the same X11 window x11vnc itself was told to track
+    (_find_box_window, re-run fresh rather than remembered from on_start:
+    cheap, and right even if that window were ever replaced) instead.
+    Writes png directly if it can; leaves it alone (thumbnail() already
+    treats a missing file as "no thumbnail yet") if it can't.
+    """
+    vnc, _ws, _qmp, _audio_ws = api.ports_of(inst)
+    display_num = vnc - 5900
+    win_id = _find_box_window(display_num)
+    if not win_id:
+        return
+    raw = png + ".xwd.png"
+    env = dict(os.environ, DISPLAY=":%d" % display_num)
+    try:
+        subprocess.run(["import", "-window", win_id, raw],
+                       env=env, capture_output=True, timeout=5, check=False)
+        subprocess.run(["convert", raw, "-resize", "320x", png],
+                       capture_output=True, timeout=5, check=False)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.remove(raw)
+        except OSError:
+            pass
 
 
 def on_start(api, inst):

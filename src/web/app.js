@@ -13,7 +13,7 @@ const loadRFB = async () => RFB ||
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
     hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {},
-    platform: {}, relativePointer: {}, vncAudio: {} };
+    platform: {}, relativePointer: {}, vncAudio: {}, liveMedia: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -53,6 +53,18 @@ window.registerMachinePlugin = (p) => {
   P.vncAudio = P.vncAudio || {};
   if (p.vncAudio === false)
     (p.machines || []).forEach(m => { P.vncAudio[m] = false; });
+  // opt out of the detail view's own live media swap (drawMedia/
+  // swapMedia): that whole picture -- a dropdown per drive, changed
+  // without stopping the machine -- comes from a QMP-only endpoint
+  // (/api/instances/<name>/media), and an engine with no QMP of its own
+  // (box86) always answers it with an empty drive list. Rendered as
+  // this instance's own attach state instead, read straight off its own
+  // hdd1/fdd1/fdd2/cd fields, plus the same "stop it to change a disk"
+  // note box86WizardDisks already gives -- not a claim it has no media
+  // at all, which an empty drive list otherwise reads as.
+  P.liveMedia = P.liveMedia || {};
+  if (p.liveMedia === false)
+    (p.machines || []).forEach(m => { P.liveMedia[m] = false; });
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
@@ -896,6 +908,21 @@ function biosLabel(i) {
   return b || 'compatible';
 }
 
+// The detail view's own Media row for a liveMedia:false machine (box86):
+// this instance's own attach state, read straight off its own record --
+// nothing to ask the server for, unlike drawMedia's own QMP-backed
+// fetch, so this renders synchronously along with the rest of the row.
+function box86MediaSummary(i) {
+  const parts = [
+    'Hard disk: ' + (i.hdd1 ? esc(i.hdd1) : 'private seed copy')];
+  if (i.fdd1) parts.push('Floppy A: ' + esc(i.fdd1));
+  if (i.fdd2) parts.push('Floppy B: ' + esc(i.fdd2));
+  if (i.cd) parts.push('CD-ROM: ' + esc(i.cd));
+  return parts.join(', ') + ' <span class="note">box86 has no live ' +
+    'media change yet: stop the machine to swap a disk, the next ' +
+    'start picks up whatever is attached then</span>';
+}
+
 function editForm(i) {
   // a machine plugin may supply its own hardware form (given the helpers it
   // needs); otherwise the stock PC-98 form below is used
@@ -1612,6 +1639,16 @@ async function detailView(name) {
   const wasConnected = rfb !== null;
   const disks = DISK_ROWS.filter(([k]) => i[k]);
   const stamp = Math.floor(Date.now() / 5000);
+  // The rows below are the stock PC-98/QEMU facts this whole view was
+  // written around; box86 (86Box, no QMP, none of PC-98's own hardware)
+  // has real answers for a few of them and none at all for the rest --
+  // gated here rather than reused/hidden through hardwareTable's own
+  // window.MiraiPlugins.hardware lookup (Hardware configuration, below)
+  // because these two cards ask genuinely different questions (facts
+  // about how the machine is set up here vs. what it actually emulates)
+  // and nothing else on this page needs a third possible machine to
+  // special-case yet.
+  const isBox86 = i.machine === 'box86';
   view.innerHTML =
     '<div class="crumb"><a href="#/">' +
     esc(facts.hostname || 'host') + '</a> &rsaquo; ' +
@@ -1676,11 +1713,12 @@ async function detailView(name) {
     '<div style="flex:1;min-width:18em"><dl>' +
     '<dt>Machine type</dt><dd>' + esc(i.machine || 'pc9821') + '</dd>' +
     '<dt>BIOS</dt><dd>' + biosLabel(i) + '</dd>' +
-    (i.machine === 'towns' ? '' :
+    (i.machine === 'towns' || isBox86 ? '' :
      '<dt>Font</dt><dd>' + (i.font === 'real' ? 'real machine ROM'
                                               : 'compatible') + '</dd>') +
-    '<dt>Acceleration</dt><dd>' + (i.accel === 'tcg' ? 'TCG'
-                     : 'KVM (Experimental)') + '</dd>' +
+    (isBox86 ? '' :
+     '<dt>Acceleration</dt><dd>' + (i.accel === 'tcg' ? 'TCG'
+                      : 'KVM (Experimental)') + '</dd>') +
     '<dt>Memory</dt><dd>' + esc(i.memory) + '</dd>' +
     '<dt>Disks</dt><dd>' + (disks.length || 'none — N88 BASIC') + '</dd>' +
     '<dt>Console</dt><dd>VNC :' + (i.ports[0] - 5900) + '</dd></dl></div>' +
@@ -1688,33 +1726,41 @@ async function detailView(name) {
     // the two panels, as VMware arranges them
     '<div class="grid2" style="grid-template-columns:1fr 1fr">' +
     '<div class="card"><h3>General information</h3><table>' +
-    '<tr><td style="width:11em;color:#8d99a5">Networking</td><td>' +
-    (i.net === 'nat' ? 'LGY-98, user NAT'
-     : i.net === 'bridge' ? 'LGY-98, bridged to the LAN' : 'none') +
-    '</td></tr>' +
-    '<tr><td style="color:#8d99a5">Storage</td><td>' +
+    (isBox86 ? '' :
+     '<tr><td style="width:11em;color:#8d99a5">Networking</td><td>' +
+     (i.net === 'nat' ? 'LGY-98, user NAT'
+      : i.net === 'bridge' ? 'LGY-98, bridged to the LAN' : 'none') +
+     '</td></tr>') +
+    '<tr><td style="width:11em;color:#8d99a5">Storage</td><td>' +
     (disks.length + ' disk' + (disks.length === 1 ? '' : 's')) +
     (i.snapshot ? ', changes discarded at shutdown' : '') + '</td></tr>' +
     (i.machine === 'towns' ? '' :
      '<tr><td style="color:#8d99a5">Display</td><td>' +
-     (i.machine === 'pc9801' ? 'PC-9801 standard'
+     (isBox86 ? 'S3 ViRGE/DX + 3Dfx Voodoo2 (passthrough)'
+      : i.machine === 'pc9801' ? 'PC-9801 standard'
       : 'PEGC + GA-98NB') + '</td></tr>') +
-    '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
-    (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
-    '<tr><td style="color:#8d99a5">Serial port</td><td>' +
-    (i.serial ? esc(i.serial) : 'none') + '</td></tr>' +
-    '<tr><td style="color:#8d99a5">Parallel port</td><td>' +
-    (i.parallel ? esc(i.parallel) +
-     ' <span class="note">UART BitBang Device</span>' : 'none') +
-    '</td></tr>' +
-    '<tr><td style="color:#8d99a5">GP-IB</td><td>' +
-    (i.gpib ? esc(i.gpib) : 'none') + '</td></tr>' +
+    (isBox86 ? '' :
+     '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
+     (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
+     '<tr><td style="color:#8d99a5">Serial port</td><td>' +
+     (i.serial ? esc(i.serial) : 'none') + '</td></tr>' +
+     '<tr><td style="color:#8d99a5">Parallel port</td><td>' +
+     (i.parallel ? esc(i.parallel) +
+      ' <span class="note">UART BitBang Device</span>' : 'none') +
+     '</td></tr>' +
+     '<tr><td style="color:#8d99a5">GP-IB</td><td>' +
+     (i.gpib ? esc(i.gpib) : 'none') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Home</td><td>vm/vm-' + i.index +
     '/</td></tr>' +
-    (i.running ? '<tr><td style="color:#8d99a5">Media</td>' +
-     '<td id="media-row" class="note">reading...</td></tr>' : '') +
-    '<tr><td style="color:#8d99a5">QMP</td><td>127.0.0.1:' + i.ports[2] +
-    '</td></tr></table></div>' +
+    (window.MiraiPlugins.liveMedia[i.machine] === false
+     ? (i.running ? '<tr><td style="color:#8d99a5">Media</td><td class="note">' +
+        box86MediaSummary(i) + '</td></tr>' : '')
+     : (i.running ? '<tr><td style="color:#8d99a5">Media</td>' +
+        '<td id="media-row" class="note">reading...</td></tr>' : '')) +
+    (isBox86 ? '' :
+     '<tr><td style="color:#8d99a5">QMP</td><td>127.0.0.1:' + i.ports[2] +
+     '</td></tr>') +
+    '</table></div>' +
     '<div class="card"><h3>Hardware configuration</h3>' +
     '<div id="hw-view">' + hardwareTable(i) + '</div>' +
     '<div id="hw-edit" class="body" style="display:none">' +
@@ -1724,11 +1770,15 @@ async function detailView(name) {
     window.connectConsole(name, i.ports[1]);
   autoConnect = '';
   updateUsage(name);
-  if (i.running) drawMedia(name);
+  // liveMedia:false (box86) already has this row's own real content,
+  // rendered synchronously above (box86MediaSummary) -- this QMP-backed
+  // fetch is only for a machine that actually has QMP to ask.
+  if (i.running && window.MiraiPlugins.liveMedia[i.machine] !== false)
+    drawMedia(name, i.machine);
 }
 
 // swapping a disk while the machine runs, the way a hand would
-async function drawMedia(name) {
+async function drawMedia(name, machine) {
   const slot = document.getElementById('media-row');
   if (!slot) return;
   const d = await api('/api/instances/' + encodeURIComponent(name) +
@@ -1744,23 +1794,29 @@ async function drawMedia(name) {
   const typed = {};
   for (const box of document.querySelectorAll('#media-row .disk-filter'))
     typed[box.dataset.device] = box.value;
+  // Which shelf these drives themselves pick from: left off entirely
+  // (diskPicker's own default), this always meant pc98's -- invisible
+  // only because nothing else had ever put a same-kind image on pc98's
+  // own shelf for a non-pc98 machine's drive to wrongly offer.
+  const platform = window.MiraiPlugins.platform[machine] || 'pc98';
   document.getElementById('media-row').innerHTML = d.drives.map(drive =>
     '<div class="row" style="margin:.1em 0">' +
       '<span style="width:5.5em">' + esc(drive.device) + '</span>' +
       diskPicker(drive.kind, drive.file.split('/').pop(),
-                 {orphans: true, empty: '(empty)',
+                 {orphans: true, empty: '(empty)', platform,
                   filter: typed[drive.device] || '',
                   box: ' data-device="' + esc(drive.device) + '"',
                   attrs: 'onchange="swapMedia(\'' + name + '\',\'' +
-                         drive.device + '\',this.value)"'}) +
+                         drive.device + '\',this.value,\'' +
+                         esc(machine) + '\')"'}) +
     '</div>').join('');
 }
-window.swapMedia = (name, device, file) => {
+window.swapMedia = (name, device, file, machine) => {
   api('/api/instances/' + encodeURIComponent(name) + '/media',
       {method: 'POST', body: JSON.stringify({device, name: file})})
     .then(r => { if (r) { toast(device + ': ' + r.result);
                           task('VM ' + name + ' - ' + device, r.result); }
-                 drawMedia(name); });
+                 drawMedia(name, machine); });
 };
 
 // the three readings VMware stacks down the right of a VM summary
