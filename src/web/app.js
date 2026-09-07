@@ -13,7 +13,7 @@ const loadRFB = async () => RFB ||
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
     hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {},
-    platform: {} };
+    platform: {}, relativePointer: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -22,6 +22,21 @@ window.registerMachinePlugin = (p) => {
   // from; core PC-98 machines need none, being disks/<kind>/ itself
   P.platform = P.platform || {};
   if (p.platform) (p.machines || []).forEach(m => { P.platform[m] = p.platform; });
+  // opt out of the core's own relative-pointer capture (QEMU's pseudo-
+  // encoding -257): every existing machine here is QEMU's own VNC server,
+  // which honours it, but a machine with no QMP and thus no such server
+  // of its own (box86, on 86Box, talking through a generic x11vnc) never
+  // gets the "pointer-type-change" confirmation this scheme is built
+  // around, and the 0x7FFF-centred coordinates it sends are not
+  // representable in X11's own signed 16-bit pointer wire format at all
+  // -- confirmed live, 2026-09-08, chasing exactly that: a plain,
+  // unmodified absolute VNC pointer (this flag's effect) already lands
+  // precisely once 86Box's own click-to-capture is engaged, because
+  // 86Box's own XInput2 mouse code already does its own absolute-to-
+  // relative conversion for exactly this situation.
+  P.relativePointer = P.relativePointer || {};
+  if (p.relativePointer === false)
+    (p.machines || []).forEach(m => { P.relativePointer[m] = false; });
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
@@ -1189,12 +1204,17 @@ function fitConsoleBox() {
 // (pseudo-encoding -257) and, while the pointer is locked, feed each host
 // movement as a delta around 0x7FFF.
 // The -257 request has to ride in the handshake's initial client-encodings
-// message, so the patch goes on before an RFB object ever exists.
+// message, so the patch goes on before an RFB object ever exists. Patched
+// once, for good, the first time any console needs it -- so whether THIS
+// particular connection actually asks for -257 is read from a plain
+// variable connectConsole sets right before connecting, not decided here.
+let wantsRelativePointer = true;
 function patchRFBForRelativePointer() {
   if (!RFB || RFB.messages._miraiRelPatched) return;
   const orig = RFB.messages.clientEncodings;
   RFB.messages.clientEncodings = function (sock, encodings) {
-    if (!encodings.includes(-257)) encodings = encodings.concat([-257]);
+    if (wantsRelativePointer && !encodings.includes(-257))
+      encodings = encodings.concat([-257]);
     return orig.call(this, sock, encodings);
   };
   const origHandleRect = RFB.prototype._handleRect;
@@ -1430,6 +1450,17 @@ window.connectConsole = async (name, ws) => {
     toast('no noVNC to draw the console with');
     return;
   }
+  // Which machine this is decides whether the relative-pointer scheme
+  // even applies (see registerMachinePlugin's relativePointer): known
+  // before the RFB handshake even begins, since the -257 request has to
+  // ride in its very first message.
+  let machine = '';
+  try {
+    const inst = await (await fetch('/api/instances/' +
+      encodeURIComponent(name))).json();
+    machine = (inst && inst.machine) || '';
+  } catch (e) { /* unknown machine: default (relative) stands */ }
+  wantsRelativePointer = window.MiraiPlugins.relativePointer[machine] !== false;
   // the relative-pointer negotiation must be in place before the VNC
   // handshake advertises the client encodings, i.e. before the RFB object
   // exists; plugins get the same chance to prepare the connection
@@ -1441,10 +1472,12 @@ window.connectConsole = async (name, ws) => {
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
-  try {
-    consolePointerStop = captureRelativePointer(rfb, target);
-  } catch (e) {
-    console.error('pointer capture', e);
+  if (wantsRelativePointer) {
+    try {
+      consolePointerStop = captureRelativePointer(rfb, target);
+    } catch (e) {
+      console.error('pointer capture', e);
+    }
   }
   try {
     imeKeyStop = installImeKeyMacros(rfb);

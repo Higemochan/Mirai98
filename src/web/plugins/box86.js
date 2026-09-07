@@ -202,6 +202,13 @@ window.registerMachinePlugin({
   // its own Storage shelf (disks/dosv/); a pc98 or towns image can never
   // be picked for it, nor its own image for them
   platform: 'dosv',
+  // 86Box has no QMP and thus no QEMU VNC server of its own to honour
+  // the core's relative-pointer scheme (pseudo-encoding -257) -- see
+  // registerMachinePlugin. A plain absolute VNC pointer already lands
+  // exactly right once 86Box's own click-to-capture engages: confirmed
+  // live, 2026-09-08 (a precise hover and click on Windows 95's own
+  // Start button, captured, using nothing but noVNC's stock behaviour).
+  relativePointer: false,
   defaults: {
     box86: { memory: '64M', sound: 'none', bios: 'real',
              lockSound: true, lockBios: true }
