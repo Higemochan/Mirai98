@@ -157,11 +157,11 @@
  .dialog .title b { color: var(--link); font-weight: 600; }
  .dialog .title .x { margin-left: auto; cursor: pointer;
                      color: var(--dim); }
- .tabs { display: flex; gap: .3em; padding: .5em .9em 0;
-         border-bottom: 1px solid var(--line); }
- .tabs span { padding: .35em .9em; border: 1px solid transparent;
+ .tabs { display: flex; flex-wrap: wrap; row-gap: .3em; gap: .3em;
+         padding: .5em .9em 0; border-bottom: 1px solid var(--line); }
+ .tabs span { padding: .35em .6em; border: 1px solid transparent;
               border-bottom: none; border-radius: 3px 3px 0 0;
-              color: var(--dim); cursor: pointer; }
+              color: var(--dim); cursor: pointer; white-space: nowrap; }
  .tabs span.on { background: var(--panel2); border-color: var(--line);
                  color: #fff; margin-bottom: -1px; }
  .pane { display: none; padding: 1em; min-height: 17em; }
