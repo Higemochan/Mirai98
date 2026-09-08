@@ -260,7 +260,10 @@ class PluginAPI:
         start_instance/stop_instance/is_running call these instead of the
         QEMU argv/QMP flow for any instance whose machine is registered
         here; everything else (create/edit/console/Storage) is unchanged.
-        Two more keys are read if present, neither required: pid(inst)
+        Three more keys are read if present, none required:
+        on_reset(inst) -> a status word (the Restart button; without one
+        that button reaches for QMP and reports "not running" about a
+        machine that is running perfectly well), pid(inst)
         -> the running engine's own top process id (usage stats read
         this instead of QEMU's own, which an engine has none of), and
         thumbnail(inst, png_path) -> None, writing this instance's own
@@ -4384,8 +4387,19 @@ class Handler(BaseHTTPRequestHandler):
             elif verb == "stop":
                 result = stop_instance(inst)
             elif verb == "reset":
-                result = ("reset" if qmp(inst, "system_reset")
-                          else "not running")
+                # a machine with an engine of its own has no QMP to ask;
+                # the engine resets it however it can (box86: 86Box's own
+                # hard reset, over media.ctl). Without an on_reset the
+                # button did nothing at all for such a machine -- qmp()
+                # simply found no port and reported "not running" about a
+                # machine that plainly was.
+                engine = MACHINE_ENGINE.get(inst.get("machine"))
+                on_reset = engine.get("on_reset") if engine else None
+                if on_reset:
+                    result = on_reset(inst)
+                else:
+                    result = ("reset" if qmp(inst, "system_reset")
+                              else "not running")
             elif verb == "save":
                 result = save_state(inst)
             elif verb == "resume":
