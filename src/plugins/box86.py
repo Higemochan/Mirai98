@@ -68,6 +68,20 @@ BOX86_ROMS = os.path.join(BOX86_ROOT, "roms")
 # than "no bootable device" -- proof the console and input work, not
 # just that 86Box came up
 SEED_HDD = os.path.join(BOX86_ROOT, "vm", "hdd", "hdd0.vhd")
+# SEED_HDD's own match: the NVR (CMOS) 86Box wrote once Windows had
+# finished detecting every device on the machine that seed was actually
+# installed and booted on. A seed's own hdd0.vhd and its own nvr/*.nvr
+# are one matched set, not two independent files -- the NVR holds a
+# checksum computed over the hardware configuration 86Box saw at the
+# time, and the moment that stops matching what CFG_TEMPLATE's own
+# [Machine] section actually describes (a different board, a different
+# CPU -- this project's own p2bls/PII-266 switch is the real example),
+# every boot re-detects the "changed" hardware from a blank NVR again:
+# a CMOS checksum error is exactly what a mismatched or absent NVR looks
+# like. Re-seeding onto different hardware means taking both again from
+# a machine that actually finished booting on the new board, never
+# swapping one half of the pair on its own.
+SEED_NVR_DIR = os.path.join(BOX86_ROOT, "vm", "nvr")
 
 # A Slot 1 440BX board of the Voodoo2 era (ASUS P2B-LS) and a real
 # Pentium II (Klamath) at one of its own three genuine retail speed
@@ -294,8 +308,35 @@ def _disk_paths(api, inst, d):
         hdd = os.path.join(seed_dir, "hdd0.vhd")
         if not os.path.exists(hdd) and os.path.exists(SEED_HDD):
             shutil.copy2(SEED_HDD, hdd)
+        _seed_nvr(d)
     return (hdd, api.disk_path(inst, "fdd1"), api.disk_path(inst, "fdd2"),
             api.disk_path(inst, "cd"))
+
+
+def _seed_nvr(d):
+    """SEED_HDD's own match (see its comment): every *.nvr in
+    SEED_NVR_DIR, copied into this instance's own nvr/ (86Box's own
+    -P-relative convention) the first time it starts -- same semantics
+    as SEED_HDD's own copy just above, one file at a time: only if this
+    instance does not already have one of its own by that name. Every
+    *.nvr there, not one named for the machine: 86Box itself only ever
+    reads the one that matches CFG_TEMPLATE's own [Machine] (any other
+    sitting there unread is harmless), and naming just one here would
+    mean a code change here every time that changes again. *.bin is
+    deliberately excluded -- SEED_NVR_DIR may hold other 86Box state
+    that is not a machine's CMOS at all.
+    """
+    if not os.path.isdir(SEED_NVR_DIR):
+        return
+    dest_dir = os.path.join(d, "nvr")
+    os.makedirs(dest_dir, exist_ok=True)
+    for name in os.listdir(SEED_NVR_DIR):
+        if not name.lower().endswith(".nvr"):
+            continue
+        src = os.path.join(SEED_NVR_DIR, name)
+        dest = os.path.join(dest_dir, name)
+        if os.path.isfile(src) and not os.path.exists(dest):
+            shutil.copy2(src, dest)
 
 
 def _fdd_compatible_path(d, slot, path):
