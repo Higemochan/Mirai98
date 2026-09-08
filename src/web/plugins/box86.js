@@ -1,6 +1,6 @@
 // 86Box front-end plugin for the Mirai98 web manager.
 //
-// Registers the "box86" machine: a single fixed Socket 7/Voodoo2 preset
+// Registers the "box86" machine: a single fixed Slot 1/Voodoo2 preset
 // (nothing about it is a per-instance field yet -- see box86.py), a list
 // badge, a minimal create wizard (only the panes that mean anything for
 // this machine), Storage formats for its own dosv shelf, and the one
@@ -113,10 +113,10 @@ function startBox86Audio(target, port) {
 // part of the table says exactly that -- but the disks are this
 // instance's own now, box86.py syncs them into its cfg from hdd1/fdd1/
 // fdd2/cd (the dosv shelf) the same as any PC-98 or Towns machine's.
-const BOX86_BIOS = 'tx97 (430TX), 86Box’s own BIOS';
+const BOX86_BIOS = 'p2bls (440BX), 86Box’s own BIOS';
 const BOX86_SOUND = 'OpenAL/PulseAudio, carried over its own audio websocket';
 if (typeof JA === 'object') {
-  JA[BOX86_BIOS] = 'tx97 (430TX)、86Box 自前 BIOS';
+  JA[BOX86_BIOS] = 'p2bls (440BX)、86Box 自前 BIOS';
   JA[BOX86_SOUND] = 'OpenAL/PulseAudio、専用の音声 websocket 経由';
 }
 // what box86.py's own _sync_midi wires "synth" to: 86Box's own standalone
@@ -135,8 +135,8 @@ function box86Hardware(i, h) {
     bios: BOX86_BIOS,
     sound: BOX86_SOUND,
     rows: [
-      ['&#9881; Machine', 'tx97 (430TX, Socket 7)'],
-      ['&#9636; CPU', 'Pentium MMX (pentium_p55c), 200MHz'],
+      ['&#9881; Machine', 'p2bls (440BX, Slot 1)'],
+      ['&#9636; CPU', 'Pentium II (pentium2_klamath), 266MHz'],
       ['&#9635; Video', 'S3 ViRGE/DX + 3Dfx Voodoo2 (passthrough)'],
       ['&#9834; Sound', BOX86_SOUND],
       ['&#9834; MIDI', box86MidiLabel(i.midi)],
@@ -189,8 +189,8 @@ function box86EditForm(i, h) {
            '86Box’s own audio') + '</div>' +
     '<div class="row"><label>Machine type</label>' +
     '<select name="machine">' + machineOpts + '</select></div>' +
-    '<div class="row"><label></label><span class="note">tx97, Pentium ' +
-    'MMX 200MHz, Voodoo2 -- the one preset this MVP offers; CPU/video ' +
+    '<div class="row"><label></label><span class="note">p2bls, Pentium ' +
+    'II 266MHz, Voodoo2 -- the one preset this MVP offers; CPU/video ' +
     'options come later</span></div>' +
     '<input type="hidden" name="memory" value="' + h.esc(i.memory || '64M') +
     '"><input type="hidden" name="sound" value="none">' +
@@ -298,7 +298,8 @@ window.registerMachinePlugin({
   editForm: { box86: box86EditForm },
   hardware: { box86: box86Hardware },
   // Storage "Create": standard IBM-compatible FAT12 floppy layouts (box86
-  // is a stock Socket 7 FDC, not PC-98's or FM TOWNS' own non-standard
+  // is a stock PC/AT FDC regardless of which board box86.py's own
+  // CFG_TEMPLATE names, not PC-98's or FM TOWNS' own non-standard
   // media) and a blank IDE hard disk to partition and format from the
   // guest OS. .img throughout, not .raw: fdd.c's own loaders[] table
   // (box86.py's FDD_EXTS) never matches .raw at all and silently ejects

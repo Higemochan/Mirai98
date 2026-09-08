@@ -1,9 +1,10 @@
 """86Box machine plugin for the Mirai98 web manager.
 
-Adds a "box86" machine type backed by 86Box instead of QEMU: a Socket 7
-board (tx97, 430TX) with a genuine Pentium MMX (pentium_p55c) and a 3Dfx
-Voodoo2 in passthrough beside an S3 ViRGE/DX, for Windows 9x titles that
-want a Glide-capable card rather than PC-98's own graphics.
+Adds a "box86" machine type backed by 86Box instead of QEMU: a Slot 1
+440BX board (p2bls, ASUS P2B-LS) with a real Pentium II (Klamath) at
+266MHz and a 3Dfx Voodoo2 in passthrough beside an S3 ViRGE/DX, for
+Windows 9x titles that want a Glide-capable card rather than PC-98's
+own graphics.
 
 86Box has no QMP and no built-in VNC/websocket server of its own the way
 QEMU does, so this plugin does not build a QEMU argv at all: it registers
@@ -68,22 +69,35 @@ BOX86_ROMS = os.path.join(BOX86_ROOT, "roms")
 # just that 86Box came up
 SEED_HDD = os.path.join(BOX86_ROOT, "vm", "hdd", "hdd0.vhd")
 
-# a Socket 7 board of the Voodoo2 era, a genuine Pentium MMX (not the
-# pre-MMX P54C the same package also offers), an S3 ViRGE/DX for the
-# desktop and a Voodoo2 beside it in passthrough. Every id below is
-# copied from 86Box's own machine_table.c/cpu_table.c/vid_table.c --
-# none of it is a guess, and "pentium_p55c" in particular is the real
-# internal_name; "pentium_mmx" is not a name 86Box knows at all.
+# A Slot 1 440BX board of the Voodoo2 era (ASUS P2B-LS) and a real
+# Pentium II (Klamath) at one of its own three genuine retail speed
+# grades, 266MHz -- not Deschutes, whose own cpu_table.c entry for the
+# same number is an out-of-spec underclock rather than a speed grade
+# that chip ever actually shipped at; real Deschutes starts at 333MHz.
+# An S3 ViRGE/DX for the desktop and a Voodoo2 beside it in passthrough,
+# unchanged from before this board -- p2bls has no onboard video of its
+# own to conflict with either (vid_device is NULL in machine_table.c).
+# Every id below is copied from 86Box's own machine_table.c/cpu_table.c/
+# config.c -- none of it is a guess: p2bls (MACHINE_TYPE_SLOT1,
+# CPU_PKG_SLOT1, bus 50-112MHz/multi 1.5-8.0x, both comfortably covering
+# 66.67MHz x4), pentium2_klamath's own "266" entry (rspeed=266666666,
+# multi=4.0, CPU_REQUIRES_DYNAREC -- cpu_use_dynarec=1 stays mandatory,
+# not just a performance choice), and config.c's own CPU match itself
+# (an exact rspeed/multi equality against cpu_speed/cpu_multi, so these
+# two numbers are the only ones that matter, never a rounded distance).
+# p2bls's own ROM (roms/machines/p2bls/1014ls.003) is confirmed present
+# against the exact path/filename m_at_slot1.c's own bios_load_linear
+# call names, the same way tx97's single-file ROM directory already was.
 CFG_TEMPLATE = """[General]
 vid_renderer = qt_software
 start_in_fullscreen = 1
 video_fullscreen_scale = 0
 
 [Machine]
-machine = tx97
-cpu_family = pentium_p55c
-cpu_multi = 3
-cpu_speed = 200000000
+machine = p2bls
+cpu_family = pentium2_klamath
+cpu_multi = 4
+cpu_speed = 266666666
 cpu_use_dynarec = 1
 fpu_type = internal
 mem_size = 65536
@@ -127,10 +141,11 @@ FDD_EXTS = {"001", "002", "003", "004", "005", "006", "007", "008", "009",
            "json", "mfm", "td0", "vfd", "xdf"}
 
 # Standard MS-DOS FAT12 floppy layouts (the same ones FORMAT.COM has laid
-# out on real PC/AT hardware since the 1980s -- box86 is a Socket 7 board
-# with a stock FDC, not FM TOWNS' or PC-98's own non-standard media, so
-# these are the ordinary IBM-compatible geometries, not something to
-# invent per platform the way towns.py's TOWNS_FLOPPIES table has to.
+# out on real PC/AT hardware since the 1980s -- box86 is a stock PC/AT
+# FDC regardless of which board CFG_TEMPLATE names, not FM TOWNS' or
+# PC-98's own non-standard media, so these are the ordinary IBM-
+# compatible geometries, not something to invent per platform the way
+# towns.py's TOWNS_FLOPPIES table has to.
 # Same 8-tuple shape as that table: bytes/sector, sectors/cluster, root
 # entries, total sectors, media byte, sectors/FAT, sectors/track, heads.
 BOX86_FLOPPIES = {
