@@ -143,6 +143,17 @@ function box86MediaRow(i, h, key, kind) {
   if (!i.running) return i[key] ? h.esc(i[key]) : '(empty)';
   return h.diskPicker(kind, i[key],
     {orphans: true, empty: '(empty)', platform: h.platform,
+     // .raw never belongs in this list at all, not just refused after
+     // picking it: fdd.c's own loaders[] table has no entry for it, so
+     // 86Box would silently eject rather than error (the same reason
+     // box86_swap_media itself refuses it, box86.py) -- offering it
+     // here would just be a choice guaranteed to look like it worked
+     // and put nothing in the drive. A floppy already attached from
+     // before this existed still shows, as the one non-.img option:
+     // diskBody's own "known" fallback keeps whatever is actually
+     // selected in the list even when the filter would otherwise drop
+     // it, exactly like a filter's typed text already does.
+     ext: kind === 'fdd' ? ['img'] : undefined,
      attrs: 'onchange="box86SwapMedia(\'' + i.name + '\',\'' + key +
             '\',this.value)"'});
 }

@@ -773,7 +773,15 @@ function diskBody(kind, value, o) {
   // dropped the pick would quietly change what the form submits
   const hit = (name, text) =>
     name === value || !q || text.toLowerCase().includes(q);
-  const all = (shelf[kind] || []).filter(f => o.orphans || !f.orphan);
+  // o.ext (a Set/array of lowercase extensions): narrows which images on
+  // the shelf are even offered at all, not just filtered by the typed
+  // text -- box86's own live floppy swap passes this to keep .raw off
+  // the list outright, since fdd.c's own loaders[] table has no entry
+  // for it at all and 86Box just silently ejects instead of erroring
+  // (the same reason the swap-media action itself refuses it, box86.py).
+  // Left off (every other caller), this changes nothing.
+  const all = (shelf[kind] || []).filter(f => o.orphans || !f.orphan)
+    .filter(f => !o.ext || o.ext.includes(f.name.split('.').pop().toLowerCase()));
   const files = all.filter(f => hit(f.name, f.name + ' ' + (f.group || '')));
   // real drives of the matching sort come after the images, so a guest
   // can be pointed at the host's own CD or floppy
@@ -804,7 +812,8 @@ function diskCount(kind, o) {
   const q = (o.filter || '').trim().toLowerCase();
   if (!q) return '';
   const shelf = catalog[o.platform || 'pc98'] || {};
-  const all = (shelf[kind] || []).filter(f => o.orphans || !f.orphan);
+  const all = (shelf[kind] || []).filter(f => o.orphans || !f.orphan)
+    .filter(f => !o.ext || o.ext.includes(f.name.split('.').pop().toLowerCase()));
   const shown = all.filter(f => (f.name + ' ' + (f.group || ''))
                                 .toLowerCase().includes(q)).length;
   return shown + ' of ' + all.length + ' shown';
@@ -822,6 +831,7 @@ function diskPicker(kind, value, o) {
     ' data-platform="' + esc(o.platform || 'pc98') + '"' +
     (o.drives ? ' data-drives="1"' : '') +
     (o.orphans ? ' data-orphans="1"' : '') +
+    (o.ext ? ' data-ext="' + esc(o.ext.join(',')) + '"' : '') +
     ' data-empty="' + esc(o.empty || '(none)') + '"' + (o.box || '') + '>' +
     '<select ' + (o.attrs || '') + '>' + diskBody(kind, value, o) +
     '</select><span class="note disk-count">' + esc(diskCount(kind, o)) +
@@ -833,7 +843,8 @@ window.filterDiskSelect = (box) => {
   if (!sel || sel.tagName !== 'SELECT') return;
   const d = box.dataset;
   const o = {filter: box.value, drives: !!d.drives, orphans: !!d.orphans,
-             empty: d.empty, platform: d.platform};
+             empty: d.empty, platform: d.platform,
+             ext: d.ext ? d.ext.split(',') : undefined};
   const value = sel.value;
   sel.innerHTML = diskBody(d.kind, value, o);
   sel.value = value;          // redrawing the list must not move the pick
@@ -934,9 +945,10 @@ function box86MediaSummary(i) {
   if (i.fdd1) parts.push('Floppy A: ' + esc(i.fdd1));
   if (i.fdd2) parts.push('Floppy B: ' + esc(i.fdd2));
   if (i.cd) parts.push('CD-ROM: ' + esc(i.cd));
-  return parts.join(', ') + ' <span class="note">box86 has no live ' +
-    'media change yet: stop the machine to swap a disk, the next ' +
-    'start picks up whatever is attached then</span>';
+  return parts.join(', ') + ' <span class="note">Floppy A/B and the ' +
+    'CD-ROM can be swapped live, from the Hardware configuration card ' +
+    'below; the hard disk cannot, that one still needs it stopped, ' +
+    'in Edit</span>';
 }
 
 function editForm(i) {
