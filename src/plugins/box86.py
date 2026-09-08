@@ -1004,13 +1004,26 @@ def on_start(api, inst):
 
     _save_pids(d, pids)
 
+    # is_up alone (86Box's own pid alive) says nothing about whether
+    # websockify_video is actually ready to accept a browser's own
+    # connection yet -- it was only ever spawned a moment ago, above,
+    # never waited on the way x11vnc's own window (win_id) already is.
+    # pc98web.py/towns.py's own instances never needed this: QMP itself
+    # is that same wait, inherent in is_up there. Only "listening"
+    # (which spawn() alone already guarantees nothing at all about, and
+    # even accept()-ing a raw TCP connect still isn't proof it can
+    # actually service one) is what _port_open, below, confirms by
+    # opening and immediately dropping a real connection of its own --
+    # a plugin's own "started" is claimed only once a browser's own
+    # first connection attempt, arriving right after, would not have
+    # been the one still finding it not there yet.
     for _ in range(40):
         if box_proc.poll() is not None:
             log.close()
             _kill_pids(pids)
             _save_pids(d, {})
             return "failed: 86Box exited during startup, see box86.log"
-        if is_up(api, inst):
+        if is_up(api, inst) and _port_open(ws):
             log.close()
             return "started"
         time.sleep(0.25)
