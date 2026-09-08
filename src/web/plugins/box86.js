@@ -129,6 +129,29 @@ const BOX86_MIDI = [['', 'None'],
                     ['synth', 'MPU-401 + SoundFont']];
 const box86MidiLabel = v =>
   (BOX86_MIDI.find(([k]) => k === (v || '')) || BOX86_MIDI[0])[1];
+// Floppy A/B and CD-ROM, live while running: 86Box's own patched build
+// (mirai98-box86-patches) polls this instance's own media.ctl for a
+// swap box86.py's own swap-media action wrote there, the same way a
+// QEMU machine's drives already swap live through QMP -- 86Box has no
+// QMP of its own to do that through, so this is its own equivalent
+// path instead, not a re-use of drawMedia/the core's own /media
+// endpoint (pc98/towns only, and would just always answer box86 with
+// no drives at all). Stopped, this is the plain fact instead: nothing
+// to change live in a machine that is not running, and the real edit
+// path (stop it, Edit, Save) is what the next start actually reads.
+function box86MediaRow(i, h, key, kind) {
+  if (!i.running) return i[key] ? h.esc(i[key]) : '(empty)';
+  return h.diskPicker(kind, i[key],
+    {orphans: true, empty: '(empty)', platform: h.platform,
+     attrs: 'onchange="box86SwapMedia(\'' + i.name + '\',\'' + key +
+            '\',this.value)"'});
+}
+window.box86SwapMedia = (name, device, file) => {
+  api('/api/instances/' + encodeURIComponent(name) + '/x/swap-media',
+      {method: 'POST', body: JSON.stringify({device, name: file})})
+    .then(r => { if (r) toast(device + ': ' + (r.result || r.error)); });
+};
+
 function box86Hardware(i, h) {
   const note = (t) => ' <span class="note">' + t + '</span>' ;
   return {
@@ -142,10 +165,11 @@ function box86Hardware(i, h) {
       ['&#9834; MIDI', box86MidiLabel(i.midi)],
       ['&#9707; Hard disk', i.hdd1 ? h.esc(i.hdd1)
        : 'a private copy of a seed image' + note('(nothing attached ' +
-         'from Storage; made the first time this instance starts)')],
-      ['&#9707; Floppy A', i.fdd1 ? h.esc(i.fdd1) : '(empty)'],
-      ['&#9707; Floppy B', i.fdd2 ? h.esc(i.fdd2) : '(empty)'],
-      ['&#9707; CD-ROM', i.cd ? h.esc(i.cd) : '(empty)'],
+         'from Storage; made the first time this instance starts. No ' +
+         'live swap for a hard disk either way: stop it, Edit, Save)')],
+      ['&#9707; Floppy A', box86MediaRow(i, h, 'fdd1', 'fdd')],
+      ['&#9707; Floppy B', box86MediaRow(i, h, 'fdd2', 'fdd')],
+      ['&#9707; CD-ROM', box86MediaRow(i, h, 'cd', 'cdrom')],
       ['&#9635; Display', i.ports && i.ports.length
        ? 'VNC :' + (i.ports[0] - 5900) + ', websocket ' + i.ports[1] +
          (i.ports.length > 3 ? ', audio websocket ' + i.ports[3] : '')
@@ -157,10 +181,12 @@ function box86Hardware(i, h) {
 // ---- edit form ---------------------------------------------------------
 // Machine, name and the four disks are all box86.py's engine actually
 // reads; everything else about the preset is still fixed, so the form
-// does not pretend to let it be changed. A running machine keeps the
-// disks it started with -- box86 has no QMP media-change of its own,
-// so like a rename, a swap needs it stopped first (its cfg is only
-// re-synced from these fields at the next start).
+// does not pretend to let it be changed. This form itself is only ever
+// reachable stopped anyway (Edit stays disabled while running, below):
+// hdd1 really does still need that, with no live swap of its own for a
+// hard disk either way, but Floppy A/B and the CD-ROM no longer do --
+// see box86Hardware's own box86MediaRow for the live path those three
+// actually take now, while running.
 function box86EditForm(i, h) {
   const machineOpts = h.machineList().map(m =>
     '<option value="' + m + '"' +
@@ -178,8 +204,9 @@ function box86EditForm(i, h) {
       h.diskSelect('fdd2', 'fdd', i.fdd2, null, 'dosv') + '</div>' +
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', i.cd, null, 'dosv') + '</div>' +
-    (i.running ? '<div class="note">stop it first to change a disk; ' +
-     'a running instance keeps the ones it started with</div>' : '') +
+    (i.running ? '<div class="note">a running instance keeps the hard ' +
+     'disk it started with; Floppy A/B and the CD-ROM can still be ' +
+     'swapped live, from its own detail page</div>' : '') +
     '<div class="row"><label>MIDI</label><select name="midi">' +
       BOX86_MIDI.map(([v, label]) => '<option value="' + v + '"' +
         ((i.midi || '') === v ? ' selected' : '') + '>' + label +
@@ -214,8 +241,10 @@ function box86WizardDisks(h) {
     '<div class="row"><label>CD-ROM</label>' +
       h.diskSelect('cd', 'cdrom', '', null, 'dosv') + '</div>' +
     '<div class="note">Images live in Storage, on their own dosv shelf. ' +
-    'box86 has no live media change yet: stop the machine to swap a ' +
-    'disk, the next start picks up whatever is attached then.</div>';
+    'Only what starts this instance the first time: once it exists, ' +
+    'Floppy A/B and the CD-ROM can be swapped live from its own detail ' +
+    'page while it runs -- the hard disk cannot, that one still needs ' +
+    'it stopped, in Edit.</div>';
 }
 
 // ---- create wizard: MIDI ------------------------------------------------

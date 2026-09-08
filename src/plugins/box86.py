@@ -247,6 +247,8 @@ def register(api):
         "thumbnail": lambda inst, png: box86_thumbnail(api, inst, png),
     })
     api.machine_sanitize("box86", box86_sanitize)
+    api.instance_action("box86", "swap-media",
+                        lambda inst, data: box86_swap_media(api, inst, data))
     for fmt in BOX86_FLOPPIES:
         api.disk_builder("dosv", "fdd", fmt, box86_new_floppy)
     api.disk_builder("dosv", "hdd", "box86-hdd", box86_new_hard_disk)
@@ -466,6 +468,105 @@ def _ensure_cfg(api, inst):
     _sync_disks(api, inst, cfg_path, d)
     _sync_midi(api, inst, cfg_path)
     return d
+
+
+# ------------------------------------------------------- live media swap
+#
+# 86Box itself has no QMP to ask for this the way a QEMU machine's own
+# drives can be swapped while it runs (pc98web.py's own /api/instances/
+# <name>/media) -- this fork's own small patch gives it an equivalent:
+# a QTimer on the GUI thread polls this instance's own media.ctl for its
+# seq to have gone up since it last looked, and when it has, calls its
+# own existing MediaMenu::floppyMount/cdromMount/eject for whatever key
+# the file names. box86.py only ever writes this file; 86Box only ever
+# reads it. hdd1 is deliberately not part of this at all: 86Box has no
+# live swap of its own for a hard disk either way, so that stays exactly
+# what it always was -- stop the machine, change it in Edit.
+LIVE_MEDIA_DEVICES = {"fdd1": "fdd", "fdd2": "fdd", "cd": "cdrom"}
+
+
+def _media_ctl_path(d):
+    return os.path.join(d, "media.ctl")
+
+
+def _read_media_seq(d):
+    try:
+        with open(_media_ctl_path(d), encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("seq="):
+                    return int(line[len("seq="):].strip())
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _write_media_ctl(d, device, path):
+    """seq must strictly increase for 86Box's own watcher to act on this
+    write at all (read back from whatever is there now, one higher than
+    that -- 0 if nothing has ever been written); written to a .tmp file
+    and moved into place with os.replace, atomic on the same filesystem,
+    so 86Box's own polling never reads a half-written file. Only the one
+    device actually changing is in the file at all -- 86Box's own side
+    leaves any key it does not find alone -- so this never has to know
+    or restate what the other two drives currently hold. path="" means
+    eject; there is no way to ask this to leave a drive untouched other
+    than not naming it here at all.
+    """
+    ctl = _media_ctl_path(d)
+    seq = _read_media_seq(d) + 1
+    tmp = ctl + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("seq=%d\n%s=%s\n" % (seq, device, path))
+    os.replace(tmp, ctl)
+
+
+def box86_swap_media(api, inst, data):
+    """POST /api/instances/<name>/x/swap-media -- {"device": "fdd1" |
+    "fdd2" | "cd", "name": "<Storage name>" | ""}. Live while running
+    (the whole point); refused otherwise, the same as pc98/towns' own
+    /media endpoint already is -- there is nothing for 86Box's own
+    watcher to act on if it is not up to poll media.ctl at all, and a
+    swap taking effect only the next start would be silently wrong
+    instead of merely refused.
+
+    The instance record's own device field is updated here too, right
+    alongside media.ctl: floppyMount/cdromMount both call 86Box's own
+    config_save() internally (confirmed live), so 86box.cfg already
+    reflects the swap the moment it happens -- but _sync_disks (this
+    file) rewrites [Hard disks]/[Floppy and CD-ROM drives] from the
+    instance record on every start regardless, and would otherwise
+    silently revert a live swap the next time this instance starts,
+    since nothing here would know it had ever happened.
+    """
+    if not api.is_running(inst):
+        return 409, "the machine is not running"
+    device = str(data.get("device") or "")
+    kind = LIVE_MEDIA_DEVICES.get(device)
+    if kind is None:
+        return 400, "device must be one of %s" % "/".join(LIVE_MEDIA_DEVICES)
+    name = str(data.get("name") or "").strip()
+    if name:
+        probe = dict(inst)
+        probe[device] = name
+        path = api.disk_path(probe, device)
+        if not os.path.exists(path):
+            return 404, "%s: %s does not exist" % (device, path)
+        if kind == "fdd" and os.path.splitext(path)[1].lower() != ".img":
+            # fdd.c's own loaders[] table (see FDD_EXTS/create_disk's own
+            # forcing of new box86 floppies to .img) has no entry for
+            # most of what a pc98/towns floppy is named -- 86Box would
+            # silently eject rather than error on anything else, so
+            # refusing it here is the only place this can be caught at
+            # all instead of looking like a swap that did nothing.
+            return 400, ("box86's own live floppy swap only reads .img "
+                         "images: %s" % os.path.basename(path))
+    else:
+        path = ""
+    d = _box_dir(api, inst)
+    _write_media_ctl(d, device, path)
+    inst[device] = name
+    api.save_instance(inst)
+    return {"result": "swapped"}
 
 
 def _pids_path(d):

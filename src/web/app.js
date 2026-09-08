@@ -102,6 +102,22 @@ const machineBadge = (m) => {
     'vertical-align:middle">' + esc(b) + '</span>' : '';
 };
 const machineCell = (m) => esc(m || 'pc9821') + machineBadge(m);
+// The one helper object every call into a machine plugin's own hardware()
+// gets, from all four call sites (applyMachineDefaults/hardwareTable/
+// biosLabel/drawConfirm's own fallback) alike -- not each built ad hoc
+// per call site the way it used to be. box86Hardware's own rows build a
+// live disk picker for a running instance regardless of which of these
+// four asked (even one, like biosLabel, that only ever wanted .bios back
+// out of the result): a hardware() implementation is one function with
+// one contract, not four call-site-shaped ones, and the second an
+// implementation reaches for something a caller had not thought to pass,
+// every caller that never expected to need it throws building an object
+// literal whose properties it never even looks at -- confirmed live,
+// 2026-09-08 (Opus/fc): biosLabel's own bare {esc} took down the entire
+// detail view for a running box86 instance, not just the BIOS line.
+function hardwareHelpers(machine) {
+  return { esc, diskPicker, platform: window.MiraiPlugins.platform[machine] };
+}
 // apply a plugin machine's create defaults when the type changes (a core
 // PC-98 machine just re-enables the board and BIOS choices)
 window.applyMachineDefaults = (sel) => {
@@ -114,7 +130,7 @@ window.applyMachineDefaults = (sel) => {
   // a locked choice says what the machine really has instead (the plugin's
   // hardware description), so the greyed "None" is not read as no sound
   const hw = window.MiraiPlugins.hardware[sel.value];
-  const desc = hw ? hw({machine: sel.value}, { esc }) : {};
+  const desc = hw ? hw({machine: sel.value}, hardwareHelpers(sel.value)) : {};
   for (const [field, text] of [['sound', desc.sound], ['bios', desc.bios]]) {
     const el = form[field];
     if (!el) continue;
@@ -864,7 +880,7 @@ function hardwareTable(i) {
   // a machine plugin may describe its own hardware (what its emulation
   // actually wires); otherwise the stock PC-98 rows below are shown
   const custom = window.MiraiPlugins.hardware[i.machine];
-  if (custom) return hardwareRows(custom(i, { esc }).rows);
+  if (custom) return hardwareRows(custom(i, hardwareHelpers(i.machine)).rows);
   const rows = [['&#9636; Memory', esc(i.memory)],
                 ['&#9881; Machine', esc(i.machine || 'pc9821') + ' (' +
                  (i.accel === 'tcg' ? 'TCG'
@@ -904,7 +920,7 @@ function hardwareRows(rows) {
 // the one-line BIOS summary; a machine plugin may name its own ROM set
 function biosLabel(i) {
   const custom = window.MiraiPlugins.hardware[i.machine];
-  const b = custom && custom(i, { esc }).bios;
+  const b = custom && custom(i, hardwareHelpers(i.machine)).bios;
   return b || 'compatible';
 }
 
@@ -3161,7 +3177,7 @@ function drawConfirm() {
     return;
   }
   const hw = window.MiraiPlugins.hardware[v.machine];
-  const desc = hw ? hw(v, { esc }) : {};
+  const desc = hw ? hw(v, hardwareHelpers(v.machine)) : {};
   const rows = [['Name', v.name || '(unnamed)'],
                 ['Machine type', v.machine],
                 ['BIOS', desc.bios || 'compatible'],
