@@ -897,6 +897,47 @@ def on_start(api, inst):
                 break
             time.sleep(0.2)
 
+        # noVNC delivers keystrokes as X keysyms, not raw scancodes --
+        # what symbol a given key produces is entirely Xvfb's own
+        # keymap's business, independent of whichever physical keyboard
+        # (US or JIS) is actually doing the typing on the viewer's own
+        # end. Xvfb's own default keymap is "us", and on a JIS layout
+        # `:` sits where US has `;`, sharing its own key with `+`
+        # instead -- so a JIS-typing user's `:` press was read by Xvfb,
+        # still believing "us", as `+`, `:` itself unreachable at all.
+        # Confirmed live, fc, 2026-09-08: setting this Xvfb's own
+        # keymap to jp106/jp fixes `: @ \ ; + * ^ | =` (9 symbols) the
+        # same way regardless of which physical keyboard is typing,
+        # since noVNC's keysym-based input never depended on that to
+        # begin with -- only Xvfb's own belief about the layout did.
+        # `_` and `~` (JIS's own shifted digit-row keys) are not fixed
+        # by this alone -- left open, fc's own follow-up.
+        #
+        # Must run here, after 86Box's own client has connected -- not
+        # right after Xvfb's own socket file first appears, where an
+        # earlier version of this same fix originally sat. Confirmed
+        # live, 2026-09-08, reproducing the exact race directly: against
+        # a bare Xvfb with no client connected at all, setxkbmap reports
+        # success (exit 0, no error text) but the change never actually
+        # takes, even retried for a full second, even waited out for
+        # five more on top of that with no retry at all -- Xvfb's own
+        # XKB extension apparently never durably commits a change with
+        # nobody connected to observe it. The exact same command,
+        # against the exact same display, succeeds immediately once
+        # 86Box's own window can be found here -- the one existing,
+        # already-relied-upon (by x11vnc's own -id, just below) signal
+        # in this function that a real client is actually connected. A
+        # host with no setxkbmap at all, or a 86Box that never got this
+        # far (win_id still None), must not fail the whole start over a
+        # keymap it can then simply leave at Xvfb's own default.
+        try:
+            subprocess.run(
+                ["setxkbmap", "-display", ":%d" % display_num,
+                 "-model", "jp106", "-layout", "jp"],
+                capture_output=True, timeout=5, check=False)
+        except OSError:
+            pass
+
         x11vnc_argv = ["x11vnc", "-display", ":%d" % display_num]
         if win_id:
             x11vnc_argv += ["-id", win_id]
