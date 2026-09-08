@@ -141,6 +141,23 @@ render_threads = 4
 # be re-written every start to track whatever Storage was last told to
 # attach, not just seeded once.
 FDD_TYPE = "35_2hd"    # 3.5" 1.44M -- fdd.c's own internal_name, verified
+# FDD_TYPE's own CMOS byte value: a real BIOS reads drive type off CMOS
+# offset 0x10 (high nibble A:, low nibble B:), not off 86Box's own cfg
+# at all -- 0x4 there is a real, standard AT CMOS 1.44M floppy type, the
+# same fact FDD_TYPE states for 86Box's own [Floppy and CD-ROM drives]
+# section. The two have to keep agreeing with each other: _sync_disks
+# gives both drives FDD_TYPE in 86box.cfg unconditionally now, but a
+# real BIOS never looks there for whether a drive exists at all -- only
+# _patch_fdd_nvr, below, giving both nibbles this value in NVR, does.
+# Changing one without the other is exactly the bug this pair exists to
+# rule out: 86box.cfg saying a drive is there while CMOS still says
+# otherwise (or the reverse) is what a real BIOS reads as changed
+# hardware, at best, or simply does not surface a drive its own BIOS
+# never agreed existed, at worst -- confirmed live, 2026-09-08, for B:
+# specifically: cfg alone (this file's own earlier fix) was already
+# enough for A: (the seed's own CMOS already said 0x4 there), but never
+# made B: appear to the guest at all, its own CMOS nibble still 0.
+FDD_CMOS = 0x44        # both nibbles: A: and B: both a 1.44M drive
 # fdd_load (src/floppy/fdd.c) picks a loader purely off the file's own
 # extension against this fixed table (loaders[], same file) and, on no
 # match, clears the drive's filename outright rather than refusing to
@@ -339,6 +356,57 @@ def _seed_nvr(d):
             shutil.copy2(src, dest)
 
 
+def _patch_fdd_nvr(d):
+    """FDD_CMOS's own match (see its own comment, beside FDD_TYPE):
+    every *.nvr this instance actually has in its own nvr/ -- freshly
+    seeded just above, or already there from before this existed (a
+    real production instance's own, in particular) -- patched to say
+    both floppy drives are a real 1.44M each, offset 0x10 in the
+    standard AT CMOS layout every 86Box machine's own NVR uses
+    regardless of which one it is (high nibble A:, low nibble B:).
+    86box.cfg's own FDD_TYPE (_sync_disks) already states that fact
+    unconditionally for both drives, but a real BIOS never reads
+    86Box's own cfg for whether a drive exists at all -- only CMOS, so
+    without this A: alone (whose seed CMOS already happened to say
+    0x4) was ever visible to a guest; B: never was.
+
+    Every start, not just the first, the same reason _sync_disks' own
+    fields already are (a plugin's own instance record can say
+    something different than what an existing NVR still has); the size
+    guard and the byte-0x10 check together make this a no-op the moment
+    it no longer has anything to do, not something to special-case
+    around calling on every start regardless.
+    """
+    nvr_dir = os.path.join(d, "nvr")
+    if not os.path.isdir(nvr_dir):
+        return
+    for name in os.listdir(nvr_dir):
+        if not name.lower().endswith(".nvr"):
+            continue
+        path = os.path.join(nvr_dir, name)
+        try:
+            with open(path, "rb") as f:
+                data = bytearray(f.read())
+        except OSError:
+            continue
+        if len(data) < 0x30 or data[0x10] == FDD_CMOS:
+            continue
+        data[0x10] = FDD_CMOS
+        # AT CMOS's own checksum: a big-endian sum of bytes 0x10-0x2d,
+        # stored at 0x2e/0x2f -- the exact same "CMOS checksum error"
+        # screen a mismatched configuration change already shows
+        # (confirmed live, 2026-09-08: patching 0x10 alone, without
+        # this, triggers exactly that, an F1 prompt on every boot).
+        checksum = sum(data[0x10:0x2e]) & 0xFFFF
+        data[0x2e] = (checksum >> 8) & 0xFF
+        data[0x2f] = checksum & 0xFF
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError:
+            pass
+
+
 def _fdd_compatible_path(d, slot, path):
     """A path box86.py can actually put in fdd_0<slot>_fn: unchanged if
     its own extension is already one fdd.c's loaders[] table knows,
@@ -533,6 +601,13 @@ def _ensure_cfg(api, inst):
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(CFG_TEMPLATE)
     _sync_disks(api, inst, cfg_path, d)
+    # unconditional, every start, for every instance -- not nested under
+    # _sync_disks' own hdd1-empty branch (where _seed_nvr lives): an
+    # instance from before either of these existed has its own nvr/
+    # already, never touched by _seed_nvr's own "only if not already
+    # there" copy, and still needs its own CMOS byte patched exactly the
+    # same way a freshly seeded one does
+    _patch_fdd_nvr(d)
     _sync_midi(api, inst, cfg_path)
     return d
 
