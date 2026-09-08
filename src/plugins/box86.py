@@ -318,7 +318,21 @@ def _disk_paths(api, inst, d):
     instance's own (dosv) Storage shelf. hdd1 alone still falls back to
     a private copy of the seed image when nothing was attached -- the
     one field this MVP still defaults on its own, so an instance nobody
-    has touched Storage for still boots to something."""
+    has touched Storage for still boots to something.
+
+    _seed_nvr runs regardless of whether hdd1 needed defaulting here:
+    an instance from before CFG_TEMPLATE's own [Machine] last changed
+    (p2bls/PII-266, in particular) has its own real hdd1 attached
+    already, an OS installed on it and everything, and still needs
+    that new machine's own NVR seeded the same way a brand new
+    instance's does -- _sync_machine (_ensure_cfg) is what actually
+    moves such an instance onto that new [Machine] block; without its
+    own matching NVR already sitting there by the time that runs, the
+    exact same CMOS-checksum-error/hardware-changed prompt patching
+    only 86box.cfg and not NVR already caused once this file over
+    (FDD_CMOS's own history, above) would recur for the machine itself
+    this time instead of just a floppy drive.
+    """
     hdd = api.disk_path(inst, "hdd1")
     if not hdd:
         seed_dir = os.path.join(d, "hdd")
@@ -326,7 +340,7 @@ def _disk_paths(api, inst, d):
         hdd = os.path.join(seed_dir, "hdd0.vhd")
         if not os.path.exists(hdd) and os.path.exists(SEED_HDD):
             shutil.copy2(SEED_HDD, hdd)
-        _seed_nvr(d)
+    _seed_nvr(d)
     return (hdd, api.disk_path(inst, "fdd1"), api.disk_path(inst, "fdd2"),
             api.disk_path(inst, "cd"))
 
@@ -343,6 +357,20 @@ def _seed_nvr(d):
     mean a code change here every time that changes again. *.bin is
     deliberately excluded -- SEED_NVR_DIR may hold other 86Box state
     that is not a machine's CMOS at all.
+
+    Called every start regardless of hdd1 (_disk_paths, above), not
+    just the first time an instance has no hdd1 of its own: an
+    instance already on some earlier [Machine] never gets a second
+    chance at this on its own otherwise, its own nvr/ never growing
+    the new machine's own file until _sync_machine (_ensure_cfg)
+    actually moves it there -- and by then it is too late, that move
+    already having happened with nothing of this new machine's own in
+    NVR to go with it. An instance's own already-present NVR for
+    whatever [Machine] it is still on now (tx97, for one real one)
+    is never touched here -- this only ever adds a file that was not
+    there before, one instance may go on holding more than one
+    machine's own NVR at once, each simply unread by 86Box except
+    whichever one its own current [Machine] actually names.
     """
     if not os.path.isdir(SEED_NVR_DIR):
         return
@@ -431,6 +459,60 @@ def _fdd_compatible_path(d, slot, path):
     except OSError:
         return path
     return link
+
+
+def _sync_machine(cfg_path):
+    """Move an existing instance's own [Machine] block onto whatever
+    CFG_TEMPLATE's own currently says -- the same block a brand new
+    instance's own cfg already gets, once, from CFG_TEMPLATE itself
+    (_ensure_cfg), but an existing instance's own never revisits again
+    on its own once written: 86Box's own on-exit rewrite keeps
+    whatever it last negotiated there forever after, this project's
+    own board/CPU choice included, past whenever CFG_TEMPLATE's own
+    idea of that choice next changes (p2bls/PII-266, replacing tx97,
+    is the real example this exists for).
+
+    The whole block, every key CFG_TEMPLATE's own [Machine] names,
+    not merely `machine` on its own: cpu_family/cpu_multi/cpu_speed
+    left at some earlier board's own Socket 7 values while `machine`
+    alone moved to a Slot 1 one is a real, worse mismatch than simply
+    never having moved at all -- confirmed live, fc, 2026-09-08.
+    Compared and, if different, replaced key by key rather than by
+    just re-adding the section wholesale, so an unrelated section
+    already elsewhere in the same file keeps its own place in it; an
+    instance already on a matching [Machine] -- including a fresh one,
+    the moment after CFG_TEMPLATE itself just wrote it -- is left
+    untouched rather than rewriting the file to the same bytes it
+    already has.
+
+    NVR is a separate, already-solved concern of its own, not this
+    function's: _seed_nvr (_disk_paths, called before this from
+    _ensure_cfg) already guarantees the new [Machine]'s own NVR exists
+    in this instance's own nvr/ by the time this runs, and an existing
+    [Machine]'s own NVR is never deleted by anything in this file --
+    both still there, whichever one 86Box's own new [Machine] line,
+    once this writes it, actually names next boot.
+    """
+    template_cp = configparser.ConfigParser(interpolation=None)
+    template_cp.optionxform = str
+    template_cp.read_string(CFG_TEMPLATE)
+    wanted = dict(template_cp.items("Machine"))
+
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if os.path.exists(cfg_path):
+        cp.read(cfg_path, encoding="utf-8")
+    if cp.has_section("Machine") and dict(cp.items("Machine")) == wanted:
+        return
+    if not cp.has_section("Machine"):
+        cp.add_section("Machine")
+    else:
+        for key in list(cp.options("Machine")):
+            cp.remove_option("Machine", key)
+    for key, value in wanted.items():
+        cp.set("Machine", key, value)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=True)
 
 
 def _sync_disks(api, inst, cfg_path, d):
@@ -587,14 +669,18 @@ def _sync_midi(api, inst, cfg_path):
 
 
 def _ensure_cfg(api, inst):
-    """The instance's own 86box.cfg. Everything but the disks and MIDI
-    is written once (86Box rewrites its cfg on exit with whatever it
-    actually negotiated, CPU speed included, the same way towns.py
-    seeds a CMOS file once and then leaves the machine's own copy
-    alone) -- the disks and whether a MIDI module is fitted are
-    re-synced on every call (_sync_disks, _sync_midi), since both are
-    Storage/the instance record's own to say and can change between
-    one start and the next.
+    """The instance's own 86box.cfg. Most of it is written once (86Box
+    rewrites its cfg on exit with whatever it actually negotiated, CPU
+    speed included, the same way towns.py seeds a CMOS file once and
+    then leaves the machine's own copy alone) -- the disks, whether a
+    MIDI module is fitted, and [Machine] itself are all re-synced on
+    every call regardless (_sync_disks, _sync_midi, _sync_machine),
+    since Storage/the instance record can change what the first two
+    say between one start and the next the same way _sync_machine's
+    own CFG_TEMPLATE can change what it says about the third -- an
+    existing instance still on some earlier one of those (tx97, for a
+    real one) is exactly who _sync_machine exists to move, on its own,
+    onto whatever CFG_TEMPLATE currently names instead.
     """
     d = _box_dir(api, inst)
     cfg_path = os.path.join(d, "86box.cfg")
@@ -609,6 +695,13 @@ def _ensure_cfg(api, inst):
     # there" copy, and still needs its own CMOS byte patched exactly the
     # same way a freshly seeded one does
     _patch_fdd_nvr(d)
+    # after _sync_disks (whose own _disk_paths already guaranteed, via
+    # _seed_nvr, that whatever [Machine] this is about to name has its
+    # own NVR waiting in nvr/ already) and after _patch_fdd_nvr (so
+    # that seeded NVR already has its own FDD_CMOS byte right, same as
+    # every other NVR here, before 86Box ever gets a chance to read it
+    # against a [Machine] naming it for the first time)
+    _sync_machine(cfg_path)
     _sync_midi(api, inst, cfg_path)
     return d
 
