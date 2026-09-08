@@ -1035,15 +1035,28 @@ _stopping = set()
 
 
 def on_stop(api, inst):
-    """Ask 86Box's own guest to shut down first (a real ACPI/APM power
+    """Ask 86Box's own guest to shut down first (a real ACPI power
     button press, over SIGUSR1 -- a patch to our own build, since 86Box
     offers no QMP-like control socket of its own to ask for one any
     other way), and only fall back to _kill_pids's SIGTERM/SIGKILL
     escalation for whatever is left once that either finishes or times
-    out.  A machine simply killed mid-run never gets to tell its own OS
-    it is shutting down, and Windows in particular boots back into its
-    own crash recovery next time as a direct result -- confirmed live,
-    2026-09-08.
+    out. A machine simply killed mid-run never gets to tell its own OS
+    it is shutting down, and a guest that actually understands ACPI
+    boots back into its own crash recovery next time as a direct
+    result of skipping this -- confirmed live, 2026-09-08.
+
+    That guest has to actually be an ACPI one for any of this to do
+    anything at all, though: Windows 95 itself is APM, not ACPI, and
+    this SIGUSR1 patch only ever raises the latter -- confirmed live
+    by fc, 2026-09-08, that a Win95 guest never reacts to it in any
+    way. is_up on a Win95 guest in particular staying true for most or
+    all of the 15s wait below is not, on its own, proof of a real
+    guest-side shutdown genuinely in progress the way it would be for
+    a guest that does speak ACPI -- _kill_pids' own SIGTERM/SIGKILL
+    escalation, past that wait, is what actually always ends up doing
+    the work there regardless. Real APM support for a Win95 guest,
+    should that ever matter enough on its own to be worth adding, is
+    not this.
 
     Runs in a background thread: the wait above is up to 15s on its
     own, plus _kill_pids' own up-to-5s escalation on top -- up to 20s
