@@ -50,6 +50,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 
 # where the appliance keeps 86Box's ROM set from development, and the
@@ -991,6 +992,9 @@ def on_start(api, inst):
     return "started (slow to come up)"
 
 
+_stopping = set()
+
+
 def on_stop(api, inst):
     """Ask 86Box's own guest to shut down first (a real ACPI/APM power
     button press, over SIGUSR1 -- a patch to our own build, since 86Box
@@ -1001,8 +1005,44 @@ def on_stop(api, inst):
     it is shutting down, and Windows in particular boots back into its
     own crash recovery next time as a direct result -- confirmed live,
     2026-09-08.
+
+    Runs in a background thread: the wait above is up to 15s on its
+    own, plus _kill_pids' own up-to-5s escalation on top -- up to 20s
+    the pc98web server, single-threaded, otherwise spent unable to
+    answer any other instance's request at all, this instance's own
+    stop button included. is_up keeps reading this instance as running
+    for as long as that thread actually takes, exactly as it already
+    does for any other action still genuinely in flight -- a list view
+    only shows it stopped once a refresh lands after the thread's own
+    _save_pids(d, {}) actually runs, not the moment this returns.
+
+    _stopping (module-level, keyed by instance index) exists only to
+    stop a second stop request arriving before the first's own thread
+    has finished from starting a second, redundant shutdown sequence
+    of the same instance concurrently with the first -- a real risk
+    once this is no longer one request blocking the whole server from
+    accepting a second one. A CPython set's own add/discard/`in` are
+    each one bytecode-level op already atomic under the GIL, same as
+    the rest of this module's plain dict/set state -- no lock beyond
+    that is needed for a plain membership guard like this one.
     """
+    index = inst["index"]
+    if index in _stopping:
+        return "already stopping"
     d = _box_dir(api, inst)
+
+    def _shutdown():
+        try:
+            _stop_now(d, inst)
+        finally:
+            _stopping.discard(index)
+
+    _stopping.add(index)
+    threading.Thread(target=_shutdown, daemon=True).start()
+    return "shutting down"
+
+
+def _stop_now(d, inst):
     pids = _load_pids(d)
     box_pid = pids.get("86box")
     if box_pid and _alive(box_pid):
