@@ -1748,7 +1748,8 @@ async function detailView(name) {
      '<dt>Acceleration</dt><dd>' + (i.accel === 'tcg' ? 'TCG'
                       : 'KVM (Experimental)') + '</dd>') +
     '<dt>Memory</dt><dd>' + esc(i.memory) + '</dd>' +
-    '<dt>Disks</dt><dd>' + (disks.length || 'none — N88 BASIC') + '</dd>' +
+    '<dt>Disks</dt><dd>' + (disks.length ||
+     (isBox86 ? 'private seed hard disk' : 'none — N88 BASIC')) + '</dd>' +
     '<dt>Console</dt><dd>VNC :' + (i.ports[0] - 5900) + '</dd></dl></div>' +
     '<div style="width:16em" id="gauges"></div></div>' +
     // the two panels, as VMware arranges them
