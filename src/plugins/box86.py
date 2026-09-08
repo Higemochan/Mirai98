@@ -570,6 +570,18 @@ def box86_swap_media(api, inst, data):
     swap taking effect only the next start would be silently wrong
     instead of merely refused.
 
+    A floppy's own path is put through _fdd_compatible_path the same
+    way _sync_disks already does for the offline path -- fdd.c's own
+    loaders[] table (FDD_EXTS) covers plenty of real floppy extensions
+    (.flp, .ima, .fdi, and more) beyond just .img, and the one it does
+    not (.raw, a PC-98/Towns shelf's own usual name) still works here
+    exactly as it already does offline, via a symlink in this
+    instance's own box86/ directory rather than a name it refuses
+    outright. This was a real 400 here before -- rejecting anything
+    that was not already literally named .img, box86.js's own picker
+    filtered the same way to match -- when the only actual constraint
+    was ever fdd.c's own table, not this one extension out of it.
+
     The instance record's own device field is updated here too, right
     alongside media.ctl: floppyMount/cdromMount both call 86Box's own
     config_save() internally (confirmed live), so 86box.cfg already
@@ -585,25 +597,20 @@ def box86_swap_media(api, inst, data):
     kind = LIVE_MEDIA_DEVICES.get(device)
     if kind is None:
         return 400, "device must be one of %s" % "/".join(LIVE_MEDIA_DEVICES)
+    d = _box_dir(api, inst)
     name = str(data.get("name") or "").strip()
+    path = ""
     if name:
         probe = dict(inst)
         probe[device] = name
         path = api.disk_path(probe, device)
         if not os.path.exists(path):
             return 404, "%s: %s does not exist" % (device, path)
-        if kind == "fdd" and os.path.splitext(path)[1].lower() != ".img":
-            # fdd.c's own loaders[] table (see FDD_EXTS/create_disk's own
-            # forcing of new box86 floppies to .img) has no entry for
-            # most of what a pc98/towns floppy is named -- 86Box would
-            # silently eject rather than error on anything else, so
-            # refusing it here is the only place this can be caught at
-            # all instead of looking like a swap that did nothing.
-            return 400, ("box86's own live floppy swap only reads .img "
-                         "images: %s" % os.path.basename(path))
-    else:
-        path = ""
-    d = _box_dir(api, inst)
+    if kind == "fdd":
+        # slot: fdd1 -> 1, fdd2 -> 2, the same numbering _sync_disks'
+        # own (1, fdd1), (2, fdd2) pairing already uses. Handles path=""
+        # (eject) on its own too -- _fdd_compatible_path's first line.
+        path = _fdd_compatible_path(d, int(device[-1]), path)
     _write_media_ctl(d, device, path)
     inst[device] = name
     api.save_instance(inst)

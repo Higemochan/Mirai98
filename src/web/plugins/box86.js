@@ -129,38 +129,46 @@ const BOX86_MIDI = [['', 'None'],
                     ['synth', 'MPU-401 + SoundFont']];
 const box86MidiLabel = v =>
   (BOX86_MIDI.find(([k]) => k === (v || '')) || BOX86_MIDI[0])[1];
-// Floppy A/B and CD-ROM, live while running: 86Box's own patched build
-// (mirai98-box86-patches) polls this instance's own media.ctl for a
-// swap box86.py's own swap-media action wrote there, the same way a
-// QEMU machine's drives already swap live through QMP -- 86Box has no
-// QMP of its own to do that through, so this is its own equivalent
-// path instead, not a re-use of drawMedia/the core's own /media
-// endpoint (pc98/towns only, and would just always answer box86 with
-// no drives at all). Stopped, this is the plain fact instead: nothing
-// to change live in a machine that is not running, and the real edit
-// path (stop it, Edit, Save) is what the next start actually reads.
-function box86MediaRow(i, h, key, kind) {
-  if (!i.running) return i[key] ? h.esc(i[key]) : '(empty)';
-  return h.diskPicker(kind, i[key],
-    {orphans: true, empty: '(empty)', platform: h.platform,
-     // .raw never belongs in this list at all, not just refused after
-     // picking it: fdd.c's own loaders[] table has no entry for it, so
-     // 86Box would silently eject rather than error (the same reason
-     // box86_swap_media itself refuses it, box86.py) -- offering it
-     // here would just be a choice guaranteed to look like it worked
-     // and put nothing in the drive. A floppy already attached from
-     // before this existed still shows, as the one non-.img option:
-     // diskBody's own "known" fallback keeps whatever is actually
-     // selected in the list even when the filter would otherwise drop
-     // it, exactly like a filter's typed text already does.
-     ext: kind === 'fdd' ? ['img'] : undefined,
-     attrs: 'onchange="box86SwapMedia(\'' + i.name + '\',\'' + key +
-            '\',this.value)"'});
+// The detail view's own Media row (General information card, not this
+// file's own Hardware configuration one -- window.MiraiPlugins.mediaRow,
+// app.js's own drawMedia): 86Box has no QMP of its own for the stock
+// QMP-backed picture there to ever get real drives back from, so this
+// draws box86's own three (fdd1/fdd2/cd), live while running, the same
+// visual shape (a .row/span/picker per drive) that QMP-backed one
+// already has for a QEMU machine's own drives. 86Box's own patched
+// build (mirai98-box86-patches) polls this instance's own media.ctl for
+// a swap box86.py's own swap-media action wrote there -- its own
+// equivalent of a QEMU machine's live media change through QMP. Not
+// drawn at all stopped (h is only ever built for a running instance by
+// drawMedia's own caller): nothing to change live in a machine that is
+// not running, and the real edit path (stop it, Edit, Save) is what the
+// next start actually reads.
+function box86MediaRow(i, h) {
+  return [['fdd1', 'fdd'], ['fdd2', 'fdd'], ['cd', 'cdrom']].map(
+    ([key, kind]) =>
+      '<div class="row" style="margin:.1em 0">' +
+        '<span style="width:5.5em">' + h.esc(key) + '</span>' +
+        // No ext filter: box86.py's own box86_swap_media puts a
+        // floppy's path through the exact same _fdd_compatible_path
+        // _sync_disks already does offline, so every extension fdd.c's
+        // own loaders[] table knows plays live, not just .img, and
+        // .raw itself still works too, via the same symlink the
+        // offline path already relies on.
+        h.diskPicker(kind, i[key],
+          {orphans: true, empty: '(empty)', platform: h.platform,
+           filter: h.filters[key] || '',
+           box: ' data-device="' + key + '"',
+           attrs: 'onchange="box86SwapMedia(\'' + i.name + '\',\'' + key +
+                  '\',this.value)"'}) +
+      '</div>').join('');
 }
 window.box86SwapMedia = (name, device, file) => {
   api('/api/instances/' + encodeURIComponent(name) + '/x/swap-media',
       {method: 'POST', body: JSON.stringify({device, name: file})})
-    .then(r => { if (r) toast(device + ': ' + (r.result || r.error)); });
+    .then(r => {
+      if (r) toast(device + ': ' + (r.result || r.error));
+      window.redrawMediaRow(name);
+    });
 };
 
 function box86Hardware(i, h) {
@@ -178,9 +186,13 @@ function box86Hardware(i, h) {
        : 'a private copy of a seed image' + note('(nothing attached ' +
          'from Storage; made the first time this instance starts. No ' +
          'live swap for a hard disk either way: stop it, Edit, Save)')],
-      ['&#9707; Floppy A', box86MediaRow(i, h, 'fdd1', 'fdd')],
-      ['&#9707; Floppy B', box86MediaRow(i, h, 'fdd2', 'fdd')],
-      ['&#9707; CD-ROM', box86MediaRow(i, h, 'cd', 'cdrom')],
+      // Floppy A/B and CD-ROM: plain fact here, same as Hard disk just
+      // above -- the live picker for these three lives in the General
+      // information card's own Media row instead (box86MediaRow,
+      // window.MiraiPlugins.mediaRow), not duplicated in this card too.
+      ['&#9707; Floppy A', i.fdd1 ? h.esc(i.fdd1) : '(empty)'],
+      ['&#9707; Floppy B', i.fdd2 ? h.esc(i.fdd2) : '(empty)'],
+      ['&#9707; CD-ROM', i.cd ? h.esc(i.cd) : '(empty)'],
       ['&#9635; Display', i.ports && i.ports.length
        ? 'VNC :' + (i.ports[0] - 5900) + ', websocket ' + i.ports[1] +
          (i.ports.length > 3 ? ', audio websocket ' + i.ports[3] : '')
@@ -317,18 +329,13 @@ window.registerMachinePlugin({
   // box86 loses nothing opting out: its own audio already rides its own
   // separate websocket (the console hook below), never the VNC channel.
   vncAudio: false,
-  // A third QEMU-only capability box86 opts out of, this one nothing to
-  // do with the VNC channel at all: the detail view's own live media
-  // swap (drawMedia/swapMedia, app.js) reads /api/instances/<name>/media,
-  // a QMP-backed endpoint that always answers an engine with no QMP at
-  // all (86Box) with an empty drive list -- rendered, until this flag
-  // existed, as "no floppy or CD-ROM drive", which box86 very much has
-  // (hdd1/fdd1/fdd2/cd) -- a false negative, not a true one. Detach/
-  // reattach still works exactly as box86WizardDisks' own note already
-  // says: stop the machine, change it in Edit, the next start picks up
-  // whatever is attached then -- there just isn't a QMP-backed live
-  // dropdown for it the way a QEMU machine's own drives get.
-  liveMedia: false,
+  // The detail view's own Media row is box86MediaRow's to draw (above):
+  // the stock one reads /api/instances/<name>/media, a QMP-backed
+  // endpoint that always answers an engine with no QMP at all (86Box)
+  // with an empty drive list -- rendered as "no floppy or CD-ROM
+  // drive", which box86 very much has (hdd1/fdd1/fdd2/cd) -- a false
+  // negative, not a true one.
+  mediaRow: { box86: box86MediaRow },
   defaults: {
     box86: { memory: '64M', sound: 'none', bios: 'real',
              lockSound: true, lockBios: true }

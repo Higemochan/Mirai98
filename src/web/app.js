@@ -13,7 +13,7 @@ const loadRFB = async () => RFB ||
 window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
     hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {},
-    platform: {}, relativePointer: {}, vncAudio: {}, liveMedia: {} };
+    platform: {}, relativePointer: {}, vncAudio: {}, mediaRow: {} };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -53,18 +53,14 @@ window.registerMachinePlugin = (p) => {
   P.vncAudio = P.vncAudio || {};
   if (p.vncAudio === false)
     (p.machines || []).forEach(m => { P.vncAudio[m] = false; });
-  // opt out of the detail view's own live media swap (drawMedia/
-  // swapMedia): that whole picture -- a dropdown per drive, changed
-  // without stopping the machine -- comes from a QMP-only endpoint
-  // (/api/instances/<name>/media), and an engine with no QMP of its own
-  // (box86) always answers it with an empty drive list. Rendered as
-  // this instance's own attach state instead, read straight off its own
-  // hdd1/fdd1/fdd2/cd fields, plus the same "stop it to change a disk"
-  // note box86WizardDisks already gives -- not a claim it has no media
-  // at all, which an empty drive list otherwise reads as.
-  P.liveMedia = P.liveMedia || {};
-  if (p.liveMedia === false)
-    (p.machines || []).forEach(m => { P.liveMedia[m] = false; });
+  // A machine plugin may draw the detail view's own Media row itself
+  // (mediaRow(inst, helpers) -> HTML string, or null/undefined to fall
+  // through to the stock QMP-backed one) -- an engine with no QMP of
+  // its own (box86) has no drives for /api/instances/<name>/media to
+  // ever answer with at all, so drawMedia asks here first instead of
+  // rendering an always-empty QMP picture as if that meant no media.
+  P.mediaRow = P.mediaRow || {};
+  Object.assign(P.mediaRow, p.mediaRow || {});
   Object.assign(P.defaults, p.defaults || {});
   Object.assign(P.badge, p.badge || {});
   Object.assign(P.editForm, p.editForm || {});   // per-machine hardware form
@@ -935,22 +931,6 @@ function biosLabel(i) {
   return b || 'compatible';
 }
 
-// The detail view's own Media row for a liveMedia:false machine (box86):
-// this instance's own attach state, read straight off its own record --
-// nothing to ask the server for, unlike drawMedia's own QMP-backed
-// fetch, so this renders synchronously along with the rest of the row.
-function box86MediaSummary(i) {
-  const parts = [
-    'Hard disk: ' + (i.hdd1 ? esc(i.hdd1) : 'private seed copy')];
-  if (i.fdd1) parts.push('Floppy A: ' + esc(i.fdd1));
-  if (i.fdd2) parts.push('Floppy B: ' + esc(i.fdd2));
-  if (i.cd) parts.push('CD-ROM: ' + esc(i.cd));
-  return parts.join(', ') + ' <span class="note">Floppy A/B and the ' +
-    'CD-ROM can be swapped live, from the Hardware configuration card ' +
-    'below; the hard disk cannot, that one still needs it stopped, ' +
-    'in Edit</span>';
-}
-
 function editForm(i) {
   // a machine plugin may supply its own hardware form (given the helpers it
   // needs); otherwise the stock PC-98 form below is used
@@ -1781,11 +1761,8 @@ async function detailView(name) {
      (i.gpib ? esc(i.gpib) : 'none') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Home</td><td>vm/vm-' + i.index +
     '/</td></tr>' +
-    (window.MiraiPlugins.liveMedia[i.machine] === false
-     ? (i.running ? '<tr><td style="color:#8d99a5">Media</td><td class="note">' +
-        box86MediaSummary(i) + '</td></tr>' : '')
-     : (i.running ? '<tr><td style="color:#8d99a5">Media</td>' +
-        '<td id="media-row" class="note">reading...</td></tr>' : '')) +
+    (i.running ? '<tr><td style="color:#8d99a5">Media</td>' +
+     '<td id="media-row" class="note">reading...</td></tr>' : '') +
     (isBox86 ? '' :
      '<tr><td style="color:#8d99a5">QMP</td><td>127.0.0.1:' + i.ports[2] +
      '</td></tr>') +
@@ -1799,17 +1776,41 @@ async function detailView(name) {
     window.connectConsole(name, i.ports[1]);
   autoConnect = '';
   updateUsage(name);
-  // liveMedia:false (box86) already has this row's own real content,
-  // rendered synchronously above (box86MediaSummary) -- this QMP-backed
-  // fetch is only for a machine that actually has QMP to ask.
-  if (i.running && window.MiraiPlugins.liveMedia[i.machine] !== false)
-    drawMedia(name, i.machine);
+  if (i.running) drawMedia(name);
 }
 
-// swapping a disk while the machine runs, the way a hand would
-async function drawMedia(name, machine) {
+// The detail view's own Media row: a machine plugin may draw this
+// itself (window.MiraiPlugins.mediaRow, box86.js's own box86MediaRow
+// for instance -- 86Box has no QMP of its own for the stock path just
+// below to ever get real drives back from at all); everything else
+// falls through to the QMP-backed picture unchanged. Always re-fetches
+// this instance's own record first (never the page's own, possibly
+// stale, instances array): a live swap (box86_swap_media, or QMP's own
+// /media below) updates the record server-side, and drawing a plugin's
+// own hook from a stale copy would just keep showing what a swap
+// already changed.
+async function drawMedia(name) {
   const slot = document.getElementById('media-row');
   if (!slot) return;
+  // a redraw (a swap, or a plugin's own window.redrawMediaRow) must not
+  // lose a filter someone was typing to find a disc -- it comes back
+  // with them, the same way it always has
+  const typed = {};
+  for (const box of document.querySelectorAll('#media-row .disk-filter'))
+    typed[box.dataset.device] = box.value;
+  const inst = await api('/api/instances/' + encodeURIComponent(name));
+  if (!inst || !document.getElementById('media-row')) return;
+  const machine = inst.machine;
+  const platform = window.MiraiPlugins.platform[machine] || 'pc98';
+  const hook = window.MiraiPlugins.mediaRow[machine];
+  if (hook) {
+    const html = await Promise.resolve(
+      hook(inst, {esc, diskPicker, platform, filters: typed}));
+    if (html != null) {
+      document.getElementById('media-row').innerHTML = html;
+      return;
+    }
+  }
   const d = await api('/api/instances/' + encodeURIComponent(name) +
                       '/media');
   if (!d || !document.getElementById('media-row')) return;
@@ -1818,16 +1819,6 @@ async function drawMedia(name, machine) {
       'no floppy or CD-ROM drive';
     return;
   }
-  // a swap redraws these rows; a filter someone typed to find the disc is
-  // still the one they are working through, so it comes back with them
-  const typed = {};
-  for (const box of document.querySelectorAll('#media-row .disk-filter'))
-    typed[box.dataset.device] = box.value;
-  // Which shelf these drives themselves pick from: left off entirely
-  // (diskPicker's own default), this always meant pc98's -- invisible
-  // only because nothing else had ever put a same-kind image on pc98's
-  // own shelf for a non-pc98 machine's drive to wrongly offer.
-  const platform = window.MiraiPlugins.platform[machine] || 'pc98';
   document.getElementById('media-row').innerHTML = d.drives.map(drive =>
     '<div class="row" style="margin:.1em 0">' +
       '<span style="width:5.5em">' + esc(drive.device) + '</span>' +
@@ -1836,17 +1827,21 @@ async function drawMedia(name, machine) {
                   filter: typed[drive.device] || '',
                   box: ' data-device="' + esc(drive.device) + '"',
                   attrs: 'onchange="swapMedia(\'' + name + '\',\'' +
-                         drive.device + '\',this.value,\'' +
-                         esc(machine) + '\')"'}) +
+                         drive.device + '\',this.value)"'}) +
     '</div>').join('');
 }
-window.swapMedia = (name, device, file, machine) => {
+window.swapMedia = (name, device, file) => {
   api('/api/instances/' + encodeURIComponent(name) + '/media',
       {method: 'POST', body: JSON.stringify({device, name: file})})
     .then(r => { if (r) { toast(device + ': ' + r.result);
                           task('VM ' + name + ' - ' + device, r.result); }
-                 drawMedia(name, machine); });
+                 drawMedia(name); });
 };
+// a machine plugin's own mediaRow hook calls this after its own live
+// swap succeeds, the same way swapMedia already redraws its own QMP
+// picture above -- without it the row would just keep showing what
+// was there before the swap until something else happened to redraw it
+window.redrawMediaRow = (name) => drawMedia(name);
 
 // the three readings VMware stacks down the right of a VM summary
 async function updateUsage(name) {
