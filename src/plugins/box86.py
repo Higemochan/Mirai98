@@ -274,6 +274,7 @@ def register(api):
     api.add_engine("box86", {
         "on_start": lambda inst: on_start(api, inst),
         "on_stop": lambda inst: on_stop(api, inst),
+        "on_reset": lambda inst: box86_reset(api, inst),
         "is_up": lambda inst: is_up(api, inst),
         "pid": lambda inst: _load_pids(_box_dir(api, inst)).get("86box"),
         "thumbnail": lambda inst, png: box86_thumbnail(api, inst, png),
@@ -552,8 +553,10 @@ def _sync_disks(api, inst, cfg_path, d):
     fc = "Floppy and CD-ROM drives"
     if not cp.has_section(fc):
         cp.add_section(fc)
+    fdd_real = {}
     for n, path in ((1, fdd1), (2, fdd2)):
         path = _fdd_compatible_path(d, n, path)
+        fdd_real[n] = path
         key_type, key_fn = "fdd_%02i_type" % n, "fdd_%02i_fn" % n
         # The drive itself and whatever media is in it are two different
         # things on a real PC, and 86Box keeps them that way: fdd_0N_type
@@ -600,6 +603,11 @@ def _sync_disks(api, inst, cfg_path, d):
     cp.set(fc, "cdrom_01_image_path", cd or "")
     with open(cfg_path, "w", encoding="utf-8") as f:
         cp.write(f, space_around_delimiters=True)
+    # exactly what was just written, already through
+    # _fdd_compatible_path: on_start seeds media.ctl from this, and the
+    # two have to agree or 86Box's own watcher primes on a file that
+    # describes a machine other than the one it just loaded
+    return (fdd_real[1], fdd_real[2], cd or "")
 
 
 # "synth" (inst["midi"]) is the same abstract choice pc98/towns' own midi
@@ -687,7 +695,7 @@ def _ensure_cfg(api, inst):
     if not os.path.exists(cfg_path):
         with open(cfg_path, "w", encoding="utf-8") as f:
             f.write(CFG_TEMPLATE)
-    _sync_disks(api, inst, cfg_path, d)
+    fdd1, fdd2, cd = _sync_disks(api, inst, cfg_path, d)
     # unconditional, every start, for every instance -- not nested under
     # _sync_disks' own hdd1-empty branch (where _seed_nvr lives): an
     # instance from before either of these existed has its own nvr/
@@ -703,6 +711,16 @@ def _ensure_cfg(api, inst):
     # against a [Machine] naming it for the first time)
     _sync_machine(cfg_path)
     _sync_midi(api, inst, cfg_path)
+    # Seed media.ctl with all three drives as this start actually left
+    # them, before 86Box is up to read it. Two reasons, both real: the
+    # watcher adopts the first file it sees without acting on it, so it
+    # must describe the machine that was just loaded (a file left over
+    # from the previous run does not); and _write_media_ctl can only
+    # restate a drive it has ever been told about, so without this the
+    # very first swap of each drive would still be a one-key file --
+    # exactly the shape that loses a change when two land inside one
+    # poll interval.
+    _write_media_ctl(d, {"fdd1": fdd1, "fdd2": fdd2, "cd": cd})
     return d
 
 
@@ -725,34 +743,78 @@ def _media_ctl_path(d):
     return os.path.join(d, "media.ctl")
 
 
-def _read_media_seq(d):
+# The order keys are written in. Fixed only so the file reads the way a
+# person would expect to find it; 86Box's own watcher parses by name.
+_MEDIA_CTL_KEYS = ("seq", "fdd1", "fdd1seq", "fdd2", "fdd2seq",
+                   "cd", "cdseq", "reset")
+
+
+def _read_media_ctl(d):
+    """Whatever media.ctl currently says, as a plain dict -- the file is
+    its own state store, so a writer that only knows about the one drive
+    it is changing can still restate the other two verbatim.
+    """
+    state = {}
     try:
         with open(_media_ctl_path(d), encoding="utf-8") as f:
             for line in f:
-                if line.startswith("seq="):
-                    return int(line[len("seq="):].strip())
-    except (OSError, ValueError):
+                line = line.rstrip("\n").rstrip("\r")
+                eq = line.find("=")
+                if eq > 0:
+                    state[line[:eq].strip()] = line[eq + 1:]
+    except OSError:
         pass
-    return 0
+    return state
 
 
-def _write_media_ctl(d, device, path):
-    """seq must strictly increase for 86Box's own watcher to act on this
-    write at all (read back from whatever is there now, one higher than
-    that -- 0 if nothing has ever been written); written to a .tmp file
-    and moved into place with os.replace, atomic on the same filesystem,
-    so 86Box's own polling never reads a half-written file. Only the one
-    device actually changing is in the file at all -- 86Box's own side
-    leaves any key it does not find alone -- so this never has to know
-    or restate what the other two drives currently hold. path="" means
-    eject; there is no way to ask this to leave a drive untouched other
-    than not naming it here at all.
+def _write_media_ctl(d, updates, reset=False):
+    """Restate every drive this file has ever been told about, with only
+    the named ones actually changing. Written to a .tmp and moved into
+    place with os.replace, atomic on the same filesystem, so 86Box's own
+    polling never reads a half-written file.
+
+    Restating all of them is what makes this safe: the watcher polls at
+    its own interval and only ever sees the file as it stands when it
+    looks, so two writes landing inside one interval leave it reading
+    the second one only. A file that named just the drive it changed
+    lost the first change outright when that happened -- confirmed live,
+    2026-09-08: fdd1 and fdd2 swapped 0.2s apart, both answered
+    "swapped", and only fdd2 reached 86box.cfg at all, leaving the
+    instance record claiming a disk the machine did not have.
+
+    Each drive carries its own counter, and 86Box acts on a drive only
+    when that counter moves. Restating a drive whose counter has not
+    moved is therefore free -- which matters, because remounting one
+    that did not change raises a disk-change the guest has no business
+    seeing. Bumping a counter while leaving the path alone is still how
+    "put that same disc back in" is expressed, which comparing paths
+    could never do. path="" means eject; a drive left out of `updates`
+    keeps whatever it holds.
+
+    reset=True bumps a counter of its own instead, which the same
+    watcher turns into pc_reset_hard() (86Box's own Hard Reset).
     """
+    state = _read_media_ctl(d)
+
+    def _n(key):
+        try:
+            return int(state.get(key, 0))
+        except ValueError:
+            return 0
+
+    state["seq"] = str(_n("seq") + 1)
+    for key, path in updates.items():
+        state[key] = path
+        state[key + "seq"] = str(_n(key + "seq") + 1)
+    if reset:
+        state["reset"] = str(_n("reset") + 1)
+
     ctl = _media_ctl_path(d)
-    seq = _read_media_seq(d) + 1
     tmp = ctl + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write("seq=%d\n%s=%s\n" % (seq, device, path))
+        for key in _MEDIA_CTL_KEYS:
+            if key in state:
+                f.write("%s=%s\n" % (key, state[key]))
     os.replace(tmp, ctl)
 
 
@@ -806,10 +868,37 @@ def box86_swap_media(api, inst, data):
         # own (1, fdd1), (2, fdd2) pairing already uses. Handles path=""
         # (eject) on its own too -- _fdd_compatible_path's first line.
         path = _fdd_compatible_path(d, int(device[-1]), path)
-    _write_media_ctl(d, device, path)
+    _write_media_ctl(d, {device: path})
     inst[device] = name
     api.save_instance(inst)
     return {"result": "swapped"}
+
+
+def box86_reset(api, inst):
+    """The Restart button, for a machine with no QMP to ask. Goes over
+    the same media.ctl the drives do: 86Box's own watcher turns a moved
+    reset counter into pc_reset_hard(), which raises hard_reset_pending
+    for the emulator loop to find -- the very lever 86Box's own Hard
+    Reset menu action pulls.
+
+    Stopping and starting the process would reach the same end state and
+    needs no 86Box patch at all, and is still the wrong answer: on_stop
+    cannot bring a guest down cleanly (its ACPI power button is only
+    delivered if the guest enabled PWRBTN_EN, which Windows 95 -- no
+    ACPI at all -- never does), so every Restart would be a kill, and
+    every Restart would come back up into ScanDisk. Confirmed live,
+    2026-09-08. It is also ~16s of waiting plus a full boot, against a
+    reset the machine does on its own in the time a real reset button
+    takes.
+
+    Refused while not running, the same as a swap: there is nothing
+    polling media.ctl to act on it, and a reset that quietly took effect
+    at the next start instead would be worse than a refusal.
+    """
+    if not api.is_running(inst):
+        return "not running"
+    _write_media_ctl(_box_dir(api, inst), {}, reset=True)
+    return "reset"
 
 
 def _pids_path(d):
