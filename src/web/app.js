@@ -201,6 +201,10 @@ const platformList = () =>
   ['pc98', ...new Set(Object.values(window.MiraiPlugins.platform || {}))];
 let instances = [], hostFacts = {}, tab = 0;
 let hardware = {drives: [], serial: []}, autoConnect = '', facts = {};
+// when autoConnect was last set -- detailView (below) gives up waiting
+// for i.running to actually turn true past 30s of it, rather than
+// holding a name here forever if a machine never comes up at all
+let autoConnectAt = 0;
 
 window.toast = t => {
   document.getElementById('msg').textContent = t || '';
@@ -530,6 +534,7 @@ window.act = async (name, verb) => {
   if (data && ['start', 'resume'].includes(verb) &&
       /^(started|resumed)/.test(data.result)) {
     autoConnect = name;
+    autoConnectAt = Date.now();
     if (location.hash !== '#/vm/' + name) { location.hash = '#/vm/' + name;
                                             return; }
   }
@@ -1772,9 +1777,35 @@ async function detailView(name) {
     '<div id="hw-edit" class="body" style="display:none">' +
     editForm(i) + '</div></div>' +
     '</div>';
-  if ((wasConnected || autoConnect === name) && i.running)
-    window.connectConsole(name, i.ports[1]);
-  autoConnect = '';
+  // autoConnect used to clear unconditionally, right here, the instant
+  // this ran at all -- whether or not i.running was actually true yet.
+  // A machine slow enough to start that this view's own very first
+  // draw (right after act()'s own hashchange) still found i.running
+  // false lost its one connect attempt for good: nothing here ever
+  // ran a second time on its own to retry, autoConnect having already
+  // been thrown away by the first. Confirmed live on box86 in
+  // particular, 2026-09-08: is_up alone (86Box's own pid) is not proof
+  // websockify_video can actually accept a connection yet either (see
+  // box86.py's own on_start, now waiting on both) -- but a slow enough
+  // host can still exhaust that wait and fall back to reporting
+  // "started" regardless, the exact case this still needs to cover
+  // even with that fixed.
+  //
+  // Now autoConnect survives an i.running-false draw instead, so the
+  // next one gets the same chance: updateUsage's own render() (called
+  // every 3s, below) already redraws this whole view the moment a
+  // fresh /stats poll disagrees with this page's last known running
+  // state, autoConnect still sitting there to be read when it does.
+  // Only actually attempting the connection still clears it -- an
+  // instance that plainly never comes up at all is why autoConnectAt
+  // still gives up on its own, past 30s of that.
+  if (autoConnect === name && !i.running) {
+    if (Date.now() - autoConnectAt > 30000) autoConnect = '';
+  } else {
+    if ((wasConnected || autoConnect === name) && i.running)
+      window.connectConsole(name, i.ports[1]);
+    autoConnect = '';
+  }
   updateUsage(name);
   if (i.running) drawMedia(name);
 }
