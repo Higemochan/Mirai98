@@ -404,7 +404,33 @@ def _sync_disks(api, inst, cfg_path, d):
     for n, path in ((1, fdd1), (2, fdd2)):
         path = _fdd_compatible_path(d, n, path)
         key_type, key_fn = "fdd_%02i_type" % n, "fdd_%02i_fn" % n
-        cp.set(fc, key_type, FDD_TYPE if path else "none")
+        # The drive itself and whatever media is in it are two different
+        # things on a real PC, and 86Box keeps them that way: fdd_0N_type
+        # "none" does not mean "empty", it means no such drive exists at
+        # all. Setting it that way whenever nothing was attached at boot
+        # left the drive with nothing for a live-swap's own fdd_0N_fn
+        # (written later, box86_swap_media) to insert anything into at
+        # all -- a floppy plugged in afterward was silently ignored,
+        # "DISK BOOT FAILURE" the only visible result for A:, confirmed
+        # live, 2026-09-08: a real bootable floppy, live-swapped into a
+        # box86 instance that had started with A: empty, never got read
+        # at all. Both drives are now FDD_TYPE unconditionally, real
+        # regardless of whether a disk happens to be in either one right
+        # now -- the same as a real machine's own floppy drives, whether
+        # or not there is a disk in them; fdd_0N_fn (whether this key
+        # exists at all) is what actually says whether media is loaded.
+        # (Confirmed live, 2026-09-08: 86Box does not update NVR/CMOS
+        # from fdd_0N_type at all, so this alone raises no hardware-
+        # changed prompt the way changing the machine/CPU does -- but it
+        # also means B: existing here is not yet something the guest's
+        # own BIOS can see or use: real drive presence, to a real BIOS,
+        # is a CMOS fact, and the seed's own CMOS byte for B: still says
+        # none regardless of what this section says. A:'s own CMOS byte
+        # already says present, which is why this alone was already
+        # enough to fix A:. Giving the guest a real B: too needs CMOS-
+        # level work of its own -- a separate, later concern, not this
+        # function's.)
+        cp.set(fc, key_type, FDD_TYPE)
         if path:
             cp.set(fc, key_fn, path)
         elif cp.has_option(fc, key_fn):
