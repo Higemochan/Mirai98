@@ -931,11 +931,37 @@ def on_start(api, inst):
         # host with no setxkbmap at all, or a 86Box that never got this
         # far (win_id still None), must not fail the whole start over a
         # keymap it can then simply leave at Xvfb's own default.
+        #
+        # setxkbmap's own exit code is still not proof of anything by
+        # itself, even here: this is the third time in this same file
+        # that exact command has reported success -- exit 0, no error
+        # text of its own at all -- while actually changing nothing
+        # (the .raw rejection and an old build's own live-swap, both
+        # elsewhere in this file's own history, were the first two).
+        # So this reads its own change back with -query rather than
+        # trusting its own exit code, and retries a handful of times,
+        # 0.2s apart, on the chance the very first attempt still lands
+        # in whatever this file's own window-wait loop, above, does not
+        # quite fully close out either -- logged, not fatal, if every
+        # attempt still leaves it unconfirmed: a keymap this console
+        # then simply starts at Xvfb's own default over is still a far
+        # smaller failure than not starting at all over one.
+        disp = ":%d" % display_num
         try:
-            subprocess.run(
-                ["setxkbmap", "-display", ":%d" % display_num,
-                 "-model", "jp106", "-layout", "jp"],
-                capture_output=True, timeout=5, check=False)
+            for _attempt in range(5):
+                subprocess.run(
+                    ["setxkbmap", "-display", disp,
+                     "-model", "jp106", "-layout", "jp"],
+                    capture_output=True, timeout=5, check=False)
+                q = subprocess.run(
+                    ["setxkbmap", "-display", disp, "-query"],
+                    capture_output=True, timeout=5, check=False)
+                if b"layout:" in q.stdout and b"jp" in q.stdout:
+                    break
+                time.sleep(0.2)
+            else:
+                log.write(b"[box86] setxkbmap: jp106/jp keymap did not"
+                          b" take after retries\n")
         except OSError:
             pass
 
