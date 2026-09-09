@@ -103,10 +103,17 @@ SEED_NVR_DIR = os.path.join(BOX86_ROOT, "vm", "nvr")
 # p2bls's own ROM (roms/machines/p2bls/1014ls.003) is confirmed present
 # against the exact path/filename m_at_slot1.c's own bios_load_linear
 # call names, the same way tx97's single-file ROM directory already was.
+# The Xvfb this runs on, and therefore the size 86Box's own window is
+# held at. One name because the two have to agree: the window is made the
+# whole screen so that fullscreen scaling has an integer factor to land
+# on -- the resize itself lives in the x11vnc supervisor below.
+SCREEN_W = 1024
+SCREEN_H = 768
+
 CFG_TEMPLATE = """[General]
 vid_renderer = qt_software
 start_in_fullscreen = 1
-video_fullscreen_scale = 0
+video_fullscreen_scale = 3
 
 [Machine]
 machine = p2bls
@@ -1149,25 +1156,44 @@ def _pactl(args, timeout=5):
 
 
 # start_in_fullscreen (CFG_TEMPLATE, [General]) hides 86Box's own menu
-# bar and toolbar, but on a bare Xvfb with no window manager at all
-# there is nobody to grant its _NET_WM_STATE_FULLSCREEN request either
-# -- the top-level window is left at its natural, guest-resolution-
-# sized geometry (640x472+0+0 for a 640x480 VGA mode, confirmed live
-# via xwininfo, 2026-09-07) inside the larger 1024x768 Xvfb screen
-# x11vnc used to export whole. That gap is exactly the "black bars"
-# a real-browser test found: noVNC's canvas spanned the full 1024x768,
-# so a click anywhere past the guest's own small corner of it landed
-# nowhere near what the user was looking at.
+# bar, toolbar and status bar, but on a bare Xvfb with no window
+# manager there is nobody to grant its _NET_WM_STATE_FULLSCREEN request
+# either. The window keeps whatever size it has, and 86Box scales the
+# guest into it.
 #
-# The fix is not to make 86Box's window bigger (there is still no WM
-# to ask), but to stop exporting anything past it: x11vnc's -id tracks
-# one window's own real pixels instead of the whole display, and (per
-# its own -help text) engages the same -xrandr mechanism to follow
-# that window if it resizes later -- a guest switching to a taller
-# SVGA mode mid-session keeps working, with no static clip rectangle
-# to fall out of date. With the canvas now exactly the window's own
-# client area, a click's canvas coordinates and the guest's own screen
-# coordinates are the same numbers -- confirmed live: 2026-09-07.
+# That scaling was the real picture problem, and it went unnoticed for
+# a long time because the window happened to be about the size of a
+# 640x480 guest. It is not: with the guest at 1024x768 the window was
+# still 640x472, so every frame was being squeezed through a
+# two-thirds-size resampler before x11vnc ever saw it. Measured
+# 2026-09-09 on that guest: 9,743 distinct colours in a frame whose
+# flat desktop should hold one, and 84 in a flat 4800-pixel patch --
+# a 16-colour VGA screen read as thousands, which is what sent an
+# earlier investigation looking for a colour-depth problem that was
+# never there. Sizing the window to the guest brought the same frame
+# down to 17 colours, with the flat patch a single value.
+#
+# So: hold the window at the whole Xvfb screen -- the resize sits in
+# the x11vnc supervisor loop, beside the window lookup it already
+# does, so it is reapplied if 86Box ever remakes its window -- and
+# set video_fullscreen_scale to FULLSCR_SCALE_INT, which
+# only ever scales by a whole number. Every guest mode that fits is
+# then drawn pixel for pixel and centred in black, whatever mode it
+# switches to, with no window manager and nothing tracking the guest's
+# resolution. Measured 2026-09-09 in scratch: 1024x768 canvas, no
+# chrome, 2 distinct colours in a text-mode frame, a 600-pixel band
+# across the middle holding 2, and the border exactly (0,0,0).
+#
+# The cost is those black borders when the guest is smaller than the
+# screen. The alternative -- windowed, with hide_status_bar and
+# hide_tool_bar -- fills the canvas and follows the guest's mode by
+# itself, but leaves 19 pixels of menu bar on every frame at every
+# resolution: menubar visibility is tied to the fullscreen state
+# (qt_mainwindow.cpp) and has no setting of its own.
+#
+# x11vnc still tracks the window with -id rather than exporting the
+# whole display, so the canvas is exactly the window and nothing
+# outside it leaks in.
 _WIN_RE = re.compile(
     r'^\s*(0x[0-9a-fA-F]+)\s+"[^"]*":\s*\([^)]*"86Box"\)\s+'
     r'(\d+)x(\d+)\+', re.MULTILINE)
@@ -1436,7 +1462,7 @@ def on_start(api, inst):
                        sink, log)
 
         spawn("xvfb", ["Xvfb", ":%d" % display_num,
-                       "-screen", "0", "1024x768x24"],
+                       "-screen", "0", "%dx%dx24" % (SCREEN_W, SCREEN_H)],
               stdout=log, stderr=log)
         for _ in range(30):
             if os.path.exists("/tmp/.X11-unix/X%d" % display_num):
@@ -1585,16 +1611,25 @@ def on_start(api, inst):
         # "x11vnc -id 0x..." carries none of them -- its display lives
         # in the environment, not the command line. Without this marker
         # the supervisor would be the one helper that survives a stop.
+        # The resize retries rather than firing once: the window exists
+        # before 86Box has finished settling it, and a resize sent that
+        # early is undone a moment later by 86Box's own geometry.
+        # Confirmed 2026-09-09 -- the same command that had no effect at
+        # startup held at 1024x768 when sent once the machine was up.
         findwin = _write_findwin(d)
         spawn("x11vnc",
               ["bash", "-c",
                "VNCLOOP=%s; while true; do "
                "W=$(python3 %s ':%d' 2>/dev/null); "
                "if [ -n \"$W\" ]; then "
+               "( for i in 1 2 3 4 5; do sleep 2; "
+               "DISPLAY=':%d' xdotool windowsize \"$W\" %d %d "
+               "2>/dev/null; done ) & "
                "x11vnc -display ':%d' -id \"$W\" -forever -shared "
                "-rfbport %d -nopw -q; "
                "fi; sleep 1; done"
                % ("%s.vncloop" % sink, findwin, display_num,
+                  display_num, SCREEN_W, SCREEN_H,
                   display_num, vnc)],
               stdout=log, stderr=log)
         spawn("websockify_video",
