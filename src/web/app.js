@@ -2192,7 +2192,7 @@ function storageCard(kind, files) {
     '\')">Group by name...</button>' +
     (platformList().length > 1
      ? '<button type="button" onclick="reclassifyChecked(\'' + kind +
-       '\')">Reclassify checked...</button>' : '') + '</div>';
+       '\')">Move to another shelf...</button>' : '') + '</div>';
   let create = '';
   // a machine plugin may add image formats of its own (label, note), only
   // ever on the shelf its own platform actually uses
@@ -2911,11 +2911,17 @@ window.reclassifyChecked = async kind => {
     .map(i => i.value);
   if (!names.length) { toast('nothing is checked'); return; }
   const targets = platformList().filter(p => p !== storagePlatform);
-  const to = prompt('move ' + names.length + ' image(s) from the ' +
-    platformLabel(storagePlatform) + ' shelf to which platform?\n\n' +
-    targets.map(p => p + ' = ' + platformLabel(p)).join('\n'));
-  if (to === null) return;
-  if (!targets.includes(to)) { toast('no such platform: ' + to); return; }
+  if (!targets.length) { toast('there is nowhere else to put it'); return; }
+  // Numbered, the way every other list in here is picked: typing the
+  // platform's internal id was the old way, and it meant knowing that the
+  // DOS/V shelf answers to "dosv".
+  const menu = targets.map((p, n) => n + ': ' + platformLabel(p)).join('\n');
+  const pick = prompt('Move ' + names.length + ' image(s) off the ' +
+    platformLabel(storagePlatform) + ' shelf.\n\n' + menu + '\n\nnumber:',
+    '0');
+  if (pick === null) return;
+  const to = targets[parseInt(pick, 10)];
+  if (!to) { toast('no such shelf'); return; }
   let moved = 0, failed = [];
   for (const name of names) {
     const r = await api('/api/disks/' + kind + '/reclassify',
