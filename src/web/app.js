@@ -1029,7 +1029,8 @@ window.saveVm = (form, name) => {
 // starve it.  The main thread only hands the arriving chunks over.
 const AUDIO_RATE = 44100;
 const AUDIO_PREFILL = 0.12;        // seconds of cushion before playback starts
-const AUDIO_MAX_LAG = 0.40;        // seconds; give back anything beyond this
+const AUDIO_MAX_LAG = 0.40;        // seconds; the emergency valve, not the plan
+const AUDIO_SLACK = 0.02;          // seconds either side of the cushion to ignore
 
 // The worklet keeps its own ring: the main thread posts PCM in, the audio
 // thread takes it out a render quantum at a time.
@@ -1045,6 +1046,7 @@ class Pc98Sink extends AudioWorkletProcessor {
     this.rd = 0;
     this.prefill = Math.round(sampleRate * opt.prefill);
     this.maxLag = Math.round(sampleRate * opt.maxLag);
+    this.slack = Math.round(sampleRate * (opt.slack || 0.02));
     this.primed = false;
     this.starved = 0;
     this.dry = 0;
@@ -1062,10 +1064,11 @@ class Pc98Sink extends AudioWorkletProcessor {
       this.w = (this.w + 1) % this.size;
       if (this.w === this.rd) { this.rd = (this.rd + 1) % this.size; }
     }
-    // Server and sound card never tick at exactly the same rate, so the
-    // backlog creeps.  Come back to the cushion -- stopping at maxLag
-    // would make the worst case the resting state, and one stall would
-    // leave the sound a full 0.4 s behind for good.
+    // The emergency valve. Steady drift is handled a frame at a time in
+    // process(); this is for the case that outruns it -- a long stall
+    // that dumps a backlog in at once. Coming back to the cushion rather
+    // than stopping at maxLag matters even here: stopping at the cap
+    // would make the worst case the resting state.
     if (this.avail() > this.maxLag) {
       this.rd = (this.rd + this.avail() - this.prefill) % this.size;
     }
@@ -1092,6 +1095,33 @@ class Pc98Sink extends AudioWorkletProcessor {
         this.rd = (this.rd + 1) % this.size;
         this.dry = 0;
       }
+    }
+    // Server and sound card never tick at exactly the same rate, so the
+    // backlog wanders. Measured 2026-09-09 over three minutes: the ring
+    // grew from 0.105s to 0.161s, about 0.03% fast. Left alone that is
+    // not a small error -- the delay climbs until it hits maxLag and the
+    // whole excess is thrown away at once, so what the listener gets is
+    // sound falling further and further behind the picture and then
+    // lurching forward. "Occasionally it seems to rewind" is exactly
+    // what a cushion that grows to 0.4s and snaps back to 0.12s sounds
+    // like, and a bigger cushion makes it worse rather than better.
+    //
+    // So correct continuously instead: one frame per render quantum,
+    // whenever the backlog is outside a band around the cushion. That is
+    // 0.34% of authority against 0.03% of drift, plenty to hold station,
+    // while a single frame at 44.1kHz is 23 microseconds -- inaudible,
+    // where dropping 0.28s in one go certainly is not. The band keeps it
+    // from fidgeting when there is nothing to correct.
+    //
+    // Symmetric on purpose: if the drift runs the other way the backlog
+    // shrinks toward nothing, and repeating one frame gives it back the
+    // same way. Correcting only the direction seen on one machine would
+    // leave the opposite one starving on another.
+    const backlog = this.avail();
+    if (backlog > this.prefill + this.slack) {
+      this.rd = (this.rd + 1) % this.size;          // arriving too fast
+    } else if (backlog > 0 && backlog < this.prefill - this.slack) {
+      this.rd = (this.rd - 1 + this.size) % this.size;   // draining too fast
     }
     if (this.dry > sampleRate / 2) {
       // nothing has arrived for half a second: the stream has stopped
@@ -1140,7 +1170,8 @@ async function audioStart() {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG}
+      processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG,
+                        slack: AUDIO_SLACK}
     });
     node.port.onmessage = (e) => {
       if (e.data && e.data.starved) {
