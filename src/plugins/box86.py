@@ -970,9 +970,29 @@ def _alive(pid):
         return False
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    # A zombie answers os.kill(pid, 0) exactly like a running process
+    # does -- the pid is still there, it is only waiting to be reaped --
+    # so this has to look at the state as well, or a process that has
+    # already exited keeps its instance reading as running for as long
+    # as nobody reaps it. That is not hypothetical: restarting the
+    # pc98web service leaves every helper orphaned under a session
+    # leader that never waits on anything, and an 86Box that exits after
+    # that becomes a permanent zombie. Its instance then shows as
+    # running for good, and every start of it is refused with "already
+    # running" while nothing at all is actually running. Confirmed live,
+    # 2026-09-09.
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            # the state field is the one after the (comm) parenthesis,
+            # which is where a name with spaces or brackets in it would
+            # otherwise break a naive split
+            data = f.read()
+        state = data[data.rindex(b")") + 2:data.rindex(b")") + 3]
+        return state != b"Z"
+    except (OSError, ValueError):
+        return True     # unreadable: assume alive rather than kill twice
 
 
 def _port_open(port):
@@ -985,6 +1005,76 @@ def _port_open(port):
 
 def _sink_name(inst):
     return "box86_%d" % inst["index"]
+
+
+def _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp, sink, log):
+    """Kill anything still holding this instance's display or ports.
+
+    Reaching on_start at all means start_instance found this instance not
+    running, so anything still sitting on its display number, its ports,
+    or its own directory is left over from a previous generation and
+    cannot be anything else's -- every one of these tokens is derived
+    from this instance's own index.
+
+    They survive because every helper is spawned with its own session
+    (start_new_session=True). That is deliberate -- it is what lets
+    _kill_pids take a whole process group down -- but it also means a
+    restart of the pc98web service itself kills only the manager, and
+    leaves every helper of every running instance orphaned with nobody
+    left holding its pid. Confirmed live on the user's own machine,
+    2026-09-09, after a day of deploys: vm-1 was running on a *previous*
+    generation's Xvfb, because this generation's own Xvfb had found :21
+    already taken, failed silently, and left the guest riding the
+    leftover -- with two ffmpeg supervisor loops fighting over the audio
+    port behind it, so the sink had real audio in it while the bridge
+    delivered silence. Nothing in the manager noticed: is_up only ever
+    asks about 86Box.
+
+    Silent failure is the whole problem here, so this is loud: every
+    orphan it finds is named in the instance's own log.
+    """
+    tokens = (
+        "Xvfb :%d " % display_num,
+        "-display :%d" % display_num,
+        "-rfbport %d" % vnc,
+        # deliberately not a bare port number: websockify is already
+        # matched by the 127.0.0.1:<vnc> / :<audio_tcp> it forwards to,
+        # and " 5850 " on its own would match anything that happened to
+        # have that number between two spaces
+        "127.0.0.1:%d" % vnc,
+        "127.0.0.1:%d" % audio_tcp,
+        "%s.monitor" % sink,
+        "-P %s" % d,
+    )
+    mine = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == mine:
+            continue
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not cmd or not any(t in cmd for t in tokens):
+            continue
+        log.write(b"[box86] killing orphan from a previous run: %d %s\n"
+                  % (pid, cmd.strip()[:120].encode("utf-8", "replace")))
+        for sig in (15, 9):
+            try:
+                os.killpg(pid, sig)
+            except OSError:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    break
+            if sig == 15:
+                time.sleep(0.3)
+                if not _alive(pid):
+                    break
+    log.flush()
 
 
 def _pulse_env(base=None):
@@ -1136,6 +1226,12 @@ def on_start(api, inst):
     log_path = os.path.join(d, "box86.log")
     log = open(log_path, "ab")
     try:
+        # before anything is started: a previous generation of this same
+        # instance still holding :N or its ports would make Xvfb fail
+        # silently and everything after it attach to the leftovers
+        _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp,
+                       sink, log)
+
         spawn("xvfb", ["Xvfb", ":%d" % display_num,
                        "-screen", "0", "1024x768x24"],
               stdout=log, stderr=log)
