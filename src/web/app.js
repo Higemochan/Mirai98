@@ -1418,10 +1418,51 @@ function installImeKeyMacros(rfb) {
   };
 }
 
-function captureRelativePointer(rfb, target) {
+// One pointer capture for every console, whichever way the pointer
+// actually travels underneath.
+//
+// The capture itself -- click to take the pointer, Esc (or the middle
+// button) to give it back -- is the whole point of Pointer Lock here,
+// and it is not really about relative coordinates at all: it is about
+// the pointer not being able to leave. Without it the browser cursor
+// walks off the canvas at the edge and the console quietly loses focus,
+// so a guest cursor can never reach its own screen edges. box86 had
+// exactly that (confirmed by the person using it, 2026-09-09: "the
+// focus is lost before the pointer reaches the edge"), because it opts
+// out of the QEMU relative-pointer scheme -- and opting out of that
+// pseudo-encoding had been conflated with opting out of capture.
+//
+// So: everything captures. `absolute` only changes what gets sent.
+//   false -- QEMU's own relative scheme: a delta around 0x7FFF, which
+//            needs pseudo-encoding -257 and only QEMU speaks.
+//   true  -- a plain absolute VNC pointer, which is all x11vnc (and so
+//            86Box, reading real X11 pointer events) understands. The
+//            locked pointer's own movementX/Y are integrated here into
+//            a position instead, and clamped to the framebuffer, so the
+//            guest cursor tracks 1:1 and stops at the edges rather than
+//            the browser doing the stopping.
+function capturePointer(rfb, target, absolute) {
   const RFB = rfb.constructor;
   const CENTER = 0x7FFF;
   rfb._sendMouse = function () {};        // silence noVNC's absolute sends
+  // where the guest pointer is, in framebuffer pixels (absolute mode)
+  let px = 0, py = 0;
+  const geom = () => {
+    const c = target.querySelector('canvas');
+    const r = c ? c.getBoundingClientRect() : null;
+    return {
+      c, r,
+      w: rfb._fbWidth || (c && c.width) || 1,
+      h: rfb._fbHeight || (c && c.height) || 1,
+    };
+  };
+  // CSS pixels the pointer moved -> framebuffer pixels, because the
+  // canvas is scaled to fit (scaleViewport) and a raw movementX would
+  // otherwise drift against the guest by exactly that scale factor
+  const toFb = (g) => ({
+    x: g.r && g.r.width ? g.w / g.r.width : 1,
+    y: g.r && g.r.height ? g.h / g.r.height : 1,
+  });
   // These guests draw their own (software) cursor, so noVNC sees no server
   // cursor and hides the local one (canvas cursor:none) -- which left the
   // pointer invisible after Esc.  Ask noVNC for a dot cursor instead.
@@ -1430,8 +1471,27 @@ function captureRelativePointer(rfb, target) {
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
     if (!rfb || rfb._rfbConnectionState !== 'connected') return;
-    RFB.messages.pointerEvent(rfb._sock,
-      (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
+    if (!absolute) {
+      RFB.messages.pointerEvent(rfb._sock,
+        (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
+      return;
+    }
+    const g = geom();
+    const f = toFb(g);
+    px = Math.min(g.w - 1, Math.max(0, px + dx * f.x));
+    py = Math.min(g.h - 1, Math.max(0, py + dy * f.y));
+    RFB.messages.pointerEvent(rfb._sock, Math.round(px), Math.round(py), m);
+  };
+  // Take the position the pointer was actually at when it was clicked,
+  // so taking the capture does not teleport the guest cursor somewhere
+  // else first.
+  const seedFrom = (ev) => {
+    const g = geom();
+    if (!g.r || !g.r.width || !g.r.height) return;
+    px = Math.min(g.w - 1, Math.max(0,
+      (ev.clientX - g.r.left) * (g.w / g.r.width)));
+    py = Math.min(g.h - 1, Math.max(0,
+      (ev.clientY - g.r.top) * (g.h / g.r.height)));
   };
   // The PC-98 bus mouse and the FM TOWNS mouse both have two buttons, so
   // the middle one is free: while the pointer is captured it leaves the
@@ -1441,7 +1501,11 @@ function captureRelativePointer(rfb, target) {
   const MIDDLE = 1;
   const onDown = (ev) => {
     if (!locked) {
-      if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
+      if (target.contains(ev.target)) {
+        if (absolute) seedFrom(ev);
+        const c = canvas();
+        if (c) c.requestPointerLock();
+      }
       return;
     }
     ev.preventDefault(); ev.stopPropagation();
@@ -1539,12 +1603,14 @@ window.connectConsole = async (name, ws) => {
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
-  if (wantsRelativePointer) {
-    try {
-      consolePointerStop = captureRelativePointer(rfb, target);
-    } catch (e) {
-      console.error('pointer capture', e);
-    }
+  // Every console captures the pointer; only the transport differs. A
+  // machine that opted out of the relative scheme (box86) gets the same
+  // click-to-capture, Esc-to-release console as every other one, with
+  // its own absolute pointer underneath.
+  try {
+    consolePointerStop = capturePointer(rfb, target, !wantsRelativePointer);
+  } catch (e) {
+    console.error('pointer capture', e);
   }
   try {
     imeKeyStop = installImeKeyMacros(rfb);

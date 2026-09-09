@@ -323,10 +323,17 @@ window.registerMachinePlugin({
   platform: 'dosv',
   // 86Box has no QMP and thus no QEMU VNC server of its own to honour
   // the core's relative-pointer scheme (pseudo-encoding -257) -- see
-  // registerMachinePlugin. A plain absolute VNC pointer already lands
-  // exactly right once 86Box's own click-to-capture engages: confirmed
-  // live, 2026-09-08 (a precise hover and click on Windows 95's own
-  // Start button, captured, using nothing but noVNC's stock behaviour).
+  // registerMachinePlugin. What travels to x11vnc is a plain absolute
+  // VNC pointer, and it lands exactly right: confirmed live, 2026-09-08
+  // (a precise hover and click on Windows 95's own Start button).
+  //
+  // This says nothing about capturing the pointer, which every console
+  // now does -- app.js's capturePointer takes the same Pointer Lock for
+  // this machine and integrates the locked movementX/Y into an absolute
+  // position instead of sending deltas. Reading this flag as "no
+  // capture either" is what left a box86 console losing focus at the
+  // canvas edge, so its guest cursor could never reach the edges of its
+  // own screen (reported by the person using it, 2026-09-09).
   relativePointer: false,
   // Same reasoning as relativePointer just above, a different QEMU-only
   // extension: rfb.enableAudio (app.js) is QEMU's own VNC message type
