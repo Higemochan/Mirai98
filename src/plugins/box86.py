@@ -1044,6 +1044,7 @@ def _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp, sink, log):
         "127.0.0.1:%d" % vnc,
         "127.0.0.1:%d" % audio_tcp,
         "%s.monitor" % sink,
+        "%s.vncloop" % sink,
         "-P %s" % d,
     )
     mine = os.getpid()
@@ -1148,6 +1149,39 @@ def _pactl(args, timeout=5):
 _WIN_RE = re.compile(
     r'^\s*(0x[0-9a-fA-F]+)\s+"[^"]*":\s*\([^)]*"86Box"\)\s+'
     r'(\d+)x(\d+)\+', re.MULTILINE)
+
+
+# Written into the instance's own directory at start so the x11vnc
+# supervisor loop (below) can ask the same question _find_box_window
+# asks. The pattern is substituted in from _WIN_RE rather than
+# restated here, so the shell-side and Python-side answers cannot
+# drift apart -- an awk transcription of that regex was the obvious
+# alternative, and the obvious way to end up with two subtly
+# different ideas of which window 86Box is actually drawing in.
+_FINDWIN_SRC = """import re, subprocess, sys
+WIN_RE = re.compile(%(pattern)r, re.MULTILINE)
+try:
+    out = subprocess.run(
+        ["xwininfo", "-root", "-tree", "-display", sys.argv[1]],
+        capture_output=True, text=True, timeout=5,
+        check=False).stdout
+except OSError:
+    sys.exit(1)
+best, best_area = None, 0
+for m in WIN_RE.finditer(out):
+    w, h = int(m.group(2)), int(m.group(3))
+    if w > 50 and h > 50 and w * h > best_area:
+        best, best_area = m.group(1), w * h
+if best:
+    print(best)
+"""
+
+
+def _write_findwin(d):
+    path = os.path.join(d, "findwin.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_FINDWIN_SRC % {"pattern": _WIN_RE.pattern})
+    return path
 
 
 def _find_box_window(display_num):
@@ -1353,12 +1387,47 @@ def on_start(api, inst):
         except OSError:
             pass
 
-        x11vnc_argv = ["x11vnc", "-display", ":%d" % display_num]
-        if win_id:
-            x11vnc_argv += ["-id", win_id]
-        x11vnc_argv += ["-forever", "-shared", "-rfbport", str(vnc),
-                        "-nopw", "-q"]
-        spawn("x11vnc", x11vnc_argv, stdout=log, stderr=log)
+        # x11vnc told to track one window (-id) exits the moment that
+        # window goes away, and 86Box replaces its own top-level window
+        # on a guest video mode change. Nothing restarted it, so the
+        # console went black for good until the whole instance was
+        # restarted -- seen on the user's own machine, 2026-09-09:
+        # "subwin 0x200006 went away!" in the log, x11vnc dead in
+        # pids.json, nothing listening on its port, every other helper
+        # carrying on fine around it.
+        #
+        # So it runs under the same kind of supervisor loop ffmpeg
+        # already has, with one difference that matters: the window id
+        # is not stable across those restarts, so the loop asks for it
+        # again every time round (findwin.py, written from the same
+        # _WIN_RE the Python side uses). No window yet -- 86Box still
+        # starting, or mid mode-change -- is not an error, only a reason
+        # to wait and ask again.
+        #
+        # Falling back to the whole display when no window can be found
+        # is deliberately not done: it "works" while looking wrong (the
+        # guest's own small window adrift in a 1024x768 screen, the
+        # black bars this -id exists to avoid), and looking broken is
+        # worse than waiting another second for the real thing.
+        #
+        # VNCLOOP is inert. It is there so this loop can be found: the
+        # orphan sweep and the stop path both match helpers by tokens
+        # taken from this instance's own identity, and a bare
+        # "x11vnc -id 0x..." carries none of them -- its display lives
+        # in the environment, not the command line. Without this marker
+        # the supervisor would be the one helper that survives a stop.
+        findwin = _write_findwin(d)
+        spawn("x11vnc",
+              ["bash", "-c",
+               "VNCLOOP=%s; while true; do "
+               "W=$(python3 %s ':%d' 2>/dev/null); "
+               "if [ -n \"$W\" ]; then "
+               "x11vnc -display ':%d' -id \"$W\" -forever -shared "
+               "-rfbport %d -nopw -q; "
+               "fi; sleep 1; done"
+               % ("%s.vncloop" % sink, findwin, display_num,
+                  display_num, vnc)],
+              stdout=log, stderr=log)
         spawn("websockify_video",
               ["websockify", str(ws), "127.0.0.1:%d" % vnc],
               stdout=log, stderr=log)
