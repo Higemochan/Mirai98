@@ -186,7 +186,6 @@ const view = document.getElementById('view');
 let rfb = null, consoleWatch = null, consoleFbWatch = null;
 let consolePointerStop = null;
 let imeKeyStop = null;
-let consoleSharpStop = null;
 // one shelf of images per platform (pc98, and one more per plugin that
 // registered its own -- towns, dosv); a machine of one platform is never
 // shown, and can never resolve, an image that lives on another's
@@ -1346,31 +1345,6 @@ let wantsVncAudio = true;
 // server does not select it.
 const LOSSY_ENCODING = 7;                  // Tight
 
-// noVNC sizes the canvas with CSS, and the browser smooths what it
-// stretches. On a 640-wide screen from 1998 blown up to fill a modern
-// display that reads as a blur -- every hard pixel edge the machine drew
-// becomes a gradient. Nearest neighbour is what this should look like.
-//
-// But only when it is being enlarged. Below 1:1, throwing pixels away
-// without filtering turns small text into noise, and smoothing is the
-// better of the two evils there. So the rule follows the scale actually
-// in effect rather than being set once and forgotten: the console is
-// resizable, and a window dragged narrow crosses back over 1:1.
-function sharpenWhenEnlarged(target) {
-  const canvas = target.querySelector('canvas');
-  if (!canvas || typeof ResizeObserver === 'undefined') return null;
-  const apply = () => {
-    // width is the frame buffer; clientWidth is what CSS made of it
-    if (!canvas.width || !canvas.clientWidth) return;
-    canvas.style.imageRendering =
-      canvas.clientWidth >= canvas.width ? 'pixelated' : 'auto';
-  };
-  apply();
-  const ro = new ResizeObserver(apply);
-  ro.observe(canvas);
-  return () => { try { ro.disconnect(); } catch (e) {} };
-}
-
 function patchRFBEncodings() {
   if (!RFB || RFB.messages._miraiRelPatched) return;
   const orig = RFB.messages.clientEncodings;
@@ -1714,17 +1688,6 @@ window.connectConsole = async (name, ws) => {
   } catch (e) {
     console.error('ime key macros', e);
   }
-  // the canvas exists as soon as RFB is constructed, but it is not sized
-  // until the frame buffer arrives, so settle it again on connect
-  try {
-    consoleSharpStop = sharpenWhenEnlarged(target);
-    rfb.addEventListener('connect', () => {
-      if (consoleSharpStop) consoleSharpStop();
-      consoleSharpStop = sharpenWhenEnlarged(target);
-    });
-  } catch (e) {
-    console.error('canvas scaling', e);
-  }
   // let plugins augment the console (e.g. the FM TOWNS gamepad)
   window._pluginConsoleCleanups = [];
   (window.MiraiPlugins.console || []).forEach(fn => {
@@ -1801,10 +1764,6 @@ function releaseConsoleHold() {
   if (consolePointerStop) {
     try { consolePointerStop(); } catch (e) {}
     consolePointerStop = null;
-  }
-  if (consoleSharpStop) {
-    try { consoleSharpStop(); } catch (e) {}
-    consoleSharpStop = null;
   }
   if (imeKeyStop) {
     try { imeKeyStop(); } catch (e) {}
