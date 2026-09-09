@@ -472,7 +472,30 @@ def _fdd_compatible_path(d, slot, path):
     return link
 
 
-def _sync_machine(cfg_path):
+def _mem_kb(inst):
+    """The instance's own memory field as 86Box wants it: kilobytes.
+
+    The record says things like "64M" or "128M" -- the same string the
+    PC-98 side hands to QEMU's -m, which is why it is spelled that way
+    and not in kilobytes already. 86Box takes mem_size in KB, so this is
+    the one place that conversion happens.
+
+    Anything unparseable falls back to what the template used to hard-
+    code, because a machine that starts with the wrong amount of memory
+    is better than one that does not start at all.
+    """
+    text = str((inst or {}).get("memory") or "").strip().upper()
+    m = re.match(r"^(\d+)\s*([KMG])?$", text)
+    if not m:
+        return 65536
+    n = int(m.group(1))
+    unit = m.group(2) or "M"
+    kb = n * {"K": 1, "M": 1024, "G": 1024 * 1024}[unit]
+    # 86Box will not start on nonsense; keep it inside what the board takes
+    return max(1024, min(kb, 1024 * 1024))
+
+
+def _sync_machine(cfg_path, inst=None):
     """Move an existing instance's own [Machine] block onto whatever
     CFG_TEMPLATE's own currently says -- the same block a brand new
     instance's own cfg already gets, once, from CFG_TEMPLATE itself
@@ -508,6 +531,11 @@ def _sync_machine(cfg_path):
     template_cp.optionxform = str
     template_cp.read_string(CFG_TEMPLATE)
     wanted = dict(template_cp.items("Machine"))
+    # The template's mem_size is only a default. Everything else in
+    # [Machine] is this project's own board choice and is meant to be the
+    # same on every instance; the amount of memory is the one thing the
+    # person creating an instance actually picks.
+    wanted["mem_size"] = str(_mem_kb(inst))
 
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str
@@ -764,7 +792,7 @@ def _ensure_cfg(api, inst):
     # that seeded NVR already has its own FDD_CMOS byte right, same as
     # every other NVR here, before 86Box ever gets a chance to read it
     # against a [Machine] naming it for the first time)
-    _sync_machine(cfg_path)
+    _sync_machine(cfg_path, inst)
     _sync_sndcard(cfg_path)
     _sync_midi(api, inst, cfg_path)
     # Seed media.ctl with all three drives as this start actually left
