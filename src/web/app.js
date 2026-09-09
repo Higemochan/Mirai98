@@ -1196,6 +1196,22 @@ async function enableAudioNow() {
   const btn = document.getElementById('btn-audio');
   if (btn) { btn.textContent = '\u{1F50A} Sound on'; }
 }
+// The worklet sink, for a machine whose sound does not arrive down the
+// VNC channel. box86's does not (86Box has no QEMU VNC server to carry
+// it), so it opens a websocket of its own -- but what it receives is the
+// same thing this already knows how to play: s16le stereo at AUDIO_RATE.
+// Sharing audioChunk rather than reimplementing it in the plugin matters
+// for one specific reason: it carries a frame split across two chunks
+// (audioCarry) instead of dropping the odd bytes, and dropping them
+// crosses the channels for the rest of the connection.
+window.consoleAudioSink = {
+  rate: AUDIO_RATE,
+  start: () => audioStart(),
+  feed: (bytes) => audioChunk(bytes),
+  resume: () => audioCtx && audioCtx.resume(),
+  stop: () => stopAudio(),
+};
+
 window.toggleAudio = async () => {
   // A machine whose sound does not come down the VNC channel at all
   // (box86: its own websocket, its own <audio>) registers a controller

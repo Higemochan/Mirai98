@@ -31,89 +31,67 @@ async function prepBox86Console(name) {
   } catch (e) { box86AudioPort.delete(name); }
 }
 
-// ---- audio: a raw Opus/WebM stream over its own websocket, played back
-// with MediaSource the same way a live stream from any other source would
-// be. Nothing here is box86-specific past the port number -- an <audio>
-// element, one MediaSource, one SourceBuffer, appended to as bytes arrive.
-const BOX86_AUDIO_MIME = 'audio/webm; codecs="opus"';
+// ---- audio: raw s16le stereo over its own websocket, played through
+// app.js's own AudioWorklet ring (window.consoleAudioSink). Nothing here
+// is box86-specific past the port number, and nothing here decodes --
+// the bytes are already PCM at the worklet's own rate.
 
 function startBox86Audio(target, port, onPlayFailed) {
-  const audio = document.createElement('audio');
-  audio.autoplay = true;
-  audio.style.display = 'none';
-  target.appendChild(audio);
-  let ws = null, ms = null, stopped = false;
-  if (!window.MediaSource || !MediaSource.isTypeSupported(BOX86_AUDIO_MIME)) {
-    console.error('box86 audio: this browser cannot decode', BOX86_AUDIO_MIME);
-    return () => audio.remove();
-  }
-  const queue = [];
-  let sb = null, jumped = false;
-  // ffmpeg's own timestamps are wall-clock ones, not zero-based, so the
-  // first bytes this SourceBuffer ever gets already sit far past time 0
-  // -- an <audio> element left sitting at currentTime 0 then has nothing
-  // buffered there at all (HAVE_METADATA, and it never once advances).
-  // The live edge is wherever the buffer's own last range ends; jumping
-  // there the first time anything arrives is what every live player does
-  // with a stream that carries real timestamps instead of relative ones.
+  // Raw s16le stereo at the worklet's own rate, straight into the same
+  // AudioWorklet ring a PC-98 console plays through.
   //
-  // The very first range to show up is not that edge, though: the ffmpeg
-  // supervisor loop's own restarts (see box86.py) leave tiny fragments
-  // behind from whichever WebM init segment arrived most recently, and
-  // jumping into one of those the moment it appears (confirmed live,
-  // 2026-09-07: end - 0.1 on a [0, 0.061] range clamps to 0 and latches
-  // there for good) never advances at all. So this waits for a range
-  // actually worth playing from -- half a second of it, at least -- and
-  // lands 1.5s short of its end rather than right at it, which is
-  // however far ahead a moment of decode/append jitter can eat into
-  // before playback would otherwise catch up to nothing yet buffered.
-  const jumpToLiveEdge = () => {
-    if (jumped || !sb.buffered.length) return;
-    const last = sb.buffered.length - 1;
-    const start = sb.buffered.start(last), end = sb.buffered.end(last);
-    if (end - start < 0.5) return;
-    jumped = true;
-    audio.currentTime = Math.max(start + 0.05, end - 1.5);
-    // Not swallowed: a browser refuses to start audio that no user
-    // gesture asked for, and swallowing that rejection is why this
-    // looked like "the backend is silent" rather than "the browser said
-    // no". Whoever started us gets told, so the button can go back to
-    // showing sound as off instead of lying about it.
-    audio.play().catch(err => {
-      console.warn('box86 audio: play() refused', err);
-      if (typeof onPlayFailed === 'function') onPlayFailed(err);
-    });
-  };
-  const pump = () => {
-    if (stopped || !sb || sb.updating || !queue.length) return;
-    try { sb.appendBuffer(queue.shift()); }
-    catch (e) { console.error('box86 audio: append failed', e); }
-  };
-  ms = new MediaSource();
-  audio.src = URL.createObjectURL(ms);
-  ms.addEventListener('sourceopen', () => {
+  // This used to be Opus in WebM through MediaSource, and that was the
+  // wrong shape for what it is for. MediaSource is a buffered-playback
+  // API: it is designed to sit behind the live edge, and the encoder
+  // feeding it only emitted at WebM cluster boundaries. Measured
+  // 2026-09-09 the player alone ran 0.38-0.60s behind, with more delay
+  // upstream of it -- fine for listening to something, useless for
+  // playing a game, which is what this is actually for.
+  //
+  // Nothing here decodes: the bytes are PCM already. The worklet owns
+  // the jitter buffer (its own prefill, and a lag cap that discards
+  // rather than drifts), and app.js's own audioChunk owns the framing,
+  // including carrying a stereo frame split across two websocket
+  // messages -- dropping those odd bytes would cross the channels for
+  // the rest of the connection.
+  const sink = window.consoleAudioSink;
+  if (!sink) {
+    console.error('box86 audio: app.js exposes no worklet sink');
+    return () => {};
+  }
+  let ws = null, stopped = false;
+  const stop = () => {
     if (stopped) return;
-    try {
-      sb = ms.addSourceBuffer(BOX86_AUDIO_MIME);
-    } catch (e) {
-      console.error('box86 audio: addSourceBuffer failed', e);
-      return;
-    }
-    sb.addEventListener('updateend', () => { jumpToLiveEdge(); pump(); });
+    stopped = true;
+    if (ws) { try { ws.close(); } catch (e) {} }
+    ws = null;
+    try { sink.stop(); } catch (e) {}
+  };
+
+  sink.start().then(() => {
+    if (stopped) return;
+    // a click got us here, so the context may be resumed straight away
+    sink.resume();
     ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
     ws.binaryType = 'arraybuffer';
-    ws.onmessage = (ev) => { queue.push(new Uint8Array(ev.data)); pump(); };
-    // a dropped connection just leaves the machine silent; the console
-    // itself (the video side) says plainly enough that something is wrong
-    ws.onerror = () => console.error('box86 audio: websocket error');
-  }, { once: true });
-  return () => {
-    stopped = true;
-    try { if (ws) ws.close(); } catch (e) {}
-    try { if (ms.readyState === 'open') ms.endOfStream(); } catch (e) {}
-    try { URL.revokeObjectURL(audio.src); } catch (e) {}
-    audio.remove();
-  };
+    ws.onmessage = (e) => {
+      if (stopped) return;
+      sink.feed(new Uint8Array(e.data));
+    };
+    ws.onerror = () => {
+      console.warn('box86 audio: websocket error');
+      if (typeof onPlayFailed === 'function') onPlayFailed(new Error('websocket'));
+    };
+    ws.onclose = () => {
+      if (stopped) return;
+      if (typeof onPlayFailed === 'function') onPlayFailed(new Error('closed'));
+    };
+  }).catch(err => {
+    console.error('box86 audio: worklet would not start', err);
+    if (typeof onPlayFailed === 'function') onPlayFailed(err);
+  });
+
+  return stop;
 }
 
 // ---- hardware (read-only) --------------------------------------------

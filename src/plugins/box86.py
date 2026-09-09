@@ -641,6 +641,11 @@ MPU401_SECTION = "Roland MPU-IPC-T"    # snd_mpu401.c's own device_t.name
 
 SNDCARD = "sb16_pnp"    # snd_sb.c's own internal_name, verified
 
+# What the browser's own AudioWorklet runs at (app.js AUDIO_RATE): its
+# AudioContext is global and shared with a PC-98 console's sound, so the
+# capture is resampled here rather than a second context being made.
+AUDIO_RATE = 44100
+
 
 def _sync_sndcard(cfg_path):
     """Make sure this machine actually has a sound card, once.
@@ -1194,34 +1199,31 @@ if best:
 """
 
 
-RELAY_SRC = r'''"""Fan one WebM stream out to however many listeners there are.
+RELAY_SRC = r'''"""Fan one audio stream out to however many listeners there are.
 
 ffmpeg's own "-listen 1" served exactly one client and stopped listening
 while it did, so a second consumer could not connect at all, and a
-disconnect left ~2.1s with nothing listening (measured, 2026-09-09:
-"ffmpeg=-none-" for the whole time a client was attached, and a new
-listener only 2.1s after it left). Any probe of that port therefore shut
-the browser out for as long as it held the slot, and left a hole behind
-it -- an observer effect that made the audio look flaky on its own.
+disconnect left ~2.1s with nothing listening (measured, 2026-09-09). Any
+probe of that port therefore shut the browser out for as long as it held
+the slot -- an observer effect that made the audio look flaky on its own.
+This listens instead: never stops listening, never exits when a client
+leaves, serves as many as turn up.
 
-So ffmpeg writes to a pipe now and this listens instead: it never stops
-listening, it never exits when a client leaves, and it serves as many as
-turn up.
+Two stream shapes, because the two have different join rules:
 
-Two things make that harder than a plain relay:
+  pcm  -- raw s16le stereo. A listener may join anywhere, so long as it
+          joins on a frame boundary: four bytes in, left and right. Half
+          a frame in and the channels stay crossed for the rest of the
+          connection. There is nothing else to replay.
 
-  * A WebM stream is only decodable from its own initialisation segment
-    (everything before the first Cluster). A client joining mid-stream
-    would get Cluster data with no header to decode it against, so this
-    keeps the init segment and replays it to each new client, then
-    starts that client at the NEXT cluster boundary -- never mid-cluster,
-    which decodes no better than no header at all.
+  webm -- only decodable from its initialisation segment (everything
+          before the first Cluster), so that is kept and replayed to
+          each new client, which then starts at the NEXT cluster
+          boundary. Mid-cluster is no better than no header at all.
 
-  * A consumer that stops reading must not stall the others, and must
-    not let this grow without bound. Each client has a hard cap; one
-    that exceeds it is dropped rather than buffered, because a browser
-    that far behind is going to reconnect anyway and pretending
-    otherwise costs memory that belongs to everyone else.
+Either way a consumer that stops reading is dropped at a hard cap rather
+than buffered without bound: a client that far behind is going to
+reconnect anyway, and the memory belongs to everyone else.
 """
 import os
 import select
@@ -1229,7 +1231,9 @@ import socket
 import sys
 
 PORT = int(sys.argv[1])
+MODE = sys.argv[2] if len(sys.argv) > 2 else "webm"
 CLUSTER = b"\x1f\x43\xb6\x75"          # EBML id of a WebM Cluster
+FRAME = 4                              # s16le stereo: 2 bytes x 2 channels
 MAXQ = 2 * 1024 * 1024                 # per client, then it is dropped
 CHUNK = 65536
 
@@ -1242,9 +1246,10 @@ srv.setblocking(False)
 src = sys.stdin.buffer
 os.set_blocking(src.fileno(), False)
 
-init = b""          # everything before the first Cluster
-have_init = False
-tail = b""          # carry, so a Cluster id split across reads is still found
+init = b""          # webm: everything before the first Cluster
+have_init = MODE == "pcm"
+tail = b""          # webm: carry, so a Cluster id split across reads is found
+pos = 0             # pcm: bytes of stream seen, to find a frame boundary
 clients = {}        # sock -> [queue bytes, started bool]
 
 
@@ -1266,7 +1271,6 @@ while True:
         try:
             sock, _addr = srv.accept()
             sock.setblocking(False)
-            # nothing is sent until the next cluster boundary: see above
             clients[sock] = [b"", False]
         except OSError:
             pass
@@ -1287,32 +1291,41 @@ while True:
         if data is None:
             data = b""
         if data == b"":
-            break                      # ffmpeg went away; the loop above restarts it
+            break                      # the source went away; the loop restarts it
 
-        if not have_init:
-            init += data
-            idx = init.find(CLUSTER)
-            if idx >= 0:
-                have_init, data, init = True, init[idx:], init[:idx]
-            else:
-                data = b""
-
-        if have_init and data:
-            # where a new client may safely be started from
-            hay = tail + data
-            boundary = hay.find(CLUSTER)
-            tail = hay[-3:]
-
+        if MODE == "pcm":
             for sock, st in clients.items():
                 if st[1]:
                     st[0] += data
-                elif boundary >= 0:
-                    st[0] = init + hay[boundary:]
-                    st[1] = True
+                else:
+                    # join on a frame boundary, never mid-frame
+                    skip = (FRAME - (pos % FRAME)) % FRAME
+                    if skip < len(data):
+                        st[0] = data[skip:]
+                        st[1] = True
+            pos += len(data)
+        else:
+            if not have_init:
+                init += data
+                idx = init.find(CLUSTER)
+                if idx >= 0:
+                    have_init, data, init = True, init[idx:], init[:idx]
+                else:
+                    data = b""
+            if have_init and data:
+                hay = tail + data
+                boundary = hay.find(CLUSTER)
+                tail = hay[-3:]
+                for sock, st in clients.items():
+                    if st[1]:
+                        st[0] += data
+                    elif boundary >= 0:
+                        st[0] = init + hay[boundary:]
+                        st[1] = True
 
-            for sock, st in list(clients.items()):
-                if len(st[0]) > MAXQ:
-                    drop(sock, "too far behind")
+        for sock, st in list(clients.items()):
+            if len(st[0]) > MAXQ:
+                drop(sock, "too far behind")
 
     for sock in w:
         st = clients.get(sock)
@@ -1623,14 +1636,31 @@ def on_start(api, inst):
         # The pipe keeps the pair honest in both directions -- if the
         # relay dies ffmpeg takes a SIGPIPE, if ffmpeg dies the relay
         # reads EOF and exits -- and the loop restarts both together.
+        # Raw PCM, not Opus in WebM. The person using this needs the
+        # sound of a game they are playing, and every part of the old
+        # chain bought compression at the price of delay: the encoder
+        # only emits at cluster boundaries, and MediaSource on the far
+        # end is a buffered-playback API whose whole design assumes it
+        # may sit behind the live edge. Measured 2026-09-09, the player
+        # alone sat 0.38-0.60s back, and that was the *small* term.
+        #
+        # s16le stereo at 44.1kHz is 1.41 Mbit/s uncompressed, which on
+        # a LAN is nothing, and it lets the browser feed an AudioWorklet
+        # ring directly -- the same Pc98Sink a PC-98 console already
+        # plays through, with its own prefill measured in milliseconds
+        # rather than a cluster. 44.1k rather than the sink's own 48k
+        # because that worklet's AudioContext is one global shared with
+        # pc98 consoles: resampling once here, in PulseAudio, costs less
+        # than a second context would.
         relay = _write_relay(d)
         spawn("ffmpeg",
               ["bash", "-c",
                "AUDIORELAY=%s; while true; do "
-               "ffmpeg -nostdin -loglevel error "
-               "-f pulse -i '%s.monitor' -c:a libopus -b:a 64k "
-               "-f webm - | python3 %s %d; sleep 0.2; done"
-               % ("%s.audiorelay" % sink, sink, relay, audio_tcp)],
+               "parec --device='%s.monitor' --format=s16le "
+               "--rate=%d --channels=2 --latency-msec=20 --raw "
+               "| python3 %s %d pcm; sleep 0.2; done"
+               % ("%s.audiorelay" % sink, sink, AUDIO_RATE, relay,
+                  audio_tcp)],
               stdout=log, stderr=log, env=_pulse_env())
         spawn("websockify_audio",
               ["websockify", str(audio_ws), "127.0.0.1:%d" % audio_tcp],
