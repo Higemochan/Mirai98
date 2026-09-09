@@ -1058,6 +1058,7 @@ def _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp, sink, log):
         "127.0.0.1:%d " % vnc,
         "127.0.0.1:%d " % audio_tcp,
         "%s.monitor" % sink,
+        "%s.audiorelay" % sink,
         "%s.vncloop" % sink,
         "-P %s" % d,
     )
@@ -1191,6 +1192,145 @@ for m in WIN_RE.finditer(out):
 if best:
     print(best)
 """
+
+
+RELAY_SRC = r'''"""Fan one WebM stream out to however many listeners there are.
+
+ffmpeg's own "-listen 1" served exactly one client and stopped listening
+while it did, so a second consumer could not connect at all, and a
+disconnect left ~2.1s with nothing listening (measured, 2026-09-09:
+"ffmpeg=-none-" for the whole time a client was attached, and a new
+listener only 2.1s after it left). Any probe of that port therefore shut
+the browser out for as long as it held the slot, and left a hole behind
+it -- an observer effect that made the audio look flaky on its own.
+
+So ffmpeg writes to a pipe now and this listens instead: it never stops
+listening, it never exits when a client leaves, and it serves as many as
+turn up.
+
+Two things make that harder than a plain relay:
+
+  * A WebM stream is only decodable from its own initialisation segment
+    (everything before the first Cluster). A client joining mid-stream
+    would get Cluster data with no header to decode it against, so this
+    keeps the init segment and replays it to each new client, then
+    starts that client at the NEXT cluster boundary -- never mid-cluster,
+    which decodes no better than no header at all.
+
+  * A consumer that stops reading must not stall the others, and must
+    not let this grow without bound. Each client has a hard cap; one
+    that exceeds it is dropped rather than buffered, because a browser
+    that far behind is going to reconnect anyway and pretending
+    otherwise costs memory that belongs to everyone else.
+"""
+import os
+import select
+import socket
+import sys
+
+PORT = int(sys.argv[1])
+CLUSTER = b"\x1f\x43\xb6\x75"          # EBML id of a WebM Cluster
+MAXQ = 2 * 1024 * 1024                 # per client, then it is dropped
+CHUNK = 65536
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", PORT))
+srv.listen(8)
+srv.setblocking(False)
+
+src = sys.stdin.buffer
+os.set_blocking(src.fileno(), False)
+
+init = b""          # everything before the first Cluster
+have_init = False
+tail = b""          # carry, so a Cluster id split across reads is still found
+clients = {}        # sock -> [queue bytes, started bool]
+
+
+def drop(sock, why):
+    clients.pop(sock, None)
+    try:
+        sock.close()
+    except OSError:
+        pass
+    sys.stderr.write("relay: dropped a client (%s)\n" % why)
+    sys.stderr.flush()
+
+
+while True:
+    writers = [s for s, st in clients.items() if st[0]]
+    r, w, _ = select.select([srv, src] + list(clients), writers, [], 1.0)
+
+    if srv in r:
+        try:
+            sock, _addr = srv.accept()
+            sock.setblocking(False)
+            # nothing is sent until the next cluster boundary: see above
+            clients[sock] = [b"", False]
+        except OSError:
+            pass
+
+    for sock in list(clients):
+        if sock in r:
+            try:
+                if not sock.recv(4096):
+                    drop(sock, "closed")
+            except OSError:
+                drop(sock, "recv failed")
+
+    if src in r:
+        try:
+            data = src.read(CHUNK)
+        except OSError:
+            data = b""
+        if data is None:
+            data = b""
+        if data == b"":
+            break                      # ffmpeg went away; the loop above restarts it
+
+        if not have_init:
+            init += data
+            idx = init.find(CLUSTER)
+            if idx >= 0:
+                have_init, data, init = True, init[idx:], init[:idx]
+            else:
+                data = b""
+
+        if have_init and data:
+            # where a new client may safely be started from
+            hay = tail + data
+            boundary = hay.find(CLUSTER)
+            tail = hay[-3:]
+
+            for sock, st in clients.items():
+                if st[1]:
+                    st[0] += data
+                elif boundary >= 0:
+                    st[0] = init + hay[boundary:]
+                    st[1] = True
+
+            for sock, st in list(clients.items()):
+                if len(st[0]) > MAXQ:
+                    drop(sock, "too far behind")
+
+    for sock in w:
+        st = clients.get(sock)
+        if not st or not st[0]:
+            continue
+        try:
+            n = sock.send(st[0])
+            st[0] = st[0][n:]
+        except OSError:
+            drop(sock, "send failed")
+'''
+
+
+def _write_relay(d):
+    path = os.path.join(d, "audiorelay.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(RELAY_SRC)
+    return path
 
 
 def _write_findwin(d):
@@ -1460,12 +1600,37 @@ def on_start(api, inst):
         # spawn(), one setsid()), so stopping this instance's "ffmpeg"
         # entry by process GROUP, not just its top pid, takes the loop
         # and whichever ffmpeg it is currently running down together.
+        # ffmpeg used to be the TCP server here, with "-listen 1".
+        # That serves exactly one client and stops listening while it
+        # does: measured 2026-09-09, the listening socket is simply
+        # absent for as long as a client is attached, and a new one
+        # appears only ~2.1s after it leaves. Two consequences, both
+        # seen in practice: a second consumer cannot connect at all, and
+        # anyone who probes that port shuts the browser out for as long
+        # as they hold it and leaves a hole behind them. That observer
+        # effect is what made this look flaky on its own -- including in
+        # my own measurements of it.
+        #
+        # So ffmpeg writes to a pipe and audiorelay.py listens instead:
+        # always listening, never exiting when a client leaves, serving
+        # as many as turn up, replaying the WebM initialisation segment
+        # to each new one and starting it at a cluster boundary (a
+        # client dropped into mid-cluster data decodes no better than
+        # one given no header at all). A consumer that stops reading is
+        # dropped at a hard cap rather than buffered without bound: a
+        # browser that far behind is going to reconnect anyway.
+        #
+        # The pipe keeps the pair honest in both directions -- if the
+        # relay dies ffmpeg takes a SIGPIPE, if ffmpeg dies the relay
+        # reads EOF and exits -- and the loop restarts both together.
+        relay = _write_relay(d)
         spawn("ffmpeg",
               ["bash", "-c",
-               "while true; do ffmpeg -nostdin -loglevel error "
+               "AUDIORELAY=%s; while true; do "
+               "ffmpeg -nostdin -loglevel error "
                "-f pulse -i '%s.monitor' -c:a libopus -b:a 64k "
-               "-f webm -listen 1 tcp://127.0.0.1:%d; sleep 0.2; done"
-               % (sink, audio_tcp)],
+               "-f webm - | python3 %s %d; sleep 0.2; done"
+               % ("%s.audiorelay" % sink, sink, relay, audio_tcp)],
               stdout=log, stderr=log, env=_pulse_env())
         spawn("websockify_audio",
               ["websockify", str(audio_ws), "127.0.0.1:%d" % audio_tcp],
