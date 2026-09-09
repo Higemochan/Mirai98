@@ -1197,6 +1197,12 @@ async function enableAudioNow() {
   if (btn) { btn.textContent = '\u{1F50A} Sound on'; }
 }
 window.toggleAudio = async () => {
+  // A machine whose sound does not come down the VNC channel at all
+  // (box86: its own websocket, its own <audio>) registers a controller
+  // of its own here, and this button drives that instead. Same button,
+  // because to the person looking at it there is only one sound.
+  const plugged = window._pluginConsoleAudio;
+  if (plugged) { await plugged.toggle(); return; }
   if (!rfb || !rfb.enableAudio) { toast('no console'); return; }
   audioOn = !audioOn;
   const btn = document.getElementById('btn-audio');
@@ -1603,7 +1609,12 @@ window.connectConsole = async (name, ws) => {
   // since the loop above, run unconditionally, just showed it, and a
   // stale show from a previous, VNC-audio-capable console otherwise
   // outlives disconnectConsole (it touches no button styles at all).
-  if (!wantsVncAudio) document.getElementById('btn-audio').style.display = 'none';
+  // ... unless a machine plugin registered sound of its own just above
+  // (the console hooks run before this), in which case the button is
+  // exactly what that sound needs: a browser will not start audio
+  // without a real user gesture, so something has to be clicked.
+  if (!wantsVncAudio && !window._pluginConsoleAudio)
+    document.getElementById('btn-audio').style.display = 'none';
 };
 // Everything the console took hold of while it was open: the pointer, the
 // keyboard wrapper, the two observers, the sound.  A guest that powers itself

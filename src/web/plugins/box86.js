@@ -37,7 +37,7 @@ async function prepBox86Console(name) {
 // element, one MediaSource, one SourceBuffer, appended to as bytes arrive.
 const BOX86_AUDIO_MIME = 'audio/webm; codecs="opus"';
 
-function startBox86Audio(target, port) {
+function startBox86Audio(target, port, onPlayFailed) {
   const audio = document.createElement('audio');
   audio.autoplay = true;
   audio.style.display = 'none';
@@ -74,7 +74,15 @@ function startBox86Audio(target, port) {
     if (end - start < 0.5) return;
     jumped = true;
     audio.currentTime = Math.max(start + 0.05, end - 1.5);
-    audio.play().catch(() => {});
+    // Not swallowed: a browser refuses to start audio that no user
+    // gesture asked for, and swallowing that rejection is why this
+    // looked like "the backend is silent" rather than "the browser said
+    // no". Whoever started us gets told, so the button can go back to
+    // showing sound as off instead of lying about it.
+    audio.play().catch(err => {
+      console.warn('box86 audio: play() refused', err);
+      if (typeof onPlayFailed === 'function') onPlayFailed(err);
+    });
   };
   const pump = () => {
     if (stopped || !sb || sb.updating || !queue.length) return;
@@ -375,14 +383,65 @@ window.registerMachinePlugin({
                               Network: null, Options: null },
                      confirm: box86WizardConfirm } },
   consolePrep: prepBox86Console,
+  // Sound starts stopped and on a click, not on connect. Two reasons,
+  // both real: a browser will not play audio no user gesture asked for
+  // (this used to autoplay, have play() rejected, and swallow it), and
+  // sound the person did not ask for is not obviously wanted anyway.
+  // The button is app.js's own btn-audio -- see window.toggleAudio --
+  // so a box86 console has the same one control every other console
+  // has, driving a completely different pipeline underneath.
   console: (rfb, target, name) => {
     const port = box86AudioPort.get(name);
     if (port == null) return null;
-    try {
-      return startBox86Audio(target, port);
-    } catch (err) {
-      console.error('box86 console', err);
-      return null;
-    }
+    let stop = null;
+    const label = on => {
+      const btn = document.getElementById('btn-audio');
+      if (btn) btn.textContent = on ? '\u{1F50A} Sound on'
+                                    : '\u{1F507} Sound off';
+    };
+    const off = () => {
+      if (stop) { try { stop(); } catch (e) {} }
+      stop = null;
+      label(false);
+    };
+    window._pluginConsoleAudio = {
+      isOn: () => !!stop,
+      toggle: async () => {
+        if (stop) { off(); toast('sound off'); return; }
+        try {
+          stop = startBox86Audio(target, port, () => {
+            // the browser refused after all: do not leave the button
+            // claiming sound is on
+            off();
+            toast('sound blocked by the browser');
+          });
+          label(true);
+          toast('sound on');
+          // A stream that arrives as one tiny fragment and then stops
+          // never reaches a range worth playing from, so nothing ever
+          // starts and nothing ever complains -- the button just sits
+          // there saying sound is on. Seen live, 2026-09-09: a connect
+          // that landed on an ffmpeg supervisor restart left a 40ms
+          // range at [371.426, 371.466] that never grew, currentTime
+          // stuck at 0 for the whole run. If it has not actually begun
+          // to advance within a few seconds, say so and go back to off,
+          // so the person can simply press it again.
+          const el = target.querySelector('audio');
+          const t0 = el ? el.currentTime : 0;
+          setTimeout(() => {
+            if (!stop || !el) return;             // already turned off
+            if (el.currentTime > t0 + 0.25) return;   // playing, fine
+            off();
+            toast('sound did not start -- press it again');
+          }, 8000);
+        } catch (err) {
+          console.error('box86 audio', err);
+          off();
+          toast('sound failed: ' + err.message);
+        }
+      }
+    };
+    label(false);
+    return () => { off(); window._pluginConsoleAudio = null; };
   }
 });

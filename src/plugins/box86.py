@@ -120,6 +120,9 @@ mem_size = 65536
 [Input devices]
 mouse_type = ps2
 
+[Sound]
+sndcard = sb16_pnp
+
 [Video]
 gfxcard = virge_dx_pci
 voodoo = 1
@@ -636,6 +639,46 @@ def _sync_disks(api, inst, cfg_path, d):
 MPU401_SECTION = "Roland MPU-IPC-T"    # snd_mpu401.c's own device_t.name
 
 
+SNDCARD = "sb16_pnp"    # snd_sb.c's own internal_name, verified
+
+
+def _sync_sndcard(cfg_path):
+    """Make sure this machine actually has a sound card, once.
+
+    box86 has never had one: neither CFG_TEMPLATE nor anything else here
+    ever wrote [Sound] sndcard, so 86Box gave the guest no sound device
+    at all and Windows had nothing to make a sound with. (MIDI is a
+    separate path -- mpu401_standalone plus 86Box's own FluidSynth, set
+    up by _sync_midi -- which is why MIDI could in principle play while
+    PCM could not.)
+
+    Only written when the key is absent, so this seeds a card and then
+    stays out of the way: whatever 86Box itself negotiates afterwards,
+    or a card someone deliberately changes to, survives every later
+    start. Idempotent by construction, the same as _sync_machine.
+
+    sb16_pnp rather than plain sb16 so Windows enumerates it through ISA
+    PnP and installs its own driver, instead of the user having to add
+    it by hand from Add New Hardware -- a real difference in what the
+    person at the other end has to do.
+
+    NOTE: giving a running guest a sound card it did not have is a
+    hardware change, and Windows will notice and want to install a
+    driver on the next boot. That is the point, but it is not silent.
+    """
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if os.path.exists(cfg_path):
+        cp.read(cfg_path, encoding="utf-8")
+    if not cp.has_section("Sound"):
+        cp.add_section("Sound")
+    if cp.get("Sound", "sndcard", fallback=""):
+        return
+    cp.set("Sound", "sndcard", SNDCARD)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=True)
+
+
 def _sync_midi(api, inst, cfg_path):
     """Like _sync_disks: read whole, touch only what this owns, write
     whole back, every start -- whether this is on is Storage's own
@@ -710,6 +753,7 @@ def _ensure_cfg(api, inst):
     # every other NVR here, before 86Box ever gets a chance to read it
     # against a [Machine] naming it for the first time)
     _sync_machine(cfg_path)
+    _sync_sndcard(cfg_path)
     _sync_midi(api, inst, cfg_path)
     # Seed media.ctl with all three drives as this start actually left
     # them, before 86Box is up to read it. Two reasons, both real: the
@@ -943,6 +987,54 @@ def _sink_name(inst):
     return "box86_%d" % inst["index"]
 
 
+def _pulse_env(base=None):
+    """A copy of `base` (os.environ by default) that can actually reach
+    PulseAudio.
+
+    libpulse finds the daemon at $XDG_RUNTIME_DIR/pulse/native, and a
+    systemd unit is started with no XDG_RUNTIME_DIR at all -- there is no
+    login session behind it to have made one. Confirmed live, 2026-09-09:
+    from mirai98.service's own environment `pactl info` answers
+    "Connection failure: Connection refused", while the identical call
+    with XDG_RUNTIME_DIR=/run/user/0 answers normally, and the socket is
+    right there at /run/user/0/pulse/native the whole time.
+
+    Every single thing box86 does with audio went through that failure:
+    the null sink was never created (pactl could not connect), 86Box
+    itself had nowhere to play into, ffmpeg could not open the sink's
+    monitor, and the sink was never unloaded on stop either. That is why
+    a box86 machine has never made a sound -- not a missing sound card,
+    not the browser, not the codec: nothing was ever connected to
+    PulseAudio at all. It also explains the box86_N sinks left lying
+    around from instances that no longer exist: those were made by a
+    server started from a login shell, which does have the variable.
+
+    Only filled in when the caller has neither PULSE_SERVER nor
+    XDG_RUNTIME_DIR already, and only when that socket really is there,
+    so a host that puts PulseAudio somewhere else is left alone.
+    """
+    env = dict(os.environ if base is None else base)
+    if env.get("PULSE_SERVER") or env.get("XDG_RUNTIME_DIR"):
+        return env
+    runtime = "/run/user/%d" % os.getuid()
+    if os.path.exists(os.path.join(runtime, "pulse", "native")):
+        env["XDG_RUNTIME_DIR"] = runtime
+    return env
+
+
+def _pactl(args, timeout=5):
+    """One pactl call that can reach the daemon, with its result kept.
+
+    Returns the CompletedProcess. Callers that care whether it worked
+    have to look -- the sink load used to be fired with check=False and
+    its result dropped on the floor, which is how a daemon that refused
+    every connection stayed invisible for as long as it did.
+    """
+    return subprocess.run(["pactl"] + list(args), capture_output=True,
+                          timeout=timeout, check=False, env=_pulse_env(),
+                          text=True)
+
+
 # start_in_fullscreen (CFG_TEMPLATE, [General]) hides 86Box's own menu
 # bar and toolbar, but on a bare Xvfb with no window manager at all
 # there is nobody to grant its _NET_WM_STATE_FULLSCREEN request either
@@ -1052,13 +1144,31 @@ def on_start(api, inst):
                 break
             time.sleep(0.1)
 
-        subprocess.run(
-            ["pactl", "load-module", "module-null-sink",
-             "sink_name=%s" % sink,
-             "sink_properties=device.description=%s" % sink],
-            capture_output=True, timeout=5, check=False)
+        # A sink of this name left behind by an instance that no
+        # longer exists is not harmless: PulseAudio does not refuse the
+        # duplicate, it renames the new one (box86_8 -> box86_8.2), and
+        # ffmpeg's own "<sink>.monitor" then resolves to the stale,
+        # silent one instead. Instance indexes get reused as instances
+        # are deleted and created, so this is reachable in normal use,
+        # not just after a crash. Three such strays were sitting on the
+        # host when this was found (2026-09-09).
+        for stale in _find_sink_modules(sink):
+            _pactl(["unload-module", stale])
 
-        env = dict(os.environ, DISPLAY=":%d" % display_num,
+        loaded = _pactl(["load-module", "module-null-sink",
+                         "sink_name=%s" % sink,
+                         "sink_properties=device.description=%s" % sink])
+        if loaded.returncode != 0:
+            log.write(b"[box86] pactl load-module failed (rc=%d): %s\n"
+                      % (loaded.returncode,
+                         (loaded.stderr or "").strip().encode("utf-8",
+                                                              "replace")))
+            log.flush()
+
+        # _pulse_env, not os.environ: 86Box's own audio output is a
+        # PulseAudio client like any other and dies the same silent
+        # death without it.
+        env = dict(_pulse_env(), DISPLAY=":%d" % display_num,
                    QT_QPA_PLATFORM="xcb",
                    ALSOFT_DRIVERS="pulse",
                    PULSE_SINK=sink)
@@ -1175,7 +1285,7 @@ def on_start(api, inst):
                "-f pulse -i '%s.monitor' -c:a libopus -b:a 64k "
                "-f webm -listen 1 tcp://127.0.0.1:%d; sleep 0.2; done"
                % (sink, audio_tcp)],
-              stdout=log, stderr=log)
+              stdout=log, stderr=log, env=_pulse_env())
         spawn("websockify_audio",
               ["websockify", str(audio_ws), "127.0.0.1:%d" % audio_tcp],
               stdout=log, stderr=log)
@@ -1290,10 +1400,9 @@ def _stop_now(d, inst):
                 time.sleep(0.3)
     _kill_pids(pids)
     _save_pids(d, {})
-    subprocess.run(["pactl", "unload-module",
-                    _find_sink_module(_sink_name(inst))],
-                   capture_output=True, timeout=5, check=False) \
-        if _find_sink_module(_sink_name(inst)) else None
+    # all of them, not one: see _find_sink_modules
+    for mod in _find_sink_modules(_sink_name(inst)):
+        _pactl(["unload-module", mod])
     return "stopped"
 
 
@@ -1338,14 +1447,21 @@ def _kill_pids(pids):
                 pass
 
 
-def _find_sink_module(sink_name):
+def _find_sink_modules(sink_name):
+    """Every module-null-sink loaded under this name, newest last.
+
+    Plural on purpose: PulseAudio happily loads the same sink_name twice
+    and renames the sinks (box86_8, box86_8.2, box86_8.3 ...), so "the"
+    module for a name is not a thing. Returning one of them, as this
+    used to, left the rest behind for good -- three had piled up on the
+    host by the time anyone looked (2026-09-09).
+    """
     try:
-        out = subprocess.run(["pactl", "list", "short", "modules"],
-                             capture_output=True, text=True,
-                             timeout=5, check=False).stdout
+        out = _pactl(["list", "short", "modules"]).stdout or ""
     except OSError:
-        return None
+        return []
+    found = []
     for line in out.splitlines():
         if "module-null-sink" in line and ("sink_name=%s" % sink_name) in line:
-            return line.split("\t", 1)[0]
-    return None
+            found.append(line.split("\t", 1)[0])
+    return found
