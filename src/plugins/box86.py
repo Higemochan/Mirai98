@@ -1033,16 +1033,30 @@ def _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp, sink, log):
     Silent failure is the whole problem here, so this is loud: every
     orphan it finds is named in the instance's own log.
     """
+    # Every token that ENDS in a number ends in a space as well, and
+    # that is load-bearing: this matches against a command line whose
+    # arguments have been joined with spaces, so a bare "-display :2"
+    # is a substring of "-display :21" and would have this kill a
+    # perfectly healthy instance 21 while starting instance 2. The
+    # joining leaves a trailing space after the last argument too (the
+    # cmdline's own final NUL becomes one), so a number at the very end
+    # of a command line still matches.
+    #
+    # The tokens that end in text need no such guard: "box86_1.monitor"
+    # cannot be a prefix of "box86_10.monitor" ('.' vs '0'), and
+    # "-P .../vm-1/box86" cannot be a prefix of "-P .../vm-10/box86"
+    # ('/' vs '0') -- the separator does the work.
+    #
+    # A bare port number is deliberately not a token at all: websockify
+    # is already matched by the 127.0.0.1:<vnc> / :<audio_tcp> it
+    # forwards to, and " 5850 " on its own would match anything that
+    # happened to carry that number between two spaces.
     tokens = (
         "Xvfb :%d " % display_num,
-        "-display :%d" % display_num,
-        "-rfbport %d" % vnc,
-        # deliberately not a bare port number: websockify is already
-        # matched by the 127.0.0.1:<vnc> / :<audio_tcp> it forwards to,
-        # and " 5850 " on its own would match anything that happened to
-        # have that number between two spaces
-        "127.0.0.1:%d" % vnc,
-        "127.0.0.1:%d" % audio_tcp,
+        "-display :%d " % display_num,
+        "-rfbport %d " % vnc,
+        "127.0.0.1:%d " % vnc,
+        "127.0.0.1:%d " % audio_tcp,
         "%s.monitor" % sink,
         "%s.vncloop" % sink,
         "-P %s" % d,
@@ -1056,6 +1070,8 @@ def _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp, sink, log):
             continue
         try:
             with open("/proc/%d/cmdline" % pid, "rb") as f:
+                # the trailing NUL becomes a trailing space, which is
+                # what lets a number-final token match at the end
                 cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
         except OSError:
             continue
