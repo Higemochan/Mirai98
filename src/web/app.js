@@ -1648,8 +1648,11 @@ const CONSOLE_RETRY_WAITS = [500, 1000, 2000];
 let consoleGen = 0;
 window.connectConsole = async (name, ws, attempt) => {
   attempt = attempt || 0;
-  const myGen = ++consoleGen;
   disconnectConsole();
+  // after that, not before: tearing down is what makes a pending retry
+  // stale, so it moves the generation on, and this connection takes the
+  // number that follows rather than one the teardown would invalidate
+  const myGen = ++consoleGen;
   window.toggleConsolePane(true);      // a hidden box has no size to scale to
   const target = document.getElementById('console-box');
   target.innerHTML = '';
@@ -1804,6 +1807,10 @@ function releaseConsoleHold() {
   stopAudio();
 }
 window.disconnectConsole = () => {
+  // Whoever asked for this does not want a console, and a retry waiting
+  // in a timer would open one anyway: while it waits there is no rfb to
+  // find and the generation would otherwise still look current to it.
+  consoleGen++;
   releaseConsoleHold();
   if (rfb) { try { rfb.disconnect(); } catch (e) {} rfb = null; }
 };
