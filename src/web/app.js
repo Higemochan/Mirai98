@@ -1210,7 +1210,7 @@ function makeAudioFramer() {
   };
 }
 // <<< framer
-const audioFramer = makeAudioFramer();
+let audioFramer = makeAudioFramer();
 
 async function audioStart() {
   if (audioNode) return;
@@ -1411,7 +1411,7 @@ async function enableAudioNow() {
 // same thing this already knows how to play: s16le stereo at AUDIO_RATE.
 // Sharing audioChunk rather than reimplementing it in the plugin matters
 // for one specific reason: it carries a frame split across two chunks
-// (audioCarry) instead of dropping the odd bytes, and dropping them
+// (the framer's carry) instead of dropping the odd bytes, and dropping them
 // crosses the channels for the rest of the connection.
 window.consoleAudioSink = {
   rate: AUDIO_RATE,
@@ -1453,7 +1453,11 @@ window.toggleAudio = async () => {
 };
 function stopAudio() {
   audioOn = false;
-  audioCarry = null;
+  // A connection that ended in the middle of a frame leaves 1-3 bytes
+  // behind. Joining those to the first chunk of the next connection
+  // would cross its channels for as long as it lasts, so the framer
+  // starts again rather than being carried over.
+  audioFramer = makeAudioFramer();
   if (audioNode) {
     try { audioNode.port.onmessage = null; audioNode.disconnect(); } catch (e) {}
     audioNode = null;
