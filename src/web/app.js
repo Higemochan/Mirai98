@@ -1110,6 +1110,10 @@ class Pc98Sink extends AudioWorkletProcessor {
     if (!this.primed) {
       if (this.avail() < this.prefill) { return true; }
       this.primed = true;
+      // Sound has actually begun: there is a cushion of real samples and
+      // this is the quantum that starts handing them out. Something has
+      // to be able to tell "playing" from "connected but silent".
+      this.port.postMessage({playing: true});
     }
     for (let i = 0; i < oL.length; i++) {
       if (this.rd === this.w) {
@@ -1173,6 +1177,9 @@ registerProcessor('pc98-sink', Pc98Sink);
 `;
 
 let audioCtx = null, audioNode = null, audioOn = false;
+// whether the worklet has ever had enough to play, as opposed to merely
+// having been set up
+let audioPlayed = false;
 // resolves the promise audioStream waits on, while it is still waiting
 let audioAdopted = null;
 // Which call to audioStream is the current one. It claims this before it
@@ -1237,6 +1244,7 @@ async function audioStart() {
                         slack: AUDIO_SLACK}
     });
     node.port.onmessage = (e) => {
+      if (e.data && e.data.playing) { audioPlayed = true; return; }
       if (e.data && e.data.streaming) {
         if (audioAdopted) audioAdopted();
         return;
@@ -1422,6 +1430,10 @@ window.consoleAudioSink = {
   // Hand the socket over instead of reading it on this thread. Returns
   // null if that cannot be done here, and the caller keeps its own path.
   stream: (url, onFailed) => audioStream(url, onFailed),
+  // Has anything actually played? The worklet is the only thing that
+  // knows -- a socket can be open and a button can say "on" while
+  // nothing ever arrives.
+  played: () => audioPlayed,
 };
 
 window.toggleAudio = async () => {
@@ -1458,6 +1470,7 @@ function stopAudio() {
   // would cross its channels for as long as it lasts, so the framer
   // starts again rather than being carried over.
   audioFramer = makeAudioFramer();
+  audioPlayed = false;
   if (audioNode) {
     try { audioNode.port.onmessage = null; audioNode.disconnect(); } catch (e) {}
     audioNode = null;

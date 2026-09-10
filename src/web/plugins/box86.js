@@ -480,13 +480,11 @@ window.registerMachinePlugin({
           // that landed on an ffmpeg supervisor restart left a 40ms
           // range at [371.426, 371.466] that never grew, currentTime
           // stuck at 0 for the whole run. If it has not actually begun
-          // to advance within a few seconds, say so and go back to off,
-          // so the person can simply press it again.
-          const el = target.querySelector('audio');
-          const t0 = el ? el.currentTime : 0;
+          // within a few seconds, say so and go back to off, so the
+          // person can simply press it again.
           setTimeout(() => {
-            if (!stop || !el) return;             // already turned off
-            if (el.currentTime > t0 + 0.25) return;   // playing, fine
+            if (!stop) return;                        // already turned off
+            if (sink.played && sink.played()) return;  // it began, fine
             off();
             toast('sound did not start -- press it again');
           }, 8000);
