@@ -1152,13 +1152,49 @@ def sub_partner(root, name):
     return None
 
 
+def multi_set(root, name):
+    """The whole of a disc that is split across several data files, asked
+    by any one of its names, or [] for every other shape.
+
+    A sheet naming one data file is a sidecar and pairs with it by their
+    shared stem.  A sheet naming several cannot: its tracks are named
+    after the sheet but not identically ("... (Track 05).bin"), so there
+    is no stem to look them up by and the sheet has to be read.  Asked by
+    a track, that means reading the sheets in the folder to find the one
+    that claims it -- folders are small and nothing calls this while
+    drawing the list."""
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+    lower = {name_key(n): n for n in names}
+    sheets = [name] if is_sidecar(name) else [n for n in names if is_sidecar(n)]
+    for sheet in sheets:
+        refs, _, _ = sidecar_summary(os.path.join(root, sheet))
+        if len(refs) < 2:
+            continue
+        here = [lower.get(name_key(f)) for f in refs]
+        if any(h is None for h in here):
+            continue                     # incomplete: an orphan, not a set
+        if is_sidecar(name) or name in here:
+            return [sheet] + here
+    return []
+
+
 def disc_set(root, name):
     """The files an image travels with.  A CD dump is its data file and
     the .cue, .mds or .ccd beside it, which the emulator finds by the
     stem the two share -- a CloneCD set's .sub of subchannel data as
     well; anything else is the one file.  Moving or copying half of
     a set leaves a disc that reads as a single data track with its audio
-    gone, so whatever happens to the data file happens to the sheet."""
+    gone, so whatever happens to the data file happens to the sheet.
+
+    A sheet naming several data files is the same rule with more files in
+    it: the disc is the sheet and every track, and half of that is no
+    more use than half of the other kind."""
+    whole = multi_set(root, name)
+    if whole:
+        return [name] + [f for f in whole if f != name]
     if is_sidecar(name):
         return [name]
     partner = sidecar_partner(root, name)
@@ -1212,8 +1248,11 @@ def point_cue_at(path, was, now):
 
 def cdrom_pairs(root, names):
     """{data name: sidecar name} for the sheets whose data file is here,
-    and {sidecar name: [missing files]} for the orphans."""
-    pairs, orphans = {}, {}
+    {sidecar name: [missing files]} for the orphans, and {sidecar name:
+    [data names]} for the sheets that name more than one file -- those
+    are one disc made of many tracks rather than many discs, so the
+    sheet is the entry and the tracks fold into it."""
+    pairs, orphans, sets = {}, {}, {}
     lower = {name_key(n): n for n in names}
     for name in names:
         if not is_sidecar(name):
@@ -1222,8 +1261,11 @@ def cdrom_pairs(root, names):
         here = [lower.get(name_key(f)) for f in files]
         missing = [f for f, h in zip(files, here) if h is None]
         if files and not missing:
-            for h in here:
-                pairs.setdefault(h, name)
+            if len(files) > 1:
+                sets[name] = here
+            else:
+                for h in here:
+                    pairs.setdefault(h, name)
         else:
             orphans[name] = missing or ["(no FILE line)"]
     # a data file that is a link into another folder may keep its sheet
@@ -1237,7 +1279,7 @@ def cdrom_pairs(root, names):
                                   os.path.basename(real))
             if cue:
                 pairs[name] = os.path.join(os.path.dirname(real), cue)
-    return pairs, orphans
+    return pairs, orphans, sets
 
 
 # --------------------------------------------------------- CHD images
@@ -1317,13 +1359,16 @@ def disk_catalog():
             names = [n for n in names
                      if not (n.startswith(".") or n.endswith(".part")
                              or not os.path.isfile(os.path.join(root, n)))]
-            pairs, orphans = ({}, {})
+            pairs, orphans, sets = ({}, {}, {})
             if kind == "cdrom":
-                pairs, orphans = cdrom_pairs(root, names)
+                pairs, orphans, sets = cdrom_pairs(root, names)
+            tracks_of_a_set = {m for ms in sets.values() for m in ms}
             for name in names:
                 full = os.path.join(root, name)
+                if kind == "cdrom" and name in tracks_of_a_set:
+                    continue        # a track rides with the sheet that names it
                 if kind == "cdrom" and is_sidecar(name) \
-                        and name not in orphans:
+                        and name not in orphans and name not in sets:
                     continue                # a sidecar rides with its data
                 if kind == "cdrom" and name.lower().endswith(".sub") \
                         and any(os.path.splitext(d)[0]
@@ -1332,14 +1377,28 @@ def disk_catalog():
                                 for d in pairs):
                     continue        # a CloneCD .sub rides with its disc too
                 st = os.stat(full)
-                used = sorted(i["name"] for i in instances
-                              if any(disk_path(i, k) == full
-                                     for k in DISK_KEYS))
-                entry = {"name": name, "size": st.st_size, "group": group,
-                         "mtime": int(st.st_mtime), "used_by": used,
-                         "type": disk_type(kind, name, st.st_size,
-                                           pairs.get(name))}
-                if name in pairs:
+                size, mtime, mine = st.st_size, int(st.st_mtime), [full]
+                type_name, type_cue = name, pairs.get(name)
+                if name in sets:
+                    # the sheet is the disc: its own few kilobytes would be
+                    # a lie about the size, and a machine may name any of
+                    # the tracks rather than the sheet
+                    mine = [os.path.join(root, m) for m in sets[name]] + [full]
+                    stats = [os.stat(p) for p in mine]
+                    size = sum(s.st_size for s in stats)
+                    mtime = int(max(s.st_mtime for s in stats))
+                    type_name, type_cue = sets[name][0], name
+                used = sorted({i["name"] for i in instances
+                               if any(disk_path(i, k) in mine
+                                      for k in DISK_KEYS)})
+                entry = {"name": name, "size": size, "group": group,
+                         "mtime": mtime, "used_by": used,
+                         "type": disk_type(kind, type_name, size, type_cue)}
+                if name in sets:
+                    refs, tracks, audio = sidecar_summary(full)
+                    entry.update({"cue": name, "tracks": tracks,
+                                  "audio": audio, "multi": len(refs)})
+                elif name in pairs:
                     cue_path = os.path.join(root, pairs[name])
                     refs, tracks, audio = sidecar_summary(cue_path)
                     entry.update({"cue": os.path.basename(pairs[name]),
@@ -4605,11 +4664,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, {"result": "renamed", "name": name,
                                  "files": [name], "vms": []})
                 return
+            if kind == "cdrom" and multi_set(root, name):
+                self.fail(400, "%s is one disc split across several data "
+                          "files; renaming it would have to name each "
+                          "track and rewrite every FILE line in the sheet, "
+                          "which this does not do yet" % name)
+                return
             files = disc_set(root, name) if kind == "cdrom" else [name]
             left = sheet_left_behind(root, name) if kind == "cdrom" else None
             stem = os.path.splitext(to)[0]
             moves = [(name, to)] + [(f, stem + os.path.splitext(f)[1])
                                     for f in files if f != name]
+            # two files of one disc wanting the same name is not caught by
+            # asking whether each name is free: they are free until the
+            # first rename, and then one overwrites the other
+            if len({into for _, into in moves}) != len(moves):
+                self.fail(400, "that name would give two files of this "
+                          "disc the same one")
+                return
             for _, into in moves:
                 if disk_taken(kind, into):
                     self.fail(409, "%s is there already" % into)
@@ -4999,10 +5071,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(400, "the copy needs a name")
                 return
             root = os.path.dirname(source)      # the copy sits beside it
+            if kind == "cdrom" and multi_set(root, name):
+                self.fail(400, "%s is one disc split across several data "
+                          "files; copying it would have to name each track "
+                          "and rewrite every FILE line in the sheet, which "
+                          "this does not do yet" % name)
+                return
             files = disc_set(root, name) if kind == "cdrom" else [name]
             stem = os.path.splitext(target)[0]
             copies = [(name, target)] + [(f, stem + os.path.splitext(f)[1])
                                          for f in files if f != name]
+            if len({made for _, made in copies}) != len(copies):
+                self.fail(400, "that name would give two files of this "
+                          "disc the same one")
+                return
             for _, made in copies:
                 if disk_taken(kind, made):
                     self.fail(409, "%s already exists" % made)
