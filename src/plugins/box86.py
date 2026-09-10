@@ -120,9 +120,9 @@ video_fullscreen_scale = 3
 
 [Machine]
 machine = p2bls
-cpu_family = pentium2_deschutes
-cpu_multi = 4.5
-cpu_speed = 450000000
+cpu_family = pentium2_klamath
+cpu_multi = 4
+cpu_speed = 266666666
 cpu_use_dynarec = 1
 fpu_type = internal
 mem_size = 65536
