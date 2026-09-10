@@ -1030,6 +1030,10 @@ const AUDIO_RATE = 44100;
 const AUDIO_PREFILL = 0.12;        // seconds of cushion before playback starts
 const AUDIO_MAX_LAG = 0.40;        // seconds; the emergency valve, not the plan
 const AUDIO_SLACK = 0.02;          // seconds either side of the cushion to ignore
+// How long setup waits for the worklet to say it took the port. Nothing
+// is flowing yet, so waiting too long only delays the first sound, while
+// waiting too little puts a perfectly capable browser on the slow path.
+const AUDIO_ADOPT_WAIT = 500;      // ms
 
 // The worklet keeps its own ring: the main thread posts PCM in, the audio
 // thread takes it out a render quantum at a time.
@@ -1050,7 +1054,27 @@ class Pc98Sink extends AudioWorkletProcessor {
     this.starved = 0;
     this.dry = 0;
     this.told = 0;
-    this.port.onmessage = (e) => this.push(new Int16Array(e.data));
+    // Either the main thread posts PCM straight in (a machine whose
+    // sound arrives inside the VNC stream), or a worker hands over a
+    // port and posts it through that instead, never touching the main
+    // thread at all. Both land here.
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d instanceof ArrayBuffer) { this.push(new Int16Array(d)); return; }
+      if (d && d.stream === false) {
+        if (this.feed) { try { this.feed.close(); } catch (err) {} }
+        this.feed = null;
+        return;
+      }
+      if (d && d.stream && d.port) {
+        this.feed = d.port;
+        this.feed.onmessage = (m) => this.push(new Int16Array(m.data));
+        if (this.feed.start) this.feed.start();
+        // the ack the setup waits on: without it there is no way to tell
+        // a worklet that took the port from one that ignored it
+        this.port.postMessage({streaming: true});
+      }
+    };
   }
   avail() {
     return (this.w - this.rd + this.size) % this.size;
@@ -1142,11 +1166,39 @@ registerProcessor('pc98-sink', Pc98Sink);
 `;
 
 let audioCtx = null, audioNode = null, audioOn = false;
+// resolves the promise audioStream waits on, while it is still waiting
+let audioAdopted = null;
+// the one audio stream a console may have, so a reconnect cannot leave the
+// old worker and its socket running behind the new one
+let audioStreamer = null;
 // One attempt at a time: two quick clicks used to load the worklet module
 // twice on one context and leave a second node connected but never fed.
 let audioPending = null;
-// 1-3 bytes of a frame that a chunk boundary cut in half
-let audioCarry = null;
+// 1-3 bytes of a frame that a chunk boundary cut in half. The rule lives
+// in one function because the audio worker needs the identical one, and
+// it gets it from this very source through toString() rather than from a
+// copy somebody has to keep in step.
+//
+// >>> framer -- src/web/audio-framing-test.js reads between these markers
+function makeAudioFramer() {
+  let carry = null;
+  return function frame(bytes) {
+    let data = bytes;
+    if (carry && carry.length) {
+      const joined = new Uint8Array(carry.length + bytes.byteLength);
+      joined.set(carry, 0);
+      joined.set(bytes, carry.length);
+      data = joined;
+    }
+    const whole = data.byteLength & ~3;          // whole stereo frames only
+    // a boundary that cut a frame in half is carried, not dropped: losing
+    // the odd bytes would cross the channels from there on
+    carry = whole < data.byteLength ? data.slice(whole) : null;
+    return whole ? data.slice(0, whole) : null;  // slice owns its buffer
+  };
+}
+// <<< framer
+const audioFramer = makeAudioFramer();
 
 async function audioStart() {
   if (audioNode) return;
@@ -1173,6 +1225,10 @@ async function audioStart() {
                         slack: AUDIO_SLACK}
     });
     node.port.onmessage = (e) => {
+      if (e.data && e.data.streaming) {
+        if (audioAdopted) audioAdopted();
+        return;
+      }
       if (e.data && e.data.starved) {
         console.warn('console sound: filled in ' + e.data.starved +
                      ' frames of silence');
@@ -1199,23 +1255,122 @@ function audioChunk(bytes) {
   // take the console down with the sound
   try {
     if (!audioNode) return;
-    let data = bytes;
-    if (audioCarry && audioCarry.length) {
-      data = new Uint8Array(audioCarry.length + bytes.byteLength);
-      data.set(audioCarry, 0);
-      data.set(bytes, audioCarry.length);
-    }
-    const whole = data.byteLength & ~3;         // whole stereo frames only
-    // a boundary that cut a frame in half is carried, not dropped: losing
-    // the odd bytes would cross the channels from there on
-    audioCarry = whole < data.byteLength ? data.slice(whole) : null;
-    if (!whole) return;
-    const copy = data.slice(0, whole);          // own it, then hand it over
+    const copy = audioFramer(bytes);
+    if (!copy) return;
     audioNode.port.postMessage(copy.buffer, [copy.buffer]);
   } catch (err) {
     console.error('console sound', err);
   }
 }
+// The worker that owns a machine's own audio socket. It is built from the
+// framer above by toString(), so the framing in here is not a copy of the
+// framing up there -- it is the same text.
+//
+// After setup the main thread is not in the path: the worker reads the
+// socket and posts PCM straight to the worklet through a port. It only
+// falls back to going through the main thread if the worklet did not take
+// that port, and it is told which way before it opens the socket, so no
+// audio is ever in flight while that is undecided.
+const AUDIO_STREAM_WORKER_SRC = makeAudioFramer.toString() + `
+let ws = null, sink = null, direct = false;
+const frame = makeAudioFramer();
+onmessage = (e) => {
+  const d = e.data || {};
+  if (d.port) { sink = d.port; return; }
+  if (d.open) {
+    direct = !!d.direct;
+    ws = new WebSocket(d.open);
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (m) => {
+      const out = frame(new Uint8Array(m.data));
+      if (!out) return;
+      if (direct && sink) sink.postMessage(out.buffer, [out.buffer]);
+      else postMessage(out.buffer, [out.buffer]);
+    };
+    ws.onerror = () => postMessage({failed: 'websocket'});
+    ws.onclose = () => postMessage({failed: 'closed'});
+    return;
+  }
+  if (d.close) {
+    if (ws) { try { ws.close(); } catch (err) {} }
+    ws = null;
+    if (sink) { try { sink.close(); } catch (err) {} }
+    sink = null;
+  }
+};
+`;
+
+// Sound from a machine that does not send it down the VNC channel. Returns
+// {stop}, or null if this browser has no Worker at all and the caller
+// should do it the old way on the main thread.
+async function audioStream(url, onFailed) {
+  if (audioStreamer) audioStreamer.stop();
+  await audioStart();
+  if (!audioNode) return null;
+  if (typeof Worker !== 'function') return null;
+
+  const ch = new MessageChannel();
+  // resolved by the worklet's ack, in the port.onmessage above
+  const adopted = new Promise(res => { audioAdopted = () => res(true); });
+  audioNode.port.postMessage({stream: true, port: ch.port2}, [ch.port2]);
+
+  const wurl = URL.createObjectURL(
+    new Blob([AUDIO_STREAM_WORKER_SRC], {type: 'application/javascript'}));
+  let worker;
+  try {
+    worker = new Worker(wurl);
+  } catch (err) {
+    // a Content-Security-Policy without worker-src blob: lands here
+    console.warn('console sound: no worker', err);
+    audioAdopted = null;
+    URL.revokeObjectURL(wurl);
+    return null;
+  }
+  URL.revokeObjectURL(wurl);
+  worker.postMessage({port: ch.port1}, [ch.port1]);
+  worker.onmessage = (e) => {
+    // PCM only arrives here on the two-hop path; anything else is news
+    if (e.data instanceof ArrayBuffer) {
+      if (audioNode) audioNode.port.postMessage(e.data, [e.data]);
+      return;
+    }
+    if (e.data && e.data.failed && typeof onFailed === 'function') {
+      onFailed(new Error(e.data.failed));
+    }
+  };
+
+  const direct = await Promise.race([
+    adopted,
+    new Promise(res => setTimeout(() => res(false), AUDIO_ADOPT_WAIT)),
+  ]);
+  // Latched: an ack that turns up after this is ignored, so the worker is
+  // never told to change destination once it has started sending.
+  audioAdopted = null;
+  if (!direct) {
+    console.warn('console sound: worklet did not take the port; ' +
+                 'relaying through the main thread');
+  }
+  worker.postMessage({open: url, direct});
+
+  let stopped = false;
+  const handle = {
+    direct,
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      try { worker.postMessage({close: true}); } catch (err) {}
+      // let it close the socket before the thread goes away
+      setTimeout(() => { try { worker.terminate(); } catch (err) {} }, 100);
+      try {
+        if (audioNode) audioNode.port.postMessage({stream: false});
+      } catch (err) {}
+      if (audioStreamer === handle) audioStreamer = null;
+    },
+  };
+  audioStreamer = handle;
+  return handle;
+}
+
 async function enableAudioNow() {
   if (!rfb || !rfb.enableAudio) return;
   audioOn = true;
@@ -1241,6 +1396,9 @@ window.consoleAudioSink = {
   feed: (bytes) => audioChunk(bytes),
   resume: () => audioCtx && audioCtx.resume(),
   stop: () => stopAudio(),
+  // Hand the socket over instead of reading it on this thread. Returns
+  // null if that cannot be done here, and the caller keeps its own path.
+  stream: (url, onFailed) => audioStream(url, onFailed),
 };
 
 window.toggleAudio = async () => {

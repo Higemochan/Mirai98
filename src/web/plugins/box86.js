@@ -59,20 +59,42 @@ function startBox86Audio(target, port, onPlayFailed) {
     console.error('box86 audio: app.js exposes no worklet sink');
     return () => {};
   }
-  let ws = null, stopped = false;
+  let ws = null, streamer = null, stopped = false;
   const stop = () => {
     if (stopped) return;
     stopped = true;
+    if (streamer) { try { streamer.stop(); } catch (e) {} }
+    streamer = null;
     if (ws) { try { ws.close(); } catch (e) {} }
     ws = null;
     try { sink.stop(); } catch (e) {}
   };
+  const url = 'ws://' + location.hostname + ':' + port + '/';
 
-  sink.start().then(() => {
+  sink.start().then(async () => {
     if (stopped) return;
     // a click got us here, so the context may be resumed straight away
     sink.resume();
-    ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
+    // What this is for: a worker owns the socket and hands PCM to the
+    // worklet directly, so noVNC decoding a burst of framebuffer updates
+    // on the main thread cannot starve the sound. It returns null where
+    // that cannot be built (no Worker, or a policy that forbids one), and
+    // then the socket is read here exactly as it always was.
+    if (sink.stream) {
+      try {
+        streamer = await sink.stream(url, (err) => {
+          if (stopped) return;
+          if (typeof onPlayFailed === 'function') onPlayFailed(err);
+        });
+      } catch (err) {
+        console.warn('box86 audio: no worker path', err);
+        streamer = null;
+      }
+      // stopped while that was being set up
+      if (stopped) { if (streamer) { try { streamer.stop(); } catch (e) {} } return; }
+      if (streamer) return;
+    }
+    ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     ws.onmessage = (e) => {
       if (stopped) return;
