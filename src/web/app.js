@@ -2135,9 +2135,9 @@ function diskTypeCell(f) {
       'sheet in ' + esc(f.cue_where) + '</span>';
   }
   if (f.cue) {
-    if (f.multi) t += ' <span style="color:#e06c5f" title="the cue names ' +
-      f.multi + ' data files; the emulator follows a single one">' +
-      'multi-file cue</span>';
+    if (f.multi) t += ' <span style="color:#e06c5f" title="one disc across ' +
+      f.multi + ' data files, listed as the one it is; 86Box cannot play ' +
+      'this shape yet">' + 'multi-file cue</span>';
     else if (f.cue_mismatch) t += ' <span style="color:#e06c5f" title="' +
       esc(f.cue) + ' does not share the data file\'s name; the emulator ' +
       'looks for the same stem">sheet name differs</span>';
