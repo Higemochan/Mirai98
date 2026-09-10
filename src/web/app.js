@@ -1684,6 +1684,11 @@ window.connectConsole = async (name, ws, attempt) => {
   for (const fn of (window.MiraiPlugins.consolePrep || [])) {
     try { await fn(name); } catch (e) { console.error('console prep', e); }
   }
+  // Three awaits happened above. If another console was asked for during
+  // any of them it has already torn this one's setup down and done its
+  // own, so building an RFB now would leave two connections live with
+  // only the later one remembered.
+  if (consoleGen !== myGen) return;
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
