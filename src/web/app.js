@@ -1068,11 +1068,18 @@ class Pc98Sink extends AudioWorkletProcessor {
       }
       if (d && d.stream && d.port) {
         this.feed = d.port;
-        this.feed.onmessage = (m) => this.push(new Int16Array(m.data));
+        this.feed.onmessage = (m) => {
+          // An empty buffer is the probe the setup sends before it gives
+          // the port away. Answering that is the ack, and it is worth
+          // more than acking on adoption: taking a port only shows this
+          // handler ran, while answering a probe shows the port carries.
+          if (m.data.byteLength === 0) {
+            this.port.postMessage({streaming: true});
+            return;
+          }
+          this.push(new Int16Array(m.data));
+        };
         if (this.feed.start) this.feed.start();
-        // the ack the setup waits on: without it there is no way to tell
-        // a worklet that took the port from one that ignored it
-        this.port.postMessage({streaming: true});
       }
     };
   }
@@ -1168,6 +1175,11 @@ registerProcessor('pc98-sink', Pc98Sink);
 let audioCtx = null, audioNode = null, audioOn = false;
 // resolves the promise audioStream waits on, while it is still waiting
 let audioAdopted = null;
+// Which call to audioStream is the current one. It claims this before it
+// awaits anything, so two overlapping calls cannot each believe they own
+// the sink -- the same counter the console connection uses for the same
+// reason.
+let audioStreamGen = 0;
 // the one audio stream a console may have, so a reconnect cannot leave the
 // old worker and its socket running behind the new one
 let audioStreamer = null;
@@ -1304,6 +1316,7 @@ onmessage = (e) => {
 // {stop}, or null if this browser has no Worker at all and the caller
 // should do it the old way on the main thread.
 async function audioStream(url, onFailed) {
+  const myGen = ++audioStreamGen;
   if (audioStreamer) audioStreamer.stop();
   await audioStart();
   if (!audioNode) return null;
@@ -1313,6 +1326,11 @@ async function audioStream(url, onFailed) {
   // resolved by the worklet's ack, in the port.onmessage above
   const adopted = new Promise(res => { audioAdopted = () => res(true); });
   audioNode.port.postMessage({stream: true, port: ch.port2}, [ch.port2]);
+  // Prove the port rather than assume it: this empty buffer goes the
+  // whole way and comes back as the ack. A browser that hands a port to
+  // an AudioWorklet but does not carry messages over it would otherwise
+  // ack on adoption and then play nothing.
+  ch.port1.postMessage(new ArrayBuffer(0));
 
   const wurl = URL.createObjectURL(
     new Blob([AUDIO_STREAM_WORKER_SRC], {type: 'application/javascript'}));
@@ -1345,7 +1363,12 @@ async function audioStream(url, onFailed) {
   ]);
   // Latched: an ack that turns up after this is ignored, so the worker is
   // never told to change destination once it has started sending.
-  audioAdopted = null;
+  if (myGen === audioStreamGen) audioAdopted = null;
+  if (myGen !== audioStreamGen) {
+    // another stream began while this one was deciding; it owns the sink
+    try { worker.terminate(); } catch (err) {}
+    return null;
+  }
   if (!direct) {
     console.warn('console sound: worklet did not take the port; ' +
                  'relaying through the main thread');
