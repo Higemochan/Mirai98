@@ -282,6 +282,128 @@ def box86_new_hard_disk(dest, data):
         f.truncate(cyl * heads * spt * 512)
 
 
+# What 86Box itself calls these. Taken from its own source tables --
+# cpu_table.c, machine_table.c, and the vid_*.c where each card's device_t
+# lives -- rather than written from memory, and kept to what a box86
+# instance can actually be configured with: this board is Slot 1, so the
+# CPUs it can hold are the Pentium II/Celeron families and no further.
+#
+# A value missing from these is shown exactly as the cfg spells it. A name
+# this does not know is better left raw than guessed at, and the guesses
+# were tempting: reading the first .name inside a video device_t picks up
+# its nested .bios[] ROM variants and calls every S3 ViRGE "Generic", and
+# the Voodoo type in a cfg indexes vid_voodoo_common.h's enum, where 1 is
+# VOODOO_SB50 and a Voodoo2 is 2.
+BOX86_MACHINE_NAMES = {
+    "p2bls": "[i440BX] ASUS P2B-LS",
+}
+BOX86_CPU_NAMES = {
+    "pentium2_klamath":   "Pentium II (Klamath)",
+    "pentium2_deschutes": "Pentium II (Deschutes)",
+    "pentium2_od":        "Pentium II OverDrive",
+    "pentium2_xeon":      "Pentium II Xeon",
+    "celeron_covington":  "Celeron (Covington)",
+    "celeron_mendocino":  "Celeron (Mendocino)",
+    "c3_samuel":          "Cyrix III (Samuel)",
+}
+BOX86_VIDEO_NAMES = {
+    "virge_pci":            "S3 ViRGE PCI",
+    "virge_vx_pci":         "S3 ViRGE/VX PCI",
+    "virge_dx_pci":         "S3 ViRGE/DX PCI",
+    "virge385_pci":         "S3 ViRGE/GX PCI",
+    "virge357_pci":         "S3 ViRGE/GX2 PCI",
+    "virge_gx2_agp":        "S3 ViRGE/GX2 AGP",
+    "virge325_onboard_pci": "S3 ViRGE (325) On-Board PCI",
+    "virge375_onboard_pci": "S3 ViRGE/DX (375) On-Board PCI",
+}
+BOX86_VOODOO_NAMES = ["3dfx Voodoo Graphics", "3dfx Voodoo SB50",
+                      "3dfx Voodoo2", "3dfx Voodoo Banshee", "3dfx Voodoo3"]
+BOX86_VOODOO_SECTION = "3Dfx Voodoo Graphics"
+
+_HARDWARE_CACHE = {}
+
+
+def _hardware_text(cp, live):
+    """The board, the processor, the video and the memory, in words.
+
+    Every one of them is read back out of the cfg rather than stated from
+    the template, because the two part company: _sync_machine moves an
+    existing instance onto a new [Machine] whenever CFG_TEMPLATE changes,
+    and _mem_kb gives it whatever memory its own record asks for. The
+    page used to name the preset from memory and was wrong about the
+    memory for exactly that reason.
+    """
+    def raw(section, key):
+        try:
+            return cp.get(section, key).strip()
+        except (configparser.NoSectionError, configparser.NoOptionError):
+            return ""
+
+    machine = raw("Machine", "machine")
+    family = raw("Machine", "cpu_family")
+    gfxcard = raw("Video", "gfxcard")
+
+    cpu = BOX86_CPU_NAMES.get(family, family)
+    speed = raw("Machine", "cpu_speed")
+    if speed.isdigit():
+        # 266666666 Hz is a chip called 266, not 267: these round down.
+        cpu = ("%s %dMHz" % (cpu, int(speed) // 1000000)).strip()
+
+    video = BOX86_VIDEO_NAMES.get(gfxcard, gfxcard)
+    if raw("Video", "voodoo") == "1":
+        kind = raw(BOX86_VOODOO_SECTION, "type")
+        if kind.isdigit() and int(kind) < len(BOX86_VOODOO_NAMES):
+            video = "%s + %s" % (video, BOX86_VOODOO_NAMES[int(kind)])
+        else:
+            video = "%s + 3dfx Voodoo (type %s)" % (video, kind or "unset")
+
+    memory = raw("Machine", "mem_size")
+    if memory.isdigit():
+        kb = int(memory)
+        memory = "%dM" % (kb // 1024) if kb % 1024 == 0 else "%dK" % kb
+
+    return {"hardware": {
+        "machine": BOX86_MACHINE_NAMES.get(machine, machine),
+        "cpu": cpu,
+        "video": video,
+        "memory": memory,
+        # False while the cfg does not exist yet: what the next start
+        # will write, not what any run actually used.
+        "live": live,
+    }}
+
+
+def _hardware(api, inst):
+    """_hardware_text against this instance's own cfg, cached on the file
+    it read: every listing asks for this, and a cfg only changes when
+    something here rewrites it."""
+    path = os.path.join(api.inst_dir(inst), "box86", "86box.cfg")
+    try:
+        stamp = os.stat(path).st_mtime_ns
+    except OSError:
+        stamp = None
+    hit = _HARDWARE_CACHE.get(path)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if stamp is None:
+        cp.read_string(CFG_TEMPLATE)
+        # The template's own mem_size is the one value a first start will
+        # not keep: _sync_machine replaces it with whatever this record
+        # asks for. Saying 64M under "what its first start will write"
+        # would be wrong for every instance that asked for more.
+        try:
+            cp.set("Machine", "mem_size", str(_mem_kb(inst)))
+        except Exception:
+            pass
+    else:
+        cp.read(path, encoding="utf-8")
+    out = _hardware_text(cp, stamp is not None)
+    _HARDWARE_CACHE[path] = (stamp, out)
+    return out
+
+
 def register(api):
     api.add_machine("box86", platform="dosv")
     api.add_engine("box86", {
@@ -293,6 +415,7 @@ def register(api):
         "thumbnail": lambda inst, png: box86_thumbnail(api, inst, png),
     })
     api.machine_sanitize("box86", box86_sanitize)
+    api.machine_shown("box86", lambda inst: _hardware(api, inst))
     api.instance_action("box86", "swap-media",
                         lambda inst, data: box86_swap_media(api, inst, data))
     api.instance_action("box86", "menubar",

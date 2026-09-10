@@ -191,6 +191,7 @@ PLUGIN_FIELDS = {}
 # machine name -> fn(record) -> complaint | None; runs last in sanitize() and
 # may trim or refuse what makes no sense for that machine
 MACHINE_SANITIZE = {}
+MACHINE_SHOWN = {}
 # (kind, format) -> fn(dest, data): a plugin's own image builder for the
 # Storage "Create" form (kind is hdd or fdd; format the value it registered)
 # Containers a floppy on this shelf may already be named for.  A name
@@ -306,6 +307,13 @@ class PluginAPI:
     def machine_sanitize(self, name, fn):
         """A final check/trim of an instance record for this machine."""
         MACHINE_SANITIZE[name] = fn
+
+    def machine_shown(self, name, fn):
+        """Read-only fields this machine adds to a record on its way to a
+        browser: things it can work out for itself rather than things a
+        person set, so nothing here is ever saved back.
+        """
+        MACHINE_SHOWN[name] = fn
 
     def add_rom_set(self, platform, dir, files, note=""):
         """This platform's own real ROM set, shown and uploaded to in
@@ -3872,6 +3880,16 @@ class Handler(BaseHTTPRequestHandler):
         out = dict(inst)
         out["running"] = is_running(inst)
         out["ports"] = ports_of(inst)
+        extra = MACHINE_SHOWN.get(inst.get("machine"))
+        if extra:
+            # A machine that cannot describe itself is not a reason to
+            # stop describing the rest of it: the page loses those fields
+            # and says so, and the reason goes to the log.
+            try:
+                out.update(extra(inst) or {})
+            except Exception as exc:
+                self.log_message("machine_shown(%s): %s",
+                                 inst.get("machine"), exc)
         return out
 
     # ------------------------------------------------------------- GET

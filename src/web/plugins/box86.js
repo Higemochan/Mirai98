@@ -95,14 +95,18 @@ function startBox86Audio(target, port, onPlayFailed) {
 }
 
 // ---- hardware (read-only) --------------------------------------------
-// The board/CPU/video preset is still fixed for every instance -- that
-// part of the table says exactly that -- but the disks are this
-// instance's own now, box86.py syncs them into its cfg from hdd1/fdd1/
+// Every instance is still made from the same board/CPU/video preset, but
+// the table no longer says so from memory: it reads this instance's own
+// cfg, which is where an instance and the preset part company. The disks
+// are its own too, box86.py syncs them into that cfg from hdd1/fdd1/
 // fdd2/cd (the dosv shelf) the same as any PC-98 or Towns machine's.
-const BOX86_BIOS = 'p2bls (440BX), 86Box’s own BIOS';
+// No board name here any more: the Machine row below reads the real one
+// out of the instance's own cfg, and two places naming the same board is
+// one place to go stale.
+const BOX86_BIOS = '86Box’s own BIOS';
 const BOX86_SOUND = 'OpenAL/PulseAudio, carried over its own audio websocket';
 if (typeof JA === 'object') {
-  JA[BOX86_BIOS] = 'p2bls (440BX)、86Box 自前 BIOS';
+  JA[BOX86_BIOS] = '86Box 自前 BIOS';
   JA[BOX86_SOUND] = 'OpenAL/PulseAudio、専用の音声 websocket 経由';
 }
 // what box86.py's own _sync_midi wires "synth" to: 86Box's own standalone
@@ -159,13 +163,24 @@ window.box86SwapMedia = (name, device, file) => {
 
 function box86Hardware(i, h) {
   const note = (t) => ' <span class="note">' + t + '</span>' ;
+  // The board, the CPU, the video and the memory are whatever this
+  // instance's own 86box.cfg says (box86.py's own _hardware), because
+  // that is the file 86Box is started with. Naming the preset here was
+  // right until an instance's cfg said something else, which is what
+  // happens every time CFG_TEMPLATE changes under an instance that
+  // already exists, or its record asks for different memory.
+  const spec = i.hardware || {};
+  const hw = (key) => spec[key] ? h.esc(spec[key]) : '(unknown)';
+  const pending = spec.live === false
+    ? note('(not started yet: what its first start will write)') : '';
   return {
     bios: BOX86_BIOS,
     sound: BOX86_SOUND,
     rows: [
-      ['&#9881; Machine', 'p2bls (440BX, Slot 1)'],
-      ['&#9636; CPU', 'Pentium II (pentium2_klamath), 266MHz'],
-      ['&#9635; Video', 'S3 ViRGE/DX + 3Dfx Voodoo2 (passthrough)'],
+      ['&#9881; Machine', hw('machine') + pending],
+      ['&#9636; CPU', hw('cpu')],
+      ['&#9635; Video', hw('video')],
+      ['&#9737; Memory', hw('memory')],
       ['&#9834; Sound', BOX86_SOUND],
       ['&#9834; MIDI', box86MidiLabel(i.midi)],
       ['&#9707; Hard disk', i.hdd1 ? h.esc(i.hdd1)
