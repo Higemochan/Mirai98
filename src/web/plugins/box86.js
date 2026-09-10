@@ -31,81 +31,67 @@ async function prepBox86Console(name) {
   } catch (e) { box86AudioPort.delete(name); }
 }
 
-// ---- audio: a raw Opus/WebM stream over its own websocket, played back
-// with MediaSource the same way a live stream from any other source would
-// be. Nothing here is box86-specific past the port number -- an <audio>
-// element, one MediaSource, one SourceBuffer, appended to as bytes arrive.
-const BOX86_AUDIO_MIME = 'audio/webm; codecs="opus"';
+// ---- audio: raw s16le stereo over its own websocket, played through
+// app.js's own AudioWorklet ring (window.consoleAudioSink). Nothing here
+// is box86-specific past the port number, and nothing here decodes --
+// the bytes are already PCM at the worklet's own rate.
 
-function startBox86Audio(target, port) {
-  const audio = document.createElement('audio');
-  audio.autoplay = true;
-  audio.style.display = 'none';
-  target.appendChild(audio);
-  let ws = null, ms = null, stopped = false;
-  if (!window.MediaSource || !MediaSource.isTypeSupported(BOX86_AUDIO_MIME)) {
-    console.error('box86 audio: this browser cannot decode', BOX86_AUDIO_MIME);
-    return () => audio.remove();
-  }
-  const queue = [];
-  let sb = null, jumped = false;
-  // ffmpeg's own timestamps are wall-clock ones, not zero-based, so the
-  // first bytes this SourceBuffer ever gets already sit far past time 0
-  // -- an <audio> element left sitting at currentTime 0 then has nothing
-  // buffered there at all (HAVE_METADATA, and it never once advances).
-  // The live edge is wherever the buffer's own last range ends; jumping
-  // there the first time anything arrives is what every live player does
-  // with a stream that carries real timestamps instead of relative ones.
+function startBox86Audio(target, port, onPlayFailed) {
+  // Raw s16le stereo at the worklet's own rate, straight into the same
+  // AudioWorklet ring a PC-98 console plays through.
   //
-  // The very first range to show up is not that edge, though: the ffmpeg
-  // supervisor loop's own restarts (see box86.py) leave tiny fragments
-  // behind from whichever WebM init segment arrived most recently, and
-  // jumping into one of those the moment it appears (confirmed live,
-  // 2026-09-07: end - 0.1 on a [0, 0.061] range clamps to 0 and latches
-  // there for good) never advances at all. So this waits for a range
-  // actually worth playing from -- half a second of it, at least -- and
-  // lands 1.5s short of its end rather than right at it, which is
-  // however far ahead a moment of decode/append jitter can eat into
-  // before playback would otherwise catch up to nothing yet buffered.
-  const jumpToLiveEdge = () => {
-    if (jumped || !sb.buffered.length) return;
-    const last = sb.buffered.length - 1;
-    const start = sb.buffered.start(last), end = sb.buffered.end(last);
-    if (end - start < 0.5) return;
-    jumped = true;
-    audio.currentTime = Math.max(start + 0.05, end - 1.5);
-    audio.play().catch(() => {});
-  };
-  const pump = () => {
-    if (stopped || !sb || sb.updating || !queue.length) return;
-    try { sb.appendBuffer(queue.shift()); }
-    catch (e) { console.error('box86 audio: append failed', e); }
-  };
-  ms = new MediaSource();
-  audio.src = URL.createObjectURL(ms);
-  ms.addEventListener('sourceopen', () => {
+  // This used to be Opus in WebM through MediaSource, and that was the
+  // wrong shape for what it is for. MediaSource is a buffered-playback
+  // API: it is designed to sit behind the live edge, and the encoder
+  // feeding it only emitted at WebM cluster boundaries. Measured
+  // 2026-09-09 the player alone ran 0.38-0.60s behind, with more delay
+  // upstream of it -- fine for listening to something, useless for
+  // playing a game, which is what this is actually for.
+  //
+  // Nothing here decodes: the bytes are PCM already. The worklet owns
+  // the jitter buffer (its own prefill, and a lag cap that discards
+  // rather than drifts), and app.js's own audioChunk owns the framing,
+  // including carrying a stereo frame split across two websocket
+  // messages -- dropping those odd bytes would cross the channels for
+  // the rest of the connection.
+  const sink = window.consoleAudioSink;
+  if (!sink) {
+    console.error('box86 audio: app.js exposes no worklet sink');
+    return () => {};
+  }
+  let ws = null, stopped = false;
+  const stop = () => {
     if (stopped) return;
-    try {
-      sb = ms.addSourceBuffer(BOX86_AUDIO_MIME);
-    } catch (e) {
-      console.error('box86 audio: addSourceBuffer failed', e);
-      return;
-    }
-    sb.addEventListener('updateend', () => { jumpToLiveEdge(); pump(); });
+    stopped = true;
+    if (ws) { try { ws.close(); } catch (e) {} }
+    ws = null;
+    try { sink.stop(); } catch (e) {}
+  };
+
+  sink.start().then(() => {
+    if (stopped) return;
+    // a click got us here, so the context may be resumed straight away
+    sink.resume();
     ws = new WebSocket('ws://' + location.hostname + ':' + port + '/');
     ws.binaryType = 'arraybuffer';
-    ws.onmessage = (ev) => { queue.push(new Uint8Array(ev.data)); pump(); };
-    // a dropped connection just leaves the machine silent; the console
-    // itself (the video side) says plainly enough that something is wrong
-    ws.onerror = () => console.error('box86 audio: websocket error');
-  }, { once: true });
-  return () => {
-    stopped = true;
-    try { if (ws) ws.close(); } catch (e) {}
-    try { if (ms.readyState === 'open') ms.endOfStream(); } catch (e) {}
-    try { URL.revokeObjectURL(audio.src); } catch (e) {}
-    audio.remove();
-  };
+    ws.onmessage = (e) => {
+      if (stopped) return;
+      sink.feed(new Uint8Array(e.data));
+    };
+    ws.onerror = () => {
+      console.warn('box86 audio: websocket error');
+      if (typeof onPlayFailed === 'function') onPlayFailed(new Error('websocket'));
+    };
+    ws.onclose = () => {
+      if (stopped) return;
+      if (typeof onPlayFailed === 'function') onPlayFailed(new Error('closed'));
+    };
+  }).catch(err => {
+    console.error('box86 audio: worklet would not start', err);
+    if (typeof onPlayFailed === 'function') onPlayFailed(err);
+  });
+
+  return stop;
 }
 
 // ---- hardware (read-only) --------------------------------------------
@@ -315,10 +301,17 @@ window.registerMachinePlugin({
   platform: 'dosv',
   // 86Box has no QMP and thus no QEMU VNC server of its own to honour
   // the core's relative-pointer scheme (pseudo-encoding -257) -- see
-  // registerMachinePlugin. A plain absolute VNC pointer already lands
-  // exactly right once 86Box's own click-to-capture engages: confirmed
-  // live, 2026-09-08 (a precise hover and click on Windows 95's own
-  // Start button, captured, using nothing but noVNC's stock behaviour).
+  // registerMachinePlugin. What travels to x11vnc is a plain absolute
+  // VNC pointer, and it lands exactly right: confirmed live, 2026-09-08
+  // (a precise hover and click on Windows 95's own Start button).
+  //
+  // This says nothing about capturing the pointer, which every console
+  // now does -- app.js's capturePointer takes the same Pointer Lock for
+  // this machine and integrates the locked movementX/Y into an absolute
+  // position instead of sending deltas. Reading this flag as "no
+  // capture either" is what left a box86 console losing focus at the
+  // canvas edge, so its guest cursor could never reach the edges of its
+  // own screen (reported by the person using it, 2026-09-09).
   relativePointer: false,
   // Same reasoning as relativePointer just above, a different QEMU-only
   // extension: rfb.enableAudio (app.js) is QEMU's own VNC message type
@@ -375,14 +368,93 @@ window.registerMachinePlugin({
                               Network: null, Options: null },
                      confirm: box86WizardConfirm } },
   consolePrep: prepBox86Console,
+  // Sound starts stopped and on a click, not on connect. Two reasons,
+  // both real: a browser will not play audio no user gesture asked for
+  // (this used to autoplay, have play() rejected, and swallow it), and
+  // sound the person did not ask for is not obviously wanted anyway.
+  // The button is app.js's own btn-audio -- see window.toggleAudio --
+  // so a box86 console has the same one control every other console
+  // has, driving a completely different pipeline underneath.
   console: (rfb, target, name) => {
+    // The one control 86Box's own windowed menubar needs from here. It
+    // is hidden by default (box86.py's own _sync_menubar) so the console
+    // is chrome-free like PC-98/towns; this button toggles it live over
+    // SIGUSR2 (box86.py's own menubar action) for the rare time 86Box's
+    // own menus (Settings/media/reset) are wanted. Injected next to
+    // app.js's own btn-audio, removed again when the console is let go.
+    const addMenubarButton = () => {
+      const audioBtn = document.getElementById('btn-audio');
+      if (!audioBtn || !audioBtn.parentNode ||
+          document.getElementById('btn-menubar')) return;
+      const b = document.createElement('button');
+      b.id = 'btn-menubar';
+      b.type = 'button';
+      b.textContent = '☰ メニュー';
+      b.title = '86Box のメニューバーを表示/非表示';
+      b.onclick = () => {
+        api('/api/instances/' + encodeURIComponent(name) + '/x/menubar',
+            {method: 'POST', body: JSON.stringify({})})
+          .then(r => { if (r) toast(r.result || r.error || 'menu toggled'); });
+      };
+      audioBtn.parentNode.insertBefore(b, audioBtn);
+    };
+    const removeMenubarButton = () => {
+      const b = document.getElementById('btn-menubar');
+      if (b && b.parentNode) b.parentNode.removeChild(b);
+    };
+    addMenubarButton();
+
     const port = box86AudioPort.get(name);
-    if (port == null) return null;
-    try {
-      return startBox86Audio(target, port);
-    } catch (err) {
-      console.error('box86 console', err);
-      return null;
-    }
+    if (port == null) return () => { removeMenubarButton(); };
+    let stop = null;
+    const label = on => {
+      const btn = document.getElementById('btn-audio');
+      if (btn) btn.textContent = on ? '\u{1F50A} Sound on'
+                                    : '\u{1F507} Sound off';
+    };
+    const off = () => {
+      if (stop) { try { stop(); } catch (e) {} }
+      stop = null;
+      label(false);
+    };
+    window._pluginConsoleAudio = {
+      isOn: () => !!stop,
+      toggle: async () => {
+        if (stop) { off(); toast('sound off'); return; }
+        try {
+          stop = startBox86Audio(target, port, () => {
+            // the browser refused after all: do not leave the button
+            // claiming sound is on
+            off();
+            toast('sound blocked by the browser');
+          });
+          label(true);
+          toast('sound on');
+          // A stream that arrives as one tiny fragment and then stops
+          // never reaches a range worth playing from, so nothing ever
+          // starts and nothing ever complains -- the button just sits
+          // there saying sound is on. Seen live, 2026-09-09: a connect
+          // that landed on an ffmpeg supervisor restart left a 40ms
+          // range at [371.426, 371.466] that never grew, currentTime
+          // stuck at 0 for the whole run. If it has not actually begun
+          // to advance within a few seconds, say so and go back to off,
+          // so the person can simply press it again.
+          const el = target.querySelector('audio');
+          const t0 = el ? el.currentTime : 0;
+          setTimeout(() => {
+            if (!stop || !el) return;             // already turned off
+            if (el.currentTime > t0 + 0.25) return;   // playing, fine
+            off();
+            toast('sound did not start -- press it again');
+          }, 8000);
+        } catch (err) {
+          console.error('box86 audio', err);
+          off();
+          toast('sound failed: ' + err.message);
+        }
+      }
+    };
+    label(false);
+    return () => { off(); removeMenubarButton(); window._pluginConsoleAudio = null; };
   }
 });

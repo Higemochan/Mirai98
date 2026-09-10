@@ -103,10 +103,20 @@ SEED_NVR_DIR = os.path.join(BOX86_ROOT, "vm", "nvr")
 # p2bls's own ROM (roms/machines/p2bls/1014ls.003) is confirmed present
 # against the exact path/filename m_at_slot1.c's own bios_load_linear
 # call names, the same way tx97's single-file ROM directory already was.
+# The Xvfb this runs on, and therefore the size 86Box's own window is
+# held at. One name because the two have to agree: the window is made the
+# whole screen so that fullscreen scaling has an integer factor to land
+# on -- the resize itself lives in the x11vnc supervisor below.
+SCREEN_W = 1024
+SCREEN_H = 800
+
 CFG_TEMPLATE = """[General]
 vid_renderer = qt_software
-start_in_fullscreen = 1
-video_fullscreen_scale = 0
+start_in_fullscreen = 0
+hide_status_bar = 1
+hide_tool_bar = 1
+hide_menu_bar = 1
+video_fullscreen_scale = 3
 
 [Machine]
 machine = p2bls
@@ -119,6 +129,9 @@ mem_size = 65536
 
 [Input devices]
 mouse_type = ps2
+
+[Sound]
+sndcard = sb16_pnp
 
 [Video]
 gfxcard = virge_dx_pci
@@ -282,6 +295,8 @@ def register(api):
     api.machine_sanitize("box86", box86_sanitize)
     api.instance_action("box86", "swap-media",
                         lambda inst, data: box86_swap_media(api, inst, data))
+    api.instance_action("box86", "menubar",
+                        lambda inst, data: box86_menubar(api, inst, data))
     for fmt in BOX86_FLOPPIES:
         api.disk_builder("dosv", "fdd", fmt, box86_new_floppy)
     api.disk_builder("dosv", "hdd", "box86-hdd", box86_new_hard_disk)
@@ -462,7 +477,30 @@ def _fdd_compatible_path(d, slot, path):
     return link
 
 
-def _sync_machine(cfg_path):
+def _mem_kb(inst):
+    """The instance's own memory field as 86Box wants it: kilobytes.
+
+    The record says things like "64M" or "128M" -- the same string the
+    PC-98 side hands to QEMU's -m, which is why it is spelled that way
+    and not in kilobytes already. 86Box takes mem_size in KB, so this is
+    the one place that conversion happens.
+
+    Anything unparseable falls back to what the template used to hard-
+    code, because a machine that starts with the wrong amount of memory
+    is better than one that does not start at all.
+    """
+    text = str((inst or {}).get("memory") or "").strip().upper()
+    m = re.match(r"^(\d+)\s*([KMG])?$", text)
+    if not m:
+        return 65536
+    n = int(m.group(1))
+    unit = m.group(2) or "M"
+    kb = n * {"K": 1, "M": 1024, "G": 1024 * 1024}[unit]
+    # 86Box will not start on nonsense; keep it inside what the board takes
+    return max(1024, min(kb, 1024 * 1024))
+
+
+def _sync_machine(cfg_path, inst=None):
     """Move an existing instance's own [Machine] block onto whatever
     CFG_TEMPLATE's own currently says -- the same block a brand new
     instance's own cfg already gets, once, from CFG_TEMPLATE itself
@@ -498,6 +536,11 @@ def _sync_machine(cfg_path):
     template_cp.optionxform = str
     template_cp.read_string(CFG_TEMPLATE)
     wanted = dict(template_cp.items("Machine"))
+    # The template's mem_size is only a default. Everything else in
+    # [Machine] is this project's own board choice and is meant to be the
+    # same on every instance; the amount of memory is the one thing the
+    # person creating an instance actually picks.
+    wanted["mem_size"] = str(_mem_kb(inst))
 
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str
@@ -514,6 +557,55 @@ def _sync_machine(cfg_path):
         cp.set("Machine", key, value)
     with open(cfg_path, "w", encoding="utf-8") as f:
         cp.write(f, space_around_delimiters=True)
+
+
+def _sync_menubar(cfg_path):
+    """[General] hide_menu_bar = 1, re-asserted on every start.
+
+    The 86Box menubar is chrome the PC-98 and FM TOWNS consoles (QEMU, a
+    bare VNC framebuffer) do not have, so box86 hides it by default to
+    match them; the web UI's own menubar button toggles it live over
+    SIGUSR2 (box86_menubar) for the rare time 86Box's own menus are
+    wanted. 86Box deletes a key equal to its own default (0) on exit, so
+    a session that toggled the bar on would otherwise leave hide_menu_bar
+    gone from the cfg and start with it showing next time. Writing it
+    every start -- the same every-start re-sync _sync_machine does for
+    [Machine] -- keeps hidden the durable default and the toggle a
+    per-session thing.
+    """
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if os.path.exists(cfg_path):
+        cp.read(cfg_path, encoding="utf-8")
+    if not cp.has_section("General"):
+        cp.add_section("General")
+    if cp.get("General", "hide_menu_bar", fallback=None) == "1":
+        return
+    cp.set("General", "hide_menu_bar", "1")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=True)
+
+
+def box86_menubar(api, inst, data):
+    """Toggle 86Box's own menubar live, over SIGUSR2.
+
+    This fork's own patch: the signal handler only flips an atomic that a
+    GUI-thread QTimer reads and acts on (a Qt widget must not be touched
+    from a signal handler), the same shape as the SIGUSR1 ACPI patch.
+    Repeated requests coalesce in the emulator, so spamming this is safe.
+    The menubar is hidden by default (_sync_menubar); this is how the web
+    UI brings it back for 86Box's own menus (Settings/media/reset) and
+    hides it again.
+    """
+    d = _box_dir(api, inst)
+    pid = _load_pids(d).get("86box")
+    if not pid or not _alive(pid):
+        return (409, "not running")
+    try:
+        os.kill(pid, signal.SIGUSR2)
+    except OSError as e:
+        return (500, "could not signal 86Box: %s" % e)
+    return {"result": "menubar toggled"}
 
 
 def _sync_disks(api, inst, cfg_path, d):
@@ -636,6 +728,51 @@ def _sync_disks(api, inst, cfg_path, d):
 MPU401_SECTION = "Roland MPU-IPC-T"    # snd_mpu401.c's own device_t.name
 
 
+SNDCARD = "sb16_pnp"    # snd_sb.c's own internal_name, verified
+
+# What the browser's own AudioWorklet runs at (app.js AUDIO_RATE): its
+# AudioContext is global and shared with a PC-98 console's sound, so the
+# capture is resampled here rather than a second context being made.
+AUDIO_RATE = 44100
+
+
+def _sync_sndcard(cfg_path):
+    """Make sure this machine actually has a sound card, once.
+
+    box86 has never had one: neither CFG_TEMPLATE nor anything else here
+    ever wrote [Sound] sndcard, so 86Box gave the guest no sound device
+    at all and Windows had nothing to make a sound with. (MIDI is a
+    separate path -- mpu401_standalone plus 86Box's own FluidSynth, set
+    up by _sync_midi -- which is why MIDI could in principle play while
+    PCM could not.)
+
+    Only written when the key is absent, so this seeds a card and then
+    stays out of the way: whatever 86Box itself negotiates afterwards,
+    or a card someone deliberately changes to, survives every later
+    start. Idempotent by construction, the same as _sync_machine.
+
+    sb16_pnp rather than plain sb16 so Windows enumerates it through ISA
+    PnP and installs its own driver, instead of the user having to add
+    it by hand from Add New Hardware -- a real difference in what the
+    person at the other end has to do.
+
+    NOTE: giving a running guest a sound card it did not have is a
+    hardware change, and Windows will notice and want to install a
+    driver on the next boot. That is the point, but it is not silent.
+    """
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str
+    if os.path.exists(cfg_path):
+        cp.read(cfg_path, encoding="utf-8")
+    if not cp.has_section("Sound"):
+        cp.add_section("Sound")
+    if cp.get("Sound", "sndcard", fallback=""):
+        return
+    cp.set("Sound", "sndcard", SNDCARD)
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        cp.write(f, space_around_delimiters=True)
+
+
 def _sync_midi(api, inst, cfg_path):
     """Like _sync_disks: read whole, touch only what this owns, write
     whole back, every start -- whether this is on is Storage's own
@@ -709,7 +846,9 @@ def _ensure_cfg(api, inst):
     # that seeded NVR already has its own FDD_CMOS byte right, same as
     # every other NVR here, before 86Box ever gets a chance to read it
     # against a [Machine] naming it for the first time)
-    _sync_machine(cfg_path)
+    _sync_machine(cfg_path, inst)
+    _sync_menubar(cfg_path)
+    _sync_sndcard(cfg_path)
     _sync_midi(api, inst, cfg_path)
     # Seed media.ctl with all three drives as this start actually left
     # them, before 86Box is up to read it. Two reasons, both real: the
@@ -926,9 +1065,29 @@ def _alive(pid):
         return False
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    # A zombie answers os.kill(pid, 0) exactly like a running process
+    # does -- the pid is still there, it is only waiting to be reaped --
+    # so this has to look at the state as well, or a process that has
+    # already exited keeps its instance reading as running for as long
+    # as nobody reaps it. That is not hypothetical: restarting the
+    # pc98web service leaves every helper orphaned under a session
+    # leader that never waits on anything, and an 86Box that exits after
+    # that becomes a permanent zombie. Its instance then shows as
+    # running for good, and every start of it is refused with "already
+    # running" while nothing at all is actually running. Confirmed live,
+    # 2026-09-09.
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as f:
+            # the state field is the one after the (comm) parenthesis,
+            # which is where a name with spaces or brackets in it would
+            # otherwise break a naive split
+            data = f.read()
+        state = data[data.rindex(b")") + 2:data.rindex(b")") + 3]
+        return state != b"Z"
+    except (OSError, ValueError):
+        return True     # unreadable: assume alive rather than kill twice
 
 
 def _port_open(port):
@@ -943,29 +1102,362 @@ def _sink_name(inst):
     return "box86_%d" % inst["index"]
 
 
-# start_in_fullscreen (CFG_TEMPLATE, [General]) hides 86Box's own menu
-# bar and toolbar, but on a bare Xvfb with no window manager at all
-# there is nobody to grant its _NET_WM_STATE_FULLSCREEN request either
-# -- the top-level window is left at its natural, guest-resolution-
-# sized geometry (640x472+0+0 for a 640x480 VGA mode, confirmed live
-# via xwininfo, 2026-09-07) inside the larger 1024x768 Xvfb screen
-# x11vnc used to export whole. That gap is exactly the "black bars"
-# a real-browser test found: noVNC's canvas spanned the full 1024x768,
-# so a click anywhere past the guest's own small corner of it landed
-# nowhere near what the user was looking at.
+def _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp, sink, log):
+    """Kill anything still holding this instance's display or ports.
+
+    Reaching on_start at all means start_instance found this instance not
+    running, so anything still sitting on its display number, its ports,
+    or its own directory is left over from a previous generation and
+    cannot be anything else's -- every one of these tokens is derived
+    from this instance's own index.
+
+    They survive because every helper is spawned with its own session
+    (start_new_session=True). That is deliberate -- it is what lets
+    _kill_pids take a whole process group down -- but it also means a
+    restart of the pc98web service itself kills only the manager, and
+    leaves every helper of every running instance orphaned with nobody
+    left holding its pid. Confirmed live on the user's own machine,
+    2026-09-09, after a day of deploys: vm-1 was running on a *previous*
+    generation's Xvfb, because this generation's own Xvfb had found :21
+    already taken, failed silently, and left the guest riding the
+    leftover -- with two ffmpeg supervisor loops fighting over the audio
+    port behind it, so the sink had real audio in it while the bridge
+    delivered silence. Nothing in the manager noticed: is_up only ever
+    asks about 86Box.
+
+    Silent failure is the whole problem here, so this is loud: every
+    orphan it finds is named in the instance's own log.
+    """
+    # Every token that ENDS in a number ends in a space as well, and
+    # that is load-bearing: this matches against a command line whose
+    # arguments have been joined with spaces, so a bare "-display :2"
+    # is a substring of "-display :21" and would have this kill a
+    # perfectly healthy instance 21 while starting instance 2. The
+    # joining leaves a trailing space after the last argument too (the
+    # cmdline's own final NUL becomes one), so a number at the very end
+    # of a command line still matches.
+    #
+    # The tokens that end in text need no such guard: "box86_1.monitor"
+    # cannot be a prefix of "box86_10.monitor" ('.' vs '0'), and
+    # "-P .../vm-1/box86" cannot be a prefix of "-P .../vm-10/box86"
+    # ('/' vs '0') -- the separator does the work.
+    #
+    # A bare port number is deliberately not a token at all: websockify
+    # is already matched by the 127.0.0.1:<vnc> / :<audio_tcp> it
+    # forwards to, and " 5850 " on its own would match anything that
+    # happened to carry that number between two spaces.
+    tokens = (
+        "Xvfb :%d " % display_num,
+        "-display :%d " % display_num,
+        "-rfbport %d " % vnc,
+        "127.0.0.1:%d " % vnc,
+        "127.0.0.1:%d " % audio_tcp,
+        "%s.monitor" % sink,
+        "%s.audiorelay" % sink,
+        "%s.vncloop" % sink,
+        "-P %s" % d,
+    )
+    mine = os.getpid()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == mine:
+            continue
+        try:
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                # the trailing NUL becomes a trailing space, which is
+                # what lets a number-final token match at the end
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not cmd or not any(t in cmd for t in tokens):
+            continue
+        log.write(b"[box86] killing orphan from a previous run: %d %s\n"
+                  % (pid, cmd.strip()[:120].encode("utf-8", "replace")))
+        for sig in (15, 9):
+            try:
+                os.killpg(pid, sig)
+            except OSError:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    break
+            if sig == 15:
+                time.sleep(0.3)
+                if not _alive(pid):
+                    break
+    log.flush()
+
+
+def _pulse_env(base=None):
+    """A copy of `base` (os.environ by default) that can actually reach
+    PulseAudio.
+
+    libpulse finds the daemon at $XDG_RUNTIME_DIR/pulse/native, and a
+    systemd unit is started with no XDG_RUNTIME_DIR at all -- there is no
+    login session behind it to have made one. Confirmed live, 2026-09-09:
+    from mirai98.service's own environment `pactl info` answers
+    "Connection failure: Connection refused", while the identical call
+    with XDG_RUNTIME_DIR=/run/user/0 answers normally, and the socket is
+    right there at /run/user/0/pulse/native the whole time.
+
+    Every single thing box86 does with audio went through that failure:
+    the null sink was never created (pactl could not connect), 86Box
+    itself had nowhere to play into, ffmpeg could not open the sink's
+    monitor, and the sink was never unloaded on stop either. That is why
+    a box86 machine has never made a sound -- not a missing sound card,
+    not the browser, not the codec: nothing was ever connected to
+    PulseAudio at all. It also explains the box86_N sinks left lying
+    around from instances that no longer exist: those were made by a
+    server started from a login shell, which does have the variable.
+
+    Only filled in when the caller has neither PULSE_SERVER nor
+    XDG_RUNTIME_DIR already, and only when that socket really is there,
+    so a host that puts PulseAudio somewhere else is left alone.
+    """
+    env = dict(os.environ if base is None else base)
+    if env.get("PULSE_SERVER") or env.get("XDG_RUNTIME_DIR"):
+        return env
+    runtime = "/run/user/%d" % os.getuid()
+    if os.path.exists(os.path.join(runtime, "pulse", "native")):
+        env["XDG_RUNTIME_DIR"] = runtime
+    return env
+
+
+def _pactl(args, timeout=5):
+    """One pactl call that can reach the daemon, with its result kept.
+
+    Returns the CompletedProcess. Callers that care whether it worked
+    have to look -- the sink load used to be fired with check=False and
+    its result dropped on the floor, which is how a daemon that refused
+    every connection stayed invisible for as long as it did.
+    """
+    return subprocess.run(["pactl"] + list(args), capture_output=True,
+                          timeout=timeout, check=False, env=_pulse_env(),
+                          text=True)
+
+
+# The console has to behave the way the PC-98 and FM TOWNS ones do: the
+# picture is whatever the guest is drawing, at whatever size the guest
+# chose, and it changes when the guest changes mode. Those two get it for
+# free -- they are QEMU, and QEMU's own VNC server hands out the guest
+# frame buffer directly, so a mode change is simply a new frame buffer
+# size the client follows. 86Box has no VNC server, so its picture reaches
+# a browser the long way: 86Box draws into an X window on a bare Xvfb, and
+# x11vnc exports that window.
 #
-# The fix is not to make 86Box's window bigger (there is still no WM
-# to ask), but to stop exporting anything past it: x11vnc's -id tracks
-# one window's own real pixels instead of the whole display, and (per
-# its own -help text) engages the same -xrandr mechanism to follow
-# that window if it resizes later -- a guest switching to a taller
-# SVGA mode mid-session keeps working, with no static clip rectangle
-# to fall out of date. With the canvas now exactly the window's own
-# client area, a click's canvas coordinates and the guest's own screen
-# coordinates are the same numbers -- confirmed live: 2026-09-07.
+# Which means the window IS the console. Whatever size it is, that is what
+# the viewer gets, and if it does not match the guest then 86Box scales
+# the guest into it -- which is not a cosmetic difference. With the guest
+# at 1024x768 and the window at 640x472, every frame went through a
+# two-thirds resampler before x11vnc saw it: measured 2026-09-09, a frame
+# whose flat desktop should hold one colour held 84, and the whole frame
+# 9,743. That is also what sent an earlier investigation looking for a
+# colour-depth problem that was never there.
+#
+# So: run windowed. 86Box then sizes its own window to the guest's mode
+# and resizes it when the mode changes (measured: 720x419 for a 720x400
+# text mode, and it moved to 640x494 on its own when the guest changed),
+# and x11vnc follows that within a live session, no reconnect (measured:
+# a canvas went 1024x768 -> 640x480 -> 1024x768 while a client watched).
+# Nothing here has to know or track the guest's resolution.
+#
+# hide_status_bar and hide_tool_bar take away the bars underneath and the
+# icon strip. The menu bar cannot go: its visibility is tied to the
+# fullscreen state (qt_mainwindow.cpp) and has no setting of its own, so
+# 19 pixels of it sit above the guest's picture. That is the price of
+# following the guest, and it is cheaper than the alternative -- pinning
+# the window and scaling by whole numbers gets rid of the menu but fixes
+# the console at one size with black margins, which is not what the other
+# two machines do.
+#
+# x11vnc still tracks the window with -id rather than exporting the whole
+# display, so the canvas is exactly the window and nothing outside it
+# leaks in.
 _WIN_RE = re.compile(
     r'^\s*(0x[0-9a-fA-F]+)\s+"[^"]*":\s*\([^)]*"86Box"\)\s+'
     r'(\d+)x(\d+)\+', re.MULTILINE)
+
+
+# Written into the instance's own directory at start so the x11vnc
+# supervisor loop (below) can ask the same question _find_box_window
+# asks. The pattern is substituted in from _WIN_RE rather than
+# restated here, so the shell-side and Python-side answers cannot
+# drift apart -- an awk transcription of that regex was the obvious
+# alternative, and the obvious way to end up with two subtly
+# different ideas of which window 86Box is actually drawing in.
+_FINDWIN_SRC = """import re, subprocess, sys
+WIN_RE = re.compile(%(pattern)r, re.MULTILINE)
+try:
+    out = subprocess.run(
+        ["xwininfo", "-root", "-tree", "-display", sys.argv[1]],
+        capture_output=True, text=True, timeout=5,
+        check=False).stdout
+except OSError:
+    sys.exit(1)
+best, best_area = None, 0
+for m in WIN_RE.finditer(out):
+    w, h = int(m.group(2)), int(m.group(3))
+    if w > 50 and h > 50 and w * h > best_area:
+        best, best_area = m.group(1), w * h
+if best:
+    print(best)
+"""
+
+
+RELAY_SRC = r'''"""Fan one audio stream out to however many listeners there are.
+
+ffmpeg's own "-listen 1" served exactly one client and stopped listening
+while it did, so a second consumer could not connect at all, and a
+disconnect left ~2.1s with nothing listening (measured, 2026-09-09). Any
+probe of that port therefore shut the browser out for as long as it held
+the slot -- an observer effect that made the audio look flaky on its own.
+This listens instead: never stops listening, never exits when a client
+leaves, serves as many as turn up.
+
+Two stream shapes, because the two have different join rules:
+
+  pcm  -- raw s16le stereo. A listener may join anywhere, so long as it
+          joins on a frame boundary: four bytes in, left and right. Half
+          a frame in and the channels stay crossed for the rest of the
+          connection. There is nothing else to replay.
+
+  webm -- only decodable from its initialisation segment (everything
+          before the first Cluster), so that is kept and replayed to
+          each new client, which then starts at the NEXT cluster
+          boundary. Mid-cluster is no better than no header at all.
+
+Either way a consumer that stops reading is dropped at a hard cap rather
+than buffered without bound: a client that far behind is going to
+reconnect anyway, and the memory belongs to everyone else.
+"""
+import os
+import select
+import socket
+import sys
+
+PORT = int(sys.argv[1])
+MODE = sys.argv[2] if len(sys.argv) > 2 else "webm"
+CLUSTER = b"\x1f\x43\xb6\x75"          # EBML id of a WebM Cluster
+FRAME = 4                              # s16le stereo: 2 bytes x 2 channels
+MAXQ = 2 * 1024 * 1024                 # per client, then it is dropped
+CHUNK = 65536
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", PORT))
+srv.listen(8)
+srv.setblocking(False)
+
+src = sys.stdin.buffer
+os.set_blocking(src.fileno(), False)
+
+init = b""          # webm: everything before the first Cluster
+have_init = MODE == "pcm"
+tail = b""          # webm: carry, so a Cluster id split across reads is found
+pos = 0             # pcm: bytes of stream seen, to find a frame boundary
+clients = {}        # sock -> [queue bytes, started bool]
+
+
+def drop(sock, why):
+    clients.pop(sock, None)
+    try:
+        sock.close()
+    except OSError:
+        pass
+    sys.stderr.write("relay: dropped a client (%s)\n" % why)
+    sys.stderr.flush()
+
+
+while True:
+    writers = [s for s, st in clients.items() if st[0]]
+    r, w, _ = select.select([srv, src] + list(clients), writers, [], 1.0)
+
+    if srv in r:
+        try:
+            sock, _addr = srv.accept()
+            sock.setblocking(False)
+            clients[sock] = [b"", False]
+        except OSError:
+            pass
+
+    for sock in list(clients):
+        if sock in r:
+            try:
+                if not sock.recv(4096):
+                    drop(sock, "closed")
+            except OSError:
+                drop(sock, "recv failed")
+
+    if src in r:
+        try:
+            data = src.read(CHUNK)
+        except OSError:
+            data = b""
+        if data is None:
+            data = b""
+        if data == b"":
+            break                      # the source went away; the loop restarts it
+
+        if MODE == "pcm":
+            for sock, st in clients.items():
+                if st[1]:
+                    st[0] += data
+                else:
+                    # join on a frame boundary, never mid-frame
+                    skip = (FRAME - (pos % FRAME)) % FRAME
+                    if skip < len(data):
+                        st[0] = data[skip:]
+                        st[1] = True
+            pos += len(data)
+        else:
+            if not have_init:
+                init += data
+                idx = init.find(CLUSTER)
+                if idx >= 0:
+                    have_init, data, init = True, init[idx:], init[:idx]
+                else:
+                    data = b""
+            if have_init and data:
+                hay = tail + data
+                boundary = hay.find(CLUSTER)
+                tail = hay[-3:]
+                for sock, st in clients.items():
+                    if st[1]:
+                        st[0] += data
+                    elif boundary >= 0:
+                        st[0] = init + hay[boundary:]
+                        st[1] = True
+
+        for sock, st in list(clients.items()):
+            if len(st[0]) > MAXQ:
+                drop(sock, "too far behind")
+
+    for sock in w:
+        st = clients.get(sock)
+        if not st or not st[0]:
+            continue
+        try:
+            n = sock.send(st[0])
+            st[0] = st[0][n:]
+        except OSError:
+            drop(sock, "send failed")
+'''
+
+
+def _write_relay(d):
+    path = os.path.join(d, "audiorelay.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(RELAY_SRC)
+    return path
+
+
+def _write_findwin(d):
+    path = os.path.join(d, "findwin.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_FINDWIN_SRC % {"pattern": _WIN_RE.pattern})
+    return path
 
 
 def _find_box_window(display_num):
@@ -1044,21 +1536,45 @@ def on_start(api, inst):
     log_path = os.path.join(d, "box86.log")
     log = open(log_path, "ab")
     try:
+        # before anything is started: a previous generation of this same
+        # instance still holding :N or its ports would make Xvfb fail
+        # silently and everything after it attach to the leftovers
+        _sweep_orphans(d, display_num, vnc, ws, audio_ws, audio_tcp,
+                       sink, log)
+
         spawn("xvfb", ["Xvfb", ":%d" % display_num,
-                       "-screen", "0", "1024x768x24"],
+                       "-screen", "0", "%dx%dx24" % (SCREEN_W, SCREEN_H)],
               stdout=log, stderr=log)
         for _ in range(30):
             if os.path.exists("/tmp/.X11-unix/X%d" % display_num):
                 break
             time.sleep(0.1)
 
-        subprocess.run(
-            ["pactl", "load-module", "module-null-sink",
-             "sink_name=%s" % sink,
-             "sink_properties=device.description=%s" % sink],
-            capture_output=True, timeout=5, check=False)
+        # A sink of this name left behind by an instance that no
+        # longer exists is not harmless: PulseAudio does not refuse the
+        # duplicate, it renames the new one (box86_8 -> box86_8.2), and
+        # ffmpeg's own "<sink>.monitor" then resolves to the stale,
+        # silent one instead. Instance indexes get reused as instances
+        # are deleted and created, so this is reachable in normal use,
+        # not just after a crash. Three such strays were sitting on the
+        # host when this was found (2026-09-09).
+        for stale in _find_sink_modules(sink):
+            _pactl(["unload-module", stale])
 
-        env = dict(os.environ, DISPLAY=":%d" % display_num,
+        loaded = _pactl(["load-module", "module-null-sink",
+                         "sink_name=%s" % sink,
+                         "sink_properties=device.description=%s" % sink])
+        if loaded.returncode != 0:
+            log.write(b"[box86] pactl load-module failed (rc=%d): %s\n"
+                      % (loaded.returncode,
+                         (loaded.stderr or "").strip().encode("utf-8",
+                                                              "replace")))
+            log.flush()
+
+        # _pulse_env, not os.environ: 86Box's own audio output is a
+        # PulseAudio client like any other and dies the same silent
+        # death without it.
+        env = dict(_pulse_env(), DISPLAY=":%d" % display_num,
                    QT_QPA_PLATFORM="xcb",
                    ALSOFT_DRIVERS="pulse",
                    PULSE_SINK=sink)
@@ -1147,12 +1663,47 @@ def on_start(api, inst):
         except OSError:
             pass
 
-        x11vnc_argv = ["x11vnc", "-display", ":%d" % display_num]
-        if win_id:
-            x11vnc_argv += ["-id", win_id]
-        x11vnc_argv += ["-forever", "-shared", "-rfbport", str(vnc),
-                        "-nopw", "-q"]
-        spawn("x11vnc", x11vnc_argv, stdout=log, stderr=log)
+        # x11vnc told to track one window (-id) exits the moment that
+        # window goes away, and 86Box replaces its own top-level window
+        # on a guest video mode change. Nothing restarted it, so the
+        # console went black for good until the whole instance was
+        # restarted -- seen on the user's own machine, 2026-09-09:
+        # "subwin 0x200006 went away!" in the log, x11vnc dead in
+        # pids.json, nothing listening on its port, every other helper
+        # carrying on fine around it.
+        #
+        # So it runs under the same kind of supervisor loop ffmpeg
+        # already has, with one difference that matters: the window id
+        # is not stable across those restarts, so the loop asks for it
+        # again every time round (findwin.py, written from the same
+        # _WIN_RE the Python side uses). No window yet -- 86Box still
+        # starting, or mid mode-change -- is not an error, only a reason
+        # to wait and ask again.
+        #
+        # Falling back to the whole display when no window can be found
+        # is deliberately not done: it "works" while looking wrong (the
+        # guest's own small window adrift in a 1024x768 screen, the
+        # black bars this -id exists to avoid), and looking broken is
+        # worse than waiting another second for the real thing.
+        #
+        # VNCLOOP is inert. It is there so this loop can be found: the
+        # orphan sweep and the stop path both match helpers by tokens
+        # taken from this instance's own identity, and a bare
+        # "x11vnc -id 0x..." carries none of them -- its display lives
+        # in the environment, not the command line. Without this marker
+        # the supervisor would be the one helper that survives a stop.
+        findwin = _write_findwin(d)
+        spawn("x11vnc",
+              ["bash", "-c",
+               "VNCLOOP=%s; while true; do "
+               "W=$(python3 %s ':%d' 2>/dev/null); "
+               "if [ -n \"$W\" ]; then "
+               "x11vnc -display ':%d' -id \"$W\" -forever -shared "
+               "-rfbport %d -nopw -q; "
+               "fi; sleep 1; done"
+               % ("%s.vncloop" % sink, findwin, display_num,
+                  display_num, vnc)],
+              stdout=log, stderr=log)
         spawn("websockify_video",
               ["websockify", str(ws), "127.0.0.1:%d" % vnc],
               stdout=log, stderr=log)
@@ -1169,13 +1720,55 @@ def on_start(api, inst):
         # spawn(), one setsid()), so stopping this instance's "ffmpeg"
         # entry by process GROUP, not just its top pid, takes the loop
         # and whichever ffmpeg it is currently running down together.
+        # ffmpeg used to be the TCP server here, with "-listen 1".
+        # That serves exactly one client and stops listening while it
+        # does: measured 2026-09-09, the listening socket is simply
+        # absent for as long as a client is attached, and a new one
+        # appears only ~2.1s after it leaves. Two consequences, both
+        # seen in practice: a second consumer cannot connect at all, and
+        # anyone who probes that port shuts the browser out for as long
+        # as they hold it and leaves a hole behind them. That observer
+        # effect is what made this look flaky on its own -- including in
+        # my own measurements of it.
+        #
+        # So ffmpeg writes to a pipe and audiorelay.py listens instead:
+        # always listening, never exiting when a client leaves, serving
+        # as many as turn up, replaying the WebM initialisation segment
+        # to each new one and starting it at a cluster boundary (a
+        # client dropped into mid-cluster data decodes no better than
+        # one given no header at all). A consumer that stops reading is
+        # dropped at a hard cap rather than buffered without bound: a
+        # browser that far behind is going to reconnect anyway.
+        #
+        # The pipe keeps the pair honest in both directions -- if the
+        # relay dies ffmpeg takes a SIGPIPE, if ffmpeg dies the relay
+        # reads EOF and exits -- and the loop restarts both together.
+        # Raw PCM, not Opus in WebM. The person using this needs the
+        # sound of a game they are playing, and every part of the old
+        # chain bought compression at the price of delay: the encoder
+        # only emits at cluster boundaries, and MediaSource on the far
+        # end is a buffered-playback API whose whole design assumes it
+        # may sit behind the live edge. Measured 2026-09-09, the player
+        # alone sat 0.38-0.60s back, and that was the *small* term.
+        #
+        # s16le stereo at 44.1kHz is 1.41 Mbit/s uncompressed, which on
+        # a LAN is nothing, and it lets the browser feed an AudioWorklet
+        # ring directly -- the same Pc98Sink a PC-98 console already
+        # plays through, with its own prefill measured in milliseconds
+        # rather than a cluster. 44.1k rather than the sink's own 48k
+        # because that worklet's AudioContext is one global shared with
+        # pc98 consoles: resampling once here, in PulseAudio, costs less
+        # than a second context would.
+        relay = _write_relay(d)
         spawn("ffmpeg",
               ["bash", "-c",
-               "while true; do ffmpeg -nostdin -loglevel error "
-               "-f pulse -i '%s.monitor' -c:a libopus -b:a 64k "
-               "-f webm -listen 1 tcp://127.0.0.1:%d; sleep 0.2; done"
-               % (sink, audio_tcp)],
-              stdout=log, stderr=log)
+               "AUDIORELAY=%s; while true; do "
+               "parec --device='%s.monitor' --format=s16le "
+               "--rate=%d --channels=2 --latency-msec=20 --raw "
+               "| python3 %s %d pcm; sleep 0.2; done"
+               % ("%s.audiorelay" % sink, sink, AUDIO_RATE, relay,
+                  audio_tcp)],
+              stdout=log, stderr=log, env=_pulse_env())
         spawn("websockify_audio",
               ["websockify", str(audio_ws), "127.0.0.1:%d" % audio_tcp],
               stdout=log, stderr=log)
@@ -1290,10 +1883,9 @@ def _stop_now(d, inst):
                 time.sleep(0.3)
     _kill_pids(pids)
     _save_pids(d, {})
-    subprocess.run(["pactl", "unload-module",
-                    _find_sink_module(_sink_name(inst))],
-                   capture_output=True, timeout=5, check=False) \
-        if _find_sink_module(_sink_name(inst)) else None
+    # all of them, not one: see _find_sink_modules
+    for mod in _find_sink_modules(_sink_name(inst)):
+        _pactl(["unload-module", mod])
     return "stopped"
 
 
@@ -1338,14 +1930,21 @@ def _kill_pids(pids):
                 pass
 
 
-def _find_sink_module(sink_name):
+def _find_sink_modules(sink_name):
+    """Every module-null-sink loaded under this name, newest last.
+
+    Plural on purpose: PulseAudio happily loads the same sink_name twice
+    and renames the sinks (box86_8, box86_8.2, box86_8.3 ...), so "the"
+    module for a name is not a thing. Returning one of them, as this
+    used to, left the rest behind for good -- three had piled up on the
+    host by the time anyone looked (2026-09-09).
+    """
     try:
-        out = subprocess.run(["pactl", "list", "short", "modules"],
-                             capture_output=True, text=True,
-                             timeout=5, check=False).stdout
+        out = _pactl(["list", "short", "modules"]).stdout or ""
     except OSError:
-        return None
+        return []
+    found = []
     for line in out.splitlines():
         if "module-null-sink" in line and ("sink_name=%s" % sink_name) in line:
-            return line.split("\t", 1)[0]
-    return None
+            found.append(line.split("\t", 1)[0])
+    return found
