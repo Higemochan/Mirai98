@@ -1638,7 +1638,17 @@ function capturePointer(rfb, target, absolute) {
   };
 }
 
-window.connectConsole = async (name, ws) => {
+// How long to wait before each retry of a console that never came up.
+// Three tries and then stop: an instance that is not running should still
+// take the viewer back to the list rather than knock forever.
+const CONSOLE_RETRY_WAITS = [500, 1000, 2000];
+// Which attempt a pending retry belongs to.  A console opened by hand
+// while one is waiting makes that one stale, and a stale timer must not
+// open a second connection behind the new one.
+let consoleGen = 0;
+window.connectConsole = async (name, ws, attempt) => {
+  attempt = attempt || 0;
+  const myGen = ++consoleGen;
   disconnectConsole();
   window.toggleConsolePane(true);      // a hidden box has no size to scale to
   const target = document.getElementById('console-box');
@@ -1709,7 +1719,12 @@ window.connectConsole = async (name, ws) => {
   consoleFbWatch.observe(target, {childList: true, subtree: true,
                                   attributes: true,
                                   attributeFilter: ['width', 'height']});
+  // Whether this particular connection ever came up.  A local, not
+  // anything shared: a stale disconnect from a replaced connection must
+  // not be able to read the state of the one that replaced it.
+  let cameUp = false;
   rfb.addEventListener('connect', () => {
+    cameUp = true;
     toast(name + ': console connected');
     fitConsoleBox();
     if (wantsVncAudio)
@@ -1719,7 +1734,8 @@ window.connectConsole = async (name, ws) => {
   // replaced one must not clear the connection that took its place.
   const thisRfb = rfb;
   rfb.addEventListener('disconnect', () => {
-    toast(name + ': console disconnected');
+    // Said after the check, not before: a disconnect from a connection
+    // that has already been replaced is not news about this one.
     if (rfb !== thisRfb) return;
     // The guest powering itself off takes QEMU with it, and the socket
     // closing is the only way the page hears about it.  Let go of the
@@ -1730,6 +1746,20 @@ window.connectConsole = async (name, ws) => {
     // silence and reports it once a second for as long as the page is open.)
     rfb = null;
     releaseConsoleHold();
+    // Never came up at all: the console was asked for before the server
+    // was ready to serve it, which is a wait rather than an answer.  The
+    // pane stays open and this tries again.
+    if (!cameUp && attempt < CONSOLE_RETRY_WAITS.length) {
+      toast(name + ': waiting for the console\u2026');
+      setTimeout(() => {
+        if (consoleGen !== myGen || rfb) return;   // something else took it
+        window.connectConsole(name, ws, attempt + 1);
+      }, CONSOLE_RETRY_WAITS[attempt]);
+      return;
+    }
+    toast(name + (cameUp ? ': console disconnected'
+                         : ': could not reach the console \u2014 give it a '
+                           + 'moment and open it again'));
     render();
   });
   if (wantsVncAudio)
