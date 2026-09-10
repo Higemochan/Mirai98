@@ -1028,7 +1028,8 @@ window.saveVm = (form, name) => {
 // starve it.  The main thread only hands the arriving chunks over.
 const AUDIO_RATE = 44100;
 const AUDIO_PREFILL = 0.12;        // seconds of cushion before playback starts
-const AUDIO_MAX_LAG = 0.40;        // seconds; give back anything beyond this
+const AUDIO_MAX_LAG = 0.40;        // seconds; the emergency valve, not the plan
+const AUDIO_SLACK = 0.02;          // seconds either side of the cushion to ignore
 
 // The worklet keeps its own ring: the main thread posts PCM in, the audio
 // thread takes it out a render quantum at a time.
@@ -1044,6 +1045,7 @@ class Pc98Sink extends AudioWorkletProcessor {
     this.rd = 0;
     this.prefill = Math.round(sampleRate * opt.prefill);
     this.maxLag = Math.round(sampleRate * opt.maxLag);
+    this.slack = Math.round(sampleRate * (opt.slack || 0.02));
     this.primed = false;
     this.starved = 0;
     this.dry = 0;
@@ -1061,10 +1063,11 @@ class Pc98Sink extends AudioWorkletProcessor {
       this.w = (this.w + 1) % this.size;
       if (this.w === this.rd) { this.rd = (this.rd + 1) % this.size; }
     }
-    // Server and sound card never tick at exactly the same rate, so the
-    // backlog creeps.  Come back to the cushion -- stopping at maxLag
-    // would make the worst case the resting state, and one stall would
-    // leave the sound a full 0.4 s behind for good.
+    // The emergency valve. Steady drift is handled a frame at a time in
+    // process(); this is for the case that outruns it -- a long stall
+    // that dumps a backlog in at once. Coming back to the cushion rather
+    // than stopping at maxLag matters even here: stopping at the cap
+    // would make the worst case the resting state.
     if (this.avail() > this.maxLag) {
       this.rd = (this.rd + this.avail() - this.prefill) % this.size;
     }
@@ -1091,6 +1094,33 @@ class Pc98Sink extends AudioWorkletProcessor {
         this.rd = (this.rd + 1) % this.size;
         this.dry = 0;
       }
+    }
+    // Server and sound card never tick at exactly the same rate, so the
+    // backlog wanders. Measured 2026-09-09 over three minutes: the ring
+    // grew from 0.105s to 0.161s, about 0.03% fast. Left alone that is
+    // not a small error -- the delay climbs until it hits maxLag and the
+    // whole excess is thrown away at once, so what the listener gets is
+    // sound falling further and further behind the picture and then
+    // lurching forward. "Occasionally it seems to rewind" is exactly
+    // what a cushion that grows to 0.4s and snaps back to 0.12s sounds
+    // like, and a bigger cushion makes it worse rather than better.
+    //
+    // So correct continuously instead: one frame per render quantum,
+    // whenever the backlog is outside a band around the cushion. That is
+    // 0.34% of authority against 0.03% of drift, plenty to hold station,
+    // while a single frame at 44.1kHz is 23 microseconds -- inaudible,
+    // where dropping 0.28s in one go certainly is not. The band keeps it
+    // from fidgeting when there is nothing to correct.
+    //
+    // Symmetric on purpose: if the drift runs the other way the backlog
+    // shrinks toward nothing, and repeating one frame gives it back the
+    // same way. Correcting only the direction seen on one machine would
+    // leave the opposite one starving on another.
+    const backlog = this.avail();
+    if (backlog > this.prefill + this.slack) {
+      this.rd = (this.rd + 1) % this.size;          // arriving too fast
+    } else if (backlog > 0 && backlog < this.prefill - this.slack) {
+      this.rd = (this.rd - 1 + this.size) % this.size;   // draining too fast
     }
     if (this.dry > sampleRate / 2) {
       // nothing has arrived for half a second: the stream has stopped
@@ -1139,7 +1169,8 @@ async function audioStart() {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG}
+      processorOptions: {prefill: AUDIO_PREFILL, maxLag: AUDIO_MAX_LAG,
+                        slack: AUDIO_SLACK}
     });
     node.port.onmessage = (e) => {
       if (e.data && e.data.starved) {
@@ -1196,7 +1227,29 @@ async function enableAudioNow() {
   const btn = document.getElementById('btn-audio');
   if (btn) { btn.textContent = '\u{1F50A} Sound on'; }
 }
+// The worklet sink, for a machine whose sound does not arrive down the
+// VNC channel. box86's does not (86Box has no QEMU VNC server to carry
+// it), so it opens a websocket of its own -- but what it receives is the
+// same thing this already knows how to play: s16le stereo at AUDIO_RATE.
+// Sharing audioChunk rather than reimplementing it in the plugin matters
+// for one specific reason: it carries a frame split across two chunks
+// (audioCarry) instead of dropping the odd bytes, and dropping them
+// crosses the channels for the rest of the connection.
+window.consoleAudioSink = {
+  rate: AUDIO_RATE,
+  start: () => audioStart(),
+  feed: (bytes) => audioChunk(bytes),
+  resume: () => audioCtx && audioCtx.resume(),
+  stop: () => stopAudio(),
+};
+
 window.toggleAudio = async () => {
+  // A machine whose sound does not come down the VNC channel at all
+  // (box86: its own websocket, its own <audio>) registers a controller
+  // of its own here, and this button drives that instead. Same button,
+  // because to the person looking at it there is only one sound.
+  const plugged = window._pluginConsoleAudio;
+  if (plugged) { await plugged.toggle(); return; }
   if (!rfb || !rfb.enableAudio) { toast('no console'); return; }
   audioOn = !audioOn;
   const btn = document.getElementById('btn-audio');
@@ -1269,10 +1322,34 @@ let wantsRelativePointer = true;
 // read wherever the console decides whether to touch the VNC channel's
 // own audio extension at all (see registerMachinePlugin's vncAudio).
 let wantsVncAudio = true;
-function patchRFBForRelativePointer() {
+// Tight is the one encoding noVNC offers that can throw pixels away, and
+// it is the one the server picks by default. noVNC asks for quality level
+// 6 out of 9, which lets the server send JPEG for any tile it judges
+// photographic -- and a dithered 90s game screen is exactly that.
+//
+// Measured 2026-09-09 against this Win95 desktop, one full 640x472 frame:
+//
+//   quality 6 (the default)  33 KiB  63,591 px wrong, worst 40/255
+//   quality 9                97 KiB  44,614 px wrong, worst  2/255
+//   Tight dropped            19 KiB  exact
+//
+// So the default is not a trade at all: it sends 74% more bytes than the
+// lossless path AND damages a fifth of the picture. JPEG is a poor fit for
+// flat-coloured UI graphics, and it destroys the palette structure that
+// Tight's own lossless sub-encodings compress so well. Raising the quality
+// level to 9 would only make it bigger still. Dropping the encoding is
+// what actually helps, and it makes the picture bit-exact -- verified
+// against the X server's own framebuffer, 0 of 480,000 pixels differing.
+//
+// tightPNG (-260) is left in the list: it is lossless by design, and this
+// server does not select it.
+const LOSSY_ENCODING = 7;                  // Tight
+
+function patchRFBEncodings() {
   if (!RFB || RFB.messages._miraiRelPatched) return;
   const orig = RFB.messages.clientEncodings;
   RFB.messages.clientEncodings = function (sock, encodings) {
+    encodings = encodings.filter(e => e !== LOSSY_ENCODING);
     if (wantsRelativePointer && !encodings.includes(-257))
       encodings = encodings.concat([-257]);
     return orig.call(this, sock, encodings);
@@ -1412,10 +1489,51 @@ function installImeKeyMacros(rfb) {
   };
 }
 
-function captureRelativePointer(rfb, target) {
+// One pointer capture for every console, whichever way the pointer
+// actually travels underneath.
+//
+// The capture itself -- click to take the pointer, Esc (or the middle
+// button) to give it back -- is the whole point of Pointer Lock here,
+// and it is not really about relative coordinates at all: it is about
+// the pointer not being able to leave. Without it the browser cursor
+// walks off the canvas at the edge and the console quietly loses focus,
+// so a guest cursor can never reach its own screen edges. box86 had
+// exactly that (confirmed by the person using it, 2026-09-09: "the
+// focus is lost before the pointer reaches the edge"), because it opts
+// out of the QEMU relative-pointer scheme -- and opting out of that
+// pseudo-encoding had been conflated with opting out of capture.
+//
+// So: everything captures. `absolute` only changes what gets sent.
+//   false -- QEMU's own relative scheme: a delta around 0x7FFF, which
+//            needs pseudo-encoding -257 and only QEMU speaks.
+//   true  -- a plain absolute VNC pointer, which is all x11vnc (and so
+//            86Box, reading real X11 pointer events) understands. The
+//            locked pointer's own movementX/Y are integrated here into
+//            a position instead, and clamped to the framebuffer, so the
+//            guest cursor tracks 1:1 and stops at the edges rather than
+//            the browser doing the stopping.
+function capturePointer(rfb, target, absolute) {
   const RFB = rfb.constructor;
   const CENTER = 0x7FFF;
   rfb._sendMouse = function () {};        // silence noVNC's absolute sends
+  // where the guest pointer is, in framebuffer pixels (absolute mode)
+  let px = 0, py = 0;
+  const geom = () => {
+    const c = target.querySelector('canvas');
+    const r = c ? c.getBoundingClientRect() : null;
+    return {
+      c, r,
+      w: rfb._fbWidth || (c && c.width) || 1,
+      h: rfb._fbHeight || (c && c.height) || 1,
+    };
+  };
+  // CSS pixels the pointer moved -> framebuffer pixels, because the
+  // canvas is scaled to fit (scaleViewport) and a raw movementX would
+  // otherwise drift against the guest by exactly that scale factor
+  const toFb = (g) => ({
+    x: g.r && g.r.width ? g.w / g.r.width : 1,
+    y: g.r && g.r.height ? g.h / g.r.height : 1,
+  });
   // These guests draw their own (software) cursor, so noVNC sees no server
   // cursor and hides the local one (canvas cursor:none) -- which left the
   // pointer invisible after Esc.  Ask noVNC for a dot cursor instead.
@@ -1424,8 +1542,27 @@ function captureRelativePointer(rfb, target) {
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
     if (!rfb || rfb._rfbConnectionState !== 'connected') return;
-    RFB.messages.pointerEvent(rfb._sock,
-      (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
+    if (!absolute) {
+      RFB.messages.pointerEvent(rfb._sock,
+        (CENTER + dx) & 0xffff, (CENTER + dy) & 0xffff, m);
+      return;
+    }
+    const g = geom();
+    const f = toFb(g);
+    px = Math.min(g.w - 1, Math.max(0, px + dx * f.x));
+    py = Math.min(g.h - 1, Math.max(0, py + dy * f.y));
+    RFB.messages.pointerEvent(rfb._sock, Math.round(px), Math.round(py), m);
+  };
+  // Take the position the pointer was actually at when it was clicked,
+  // so taking the capture does not teleport the guest cursor somewhere
+  // else first.
+  const seedFrom = (ev) => {
+    const g = geom();
+    if (!g.r || !g.r.width || !g.r.height) return;
+    px = Math.min(g.w - 1, Math.max(0,
+      (ev.clientX - g.r.left) * (g.w / g.r.width)));
+    py = Math.min(g.h - 1, Math.max(0,
+      (ev.clientY - g.r.top) * (g.h / g.r.height)));
   };
   // The PC-98 bus mouse and the FM TOWNS mouse both have two buttons, so
   // the middle one is free: while the pointer is captured it leaves the
@@ -1435,7 +1572,11 @@ function captureRelativePointer(rfb, target) {
   const MIDDLE = 1;
   const onDown = (ev) => {
     if (!locked) {
-      if (target.contains(ev.target)) { const c = canvas(); if (c) c.requestPointerLock(); }
+      if (target.contains(ev.target)) {
+        if (absolute) seedFrom(ev);
+        const c = canvas();
+        if (c) c.requestPointerLock();
+      }
       return;
     }
     ev.preventDefault(); ev.stopPropagation();
@@ -1525,7 +1666,7 @@ window.connectConsole = async (name, ws) => {
   // the relative-pointer negotiation must be in place before the VNC
   // handshake advertises the client encodings, i.e. before the RFB object
   // exists; plugins get the same chance to prepare the connection
-  patchRFBForRelativePointer();
+  patchRFBEncodings();
   await patchXtScancodesForJIS();
   for (const fn of (window.MiraiPlugins.consolePrep || [])) {
     try { await fn(name); } catch (e) { console.error('console prep', e); }
@@ -1533,12 +1674,14 @@ window.connectConsole = async (name, ws) => {
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
-  if (wantsRelativePointer) {
-    try {
-      consolePointerStop = captureRelativePointer(rfb, target);
-    } catch (e) {
-      console.error('pointer capture', e);
-    }
+  // Every console captures the pointer; only the transport differs. A
+  // machine that opted out of the relative scheme (box86) gets the same
+  // click-to-capture, Esc-to-release console as every other one, with
+  // its own absolute pointer underneath.
+  try {
+    consolePointerStop = capturePointer(rfb, target, !wantsRelativePointer);
+  } catch (e) {
+    console.error('pointer capture', e);
   }
   try {
     imeKeyStop = installImeKeyMacros(rfb);
@@ -1603,7 +1746,12 @@ window.connectConsole = async (name, ws) => {
   // since the loop above, run unconditionally, just showed it, and a
   // stale show from a previous, VNC-audio-capable console otherwise
   // outlives disconnectConsole (it touches no button styles at all).
-  if (!wantsVncAudio) document.getElementById('btn-audio').style.display = 'none';
+  // ... unless a machine plugin registered sound of its own just above
+  // (the console hooks run before this), in which case the button is
+  // exactly what that sound needs: a browser will not start audio
+  // without a real user gesture, so something has to be clicked.
+  if (!wantsVncAudio && !window._pluginConsoleAudio)
+    document.getElementById('btn-audio').style.display = 'none';
 };
 // Everything the console took hold of while it was open: the pointer, the
 // keyboard wrapper, the two observers, the sound.  A guest that powers itself
@@ -2044,7 +2192,7 @@ function storageCard(kind, files) {
     '\')">Group by name...</button>' +
     (platformList().length > 1
      ? '<button type="button" onclick="reclassifyChecked(\'' + kind +
-       '\')">Reclassify checked...</button>' : '') + '</div>';
+       '\')">Move to another shelf...</button>' : '') + '</div>';
   let create = '';
   // a machine plugin may add image formats of its own (label, note), only
   // ever on the shelf its own platform actually uses
@@ -2763,11 +2911,17 @@ window.reclassifyChecked = async kind => {
     .map(i => i.value);
   if (!names.length) { toast('nothing is checked'); return; }
   const targets = platformList().filter(p => p !== storagePlatform);
-  const to = prompt('move ' + names.length + ' image(s) from the ' +
-    platformLabel(storagePlatform) + ' shelf to which platform?\n\n' +
-    targets.map(p => p + ' = ' + platformLabel(p)).join('\n'));
-  if (to === null) return;
-  if (!targets.includes(to)) { toast('no such platform: ' + to); return; }
+  if (!targets.length) { toast('there is nowhere else to put it'); return; }
+  // Numbered, the way every other list in here is picked: typing the
+  // platform's internal id was the old way, and it meant knowing that the
+  // DOS/V shelf answers to "dosv".
+  const menu = targets.map((p, n) => n + ': ' + platformLabel(p)).join('\n');
+  const pick = prompt('Move ' + names.length + ' image(s) off the ' +
+    platformLabel(storagePlatform) + ' shelf.\n\n' + menu + '\n\nnumber:',
+    '0');
+  if (pick === null) return;
+  const to = targets[parseInt(pick, 10)];
+  if (!to) { toast('no such shelf'); return; }
   let moved = 0, failed = [];
   for (const name of names) {
     const r = await api('/api/disks/' + kind + '/reclassify',
