@@ -387,19 +387,32 @@ def _hardware(api, inst):
         return hit[1]
     cp = configparser.ConfigParser(interpolation=None)
     cp.optionxform = str
-    if stamp is None:
-        cp.read_string(CFG_TEMPLATE)
-        # The template's own mem_size is the one value a first start will
-        # not keep: _sync_machine replaces it with whatever this record
-        # asks for. Saying 64M under "what its first start will write"
-        # would be wrong for every instance that asked for more.
-        try:
-            cp.set("Machine", "mem_size", str(_mem_kb(inst)))
-        except Exception:
-            pass
-    else:
-        cp.read(path, encoding="utf-8")
-    out = _hardware_text(cp, stamp is not None)
+    try:
+        if stamp is None:
+            cp.read_string(CFG_TEMPLATE)
+            # The template's own mem_size is the one value a first start
+            # will not keep: _sync_machine replaces it with whatever this
+            # record asks for. Saying 64M under "what its first start will
+            # write" would be wrong for every instance that asked for more.
+            # A record too strange to get a number out of still deserves
+            # the rest of the description, and the template's own figure
+            # is the honest thing to fall back to; anything else raising
+            # in there is a real fault and is left to surface below.
+            try:
+                cp.set("Machine", "mem_size", str(_mem_kb(inst)))
+            except (ValueError, TypeError):
+                pass
+        else:
+            cp.read(path, encoding="utf-8")
+        out = _hardware_text(cp, stamp is not None)
+    except (configparser.Error, OSError, UnicodeDecodeError) as exc:
+        # A cfg 86Box itself would not read is worth saying out loud once,
+        # in the page, rather than four blanks and a puzzle. Cached like
+        # any other answer: without that this re-reads and re-complains on
+        # every listing, which is several times a minute.
+        out = {"hardware": {"machine": "", "cpu": "", "video": "",
+                            "memory": "", "live": stamp is not None,
+                            "problem": str(exc).splitlines()[0]}}
     _HARDWARE_CACHE[path] = (stamp, out)
     return out
 

@@ -170,14 +170,20 @@ function box86Hardware(i, h) {
   // happens every time CFG_TEMPLATE changes under an instance that
   // already exists, or its record asks for different memory.
   const spec = i.hardware || {};
-  const hw = (key) => spec[key] ? h.esc(spec[key]) : '(unknown)';
+  const hw = (key) => spec[key] ? h.esc(spec[key])
+    : (spec.problem ? '(unreadable)' : '(unknown)');
   const pending = spec.live === false
     ? note('(not started yet: what its first start will write)') : '';
+  // A cfg that will not parse is a thing to say once, next to the board
+  // it failed to describe, not four times down the card.
+  const trouble = spec.problem
+    ? note('(its own 86box.cfg could not be read: ' + h.esc(spec.problem) +
+           ')') : '';
   return {
     bios: BOX86_BIOS,
     sound: BOX86_SOUND,
     rows: [
-      ['&#9881; Machine', hw('machine') + pending],
+      ['&#9881; Machine', hw('machine') + pending + trouble],
       ['&#9636; CPU', hw('cpu')],
       ['&#9635; Video', hw('video')],
       ['&#9737; Memory', hw('memory')],
