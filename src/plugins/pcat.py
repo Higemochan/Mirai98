@@ -45,9 +45,27 @@ def register(api):
     # or "nat".
     api.add_field("vga", lambda v: None if v in ("", "std", "cirrus")
                   else "unknown video card")
+    # this machine always has SB16 sound and the QEMU BIOS; the stock
+    # Sound/BIOS choices the wizard cannot replace are pinned here rather
+    # than stored and ignored, and the PC-98/host-only fields are cleared
+    api.machine_sanitize("pcat", pcat_sanitize)
     # a plain raw hard disk of this machine's own; box86's VHD is for
     # 86Box, and the one dosv shelf holds both, told apart by format
     api.disk_builder("dosv", "hdd", "pcat-raw", pcat_new_hard_disk)
+
+
+def pcat_sanitize(record):
+    """Pin the fixed choices and drop the settings this machine has no use
+    for.  Its sound is always SB16 and its firmware the QEMU BIOS, so the
+    stock "Sound"/"BIOS" values are forced (kept valid for the core's own
+    checks); the shared folder and the RS-232C/parallel/GP-IB device paths
+    are PC-98/host features it does not wire.  IDE disks, the CD, floppies,
+    net (""/nat) and its own vga/boot are left as they are."""
+    record["sound"] = "none"
+    record["bios"] = "real"
+    for key in ("mount", "serial", "parallel", "gpib"):
+        record[key] = ""
+    return None
 
 
 def pcat_argv(api, inst):
@@ -152,9 +170,11 @@ def pcat_hardware(api, inst):
         "sound": PCAT_SOUND_LABEL,
     }
     requested = "KVM" if inst.get("accel", "kvm") == "kvm" else "TCG"
-    name = inst.get("name")
+    # keyed on the requested accelerator too, so a stop -> edit (kvm<->tcg)
+    # -> start with no listing in between does not read a stale answer
+    key = (inst.get("name"), inst.get("accel", "kvm"))
     if api.is_running(inst):
-        accel = _ACCEL_CACHE.get(name)
+        accel = _ACCEL_CACHE.get(key)
         if accel is None:
             reply = api.qmp(inst, "query-kvm")
             if reply and isinstance(reply.get("return"), dict):
@@ -168,11 +188,11 @@ def pcat_hardware(api, inst):
             if accel is not None:
                 # only a definite query-kvm answer is cached; a transient
                 # failure shows the request and is asked again next time
-                _ACCEL_CACHE[name] = accel
+                _ACCEL_CACHE[key] = accel
             else:
                 accel = requested + " (running)"
     else:
-        _ACCEL_CACHE.pop(name, None)
+        _ACCEL_CACHE.pop(key, None)
         accel = requested
     hw["accel"] = accel
     return {"hardware": hw}

@@ -168,6 +168,15 @@ function pcatWizardOptions(h) {
       'discard changes</label></div>';
 }
 
+function pcatWizardMemory(h) {
+  return '<div class="row"><label>Memory</label><select name="memory">' +
+    PCAT_MEMS.map(m => '<option' + (m === '256M' ? ' selected' : '') + '>' +
+                  m + '</option>').join('') + '</select></div>' +
+    '<div class="note">Win98 wants a few tens of MB; 256M is comfortable. ' +
+    'Win98 does not boot with much more than 512M without a workaround.' +
+    '</div>';
+}
+
 function pcatWizardConfirm(v, h) {
   const pick = (list, cur, dflt) =>
     (list.find(([x]) => x === (cur || dflt)) || ['', cur || dflt])[1];
@@ -175,7 +184,8 @@ function pcatWizardConfirm(v, h) {
     ['Name', h.esc(v.name || '(unnamed)')],
     ['Machine type', 'DOS/V PC (KVM, std VGA)'],
     ['Video', pick(PCAT_VGAS, v.vga, 'std')],
-    ['Acceleration', v.kvm ? 'KVM' : 'TCG'],
+    // wizardValues turns the kvm checkbox into accel and drops kvm
+    ['Acceleration', v.accel === 'kvm' ? 'KVM' : 'TCG'],
     ['Boot from', pick(PCAT_BOOTS, v.boot, 'hd')],
     ['Network', pick(PCAT_NETS, v.net, '') || 'Isolated']];
   for (const [k, label] of [['hdd1', 'Hard disk'], ['fdd1', 'Floppy A'],
@@ -208,7 +218,7 @@ window.registerMachinePlugin({
                   'FDISK/FORMAT partition it, as on a real machine' }]
   },
   wizard: { pcat: { panes: { Disks: pcatWizardDisks, Host: null,
-                             Memory: null, Network: null,
-                             Options: pcatWizardOptions },
+                             Memory: pcatWizardMemory, Sound: null,
+                             Network: null, Options: pcatWizardOptions },
                     confirm: pcatWizardConfirm } }
 });
