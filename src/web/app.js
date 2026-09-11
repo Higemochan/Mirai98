@@ -1710,12 +1710,22 @@ function installImeKeyMacros(rfb) {
 //            a position instead, and clamped to the framebuffer, so the
 //            guest cursor tracks 1:1 and stops at the edges rather than
 //            the browser doing the stopping.
+// What the far end was left holding. A VNC client going away is not
+// something 86Box hears about: it keeps its mouse capture, and the guest's
+// cursor stays where it was. So a reconnect is not a fresh start, and
+// these two say what is already true over there -- where the cursor was
+// left, and whether the emulator is still holding its capture.
+let lastPx = null, lastPy = null, emuHeld = false;
+
 function capturePointer(rfb, target, absolute) {
   const RFB = rfb.constructor;
   const CENTER = 0x7FFF;
   rfb._sendMouse = function () {};        // silence noVNC's absolute sends
   // where the guest pointer is, in framebuffer pixels (absolute mode)
-  let px = 0, py = 0;
+  // Carried over if this page has had a console before: the guest's
+  // cursor has not moved just because a VNC client went away.
+  let px = lastPx === null ? 0 : lastPx;
+  let py = lastPy === null ? 0 : lastPy;
   const geom = () => {
     const c = target.querySelector('canvas');
     const r = c ? c.getBoundingClientRect() : null;
@@ -1737,7 +1747,9 @@ function capturePointer(rfb, target, absolute) {
   // pointer invisible after Esc.  Ask noVNC for a dot cursor instead.
   rfb.showDotCursor = true;
   let locked = false, mask = 0, accX = 0, accY = 0, flush = false;
-  let firstLock = true;
+  // The emulator keeps its capture across a reconnect, so a page that has
+  // had a console before already knows whether it is holding one.
+  let captured = lastPx !== null && emuHeld;
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
     if (!rfb || rfb._rfbConnectionState !== 'connected') return;
@@ -1750,6 +1762,7 @@ function capturePointer(rfb, target, absolute) {
     const f = toFb(g);
     px = Math.min(g.w - 1, Math.max(0, px + dx * f.x));
     py = Math.min(g.h - 1, Math.max(0, py + dy * f.y));
+    lastPx = px; lastPy = py;
     RFB.messages.pointerEvent(rfb._sock, Math.round(px), Math.round(py), m);
   };
   // Where the pointer was when it was clicked, as a starting point for
@@ -1786,8 +1799,14 @@ function capturePointer(rfb, target, absolute) {
   const onDown = (ev) => {
     if (!locked) {
       if (target.contains(ev.target)) {
-        if (absolute && firstLock) {
-          seedFrom(ev);
+        if (absolute && !captured) {
+          // Nothing is known about where the guest's cursor is on a page
+          // that has not had a console yet, so start from this click.
+          // After a Ctrl+End there is no need: the emulator was not
+          // capturing, so nothing moved its cursor, and the position
+          // carried over is still the right one. Seeding here instead
+          // would put this end somewhere the guest's cursor is not.
+          if (lastPx === null) seedFrom(ev);
           // 86Box takes its own capture on a button release it can see,
           // and it throws motion away until it has one. The click that
           // asks for the pointer lock cannot also be that release: it is
@@ -1806,7 +1825,8 @@ function capturePointer(rfb, target, absolute) {
           // guest.
           send(0, 0, 1);
           send(0, 0, 0);
-          firstLock = false;
+          captured = true;
+          emuHeld = true;
         }
         const c = canvas();
         if (c) c.requestPointerLock();
@@ -1858,15 +1878,27 @@ function capturePointer(rfb, target, absolute) {
       if (c) c.style.cursor = 'default';
     }
   };
+  // Ctrl+End is the only thing that makes 86Box let go of its capture.
+  // This only watches for it: the key still has to travel to the emulator
+  // the usual way, and it is not swallowed there either -- the event
+  // filter hands it to the guest first and releases the capture second
+  // (qt_mainwindow.cpp eventFilter). Missing it would leave this end
+  // believing in a capture that is gone, and the next click would do
+  // nothing again.
+  const onKey = (ev) => {
+    if (ev.ctrlKey && ev.key === 'End') { captured = false; emuHeld = false; }
+  };
   document.addEventListener('mousedown', onDown, true);
   document.addEventListener('mouseup', onUp, true);
   document.addEventListener('mousemove', onMove, true);
   document.addEventListener('pointerlockchange', onLock);
+  document.addEventListener('keydown', onKey, true);
   return () => {
     document.removeEventListener('mousedown', onDown, true);
     document.removeEventListener('mouseup', onUp, true);
     document.removeEventListener('mousemove', onMove, true);
     document.removeEventListener('pointerlockchange', onLock);
+    document.removeEventListener('keydown', onKey, true);
     if (document.pointerLockElement) document.exitPointerLock();
     hint.remove();
   };
