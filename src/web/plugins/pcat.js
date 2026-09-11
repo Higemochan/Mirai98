@@ -10,9 +10,11 @@
 const PCAT_MEMS = ['64M', '128M', '256M', '512M'];
 const PCAT_VGAS = [['std', 'std (Bochs VBE) -- SoftGPU'],
                    ['cirrus', 'Cirrus -- stock Win98 driver']];
-const PCAT_BOOTS = [['hdd', 'Hard disk'], ['fdd', 'Floppy A'],
+// boot values match FM TOWNS' shared "boot" field (hd/fd/cd); net is a core
+// field whose values are empty (isolated) or nat
+const PCAT_BOOTS = [['hd', 'Hard disk'], ['fd', 'Floppy A'],
                     ['cd', 'CD-ROM']];
-const PCAT_NETS = [['off', 'Isolated (no network)'],
+const PCAT_NETS = [['', 'Isolated (no network)'],
                    ['nat', 'NAT (QEMU user, RTL8139)']];
 
 // The fixed parts, named so the create wizard shows what the machine really
@@ -52,10 +54,10 @@ function pcatEditForm(i, h) {
       note('std (Bochs VBE) for the SoftGPU driver; Cirrus for the stock ' +
            'Win98 display driver') + '</div>' +
     '<div class="row"><label>Boot from</label>' +
-      '<select name="boot">' + opts(PCAT_BOOTS, i.boot || 'hdd') +
+      '<select name="boot">' + opts(PCAT_BOOTS, i.boot || 'hd') +
       '</select></div>' +
     '<div class="row"><label>Network</label>' +
-      '<select name="net">' + opts(PCAT_NETS, i.net || 'off') + '</select>' +
+      '<select name="net">' + opts(PCAT_NETS, i.net || '') + '</select>' +
       note('isolated by default; NAT gives the guest outbound through QEMU ' +
            'with no host bridge') + '</div>' +
     '<div class="row"><label>Machine type</label>' +
@@ -94,10 +96,10 @@ function pcatEditForm(i, h) {
 // fell back to) rather than only what was asked for.
 function pcatHardware(i, h) {
   const spec = i.hardware || {};
-  const boot = (PCAT_BOOTS.find(([v]) => v === (i.boot || 'hdd')) ||
-                ['', i.boot || 'hdd'])[1];
-  const net = (PCAT_NETS.find(([v]) => v === (i.net || 'off')) ||
-               ['', i.net || 'off'])[1];
+  const boot = (PCAT_BOOTS.find(([v]) => v === (i.boot || 'hd')) ||
+                ['', i.boot || 'hd'])[1];
+  const net = (PCAT_NETS.find(([v]) => v === (i.net || '')) ||
+               ['', i.net || 'isolated'])[1];
   const rows = [
     ['&#9881; Machine', h.esc(spec.machine || 'PC/AT (i440FX)')],
     ['&#9636; CPU', h.esc(spec.cpu || 'Pentium III')],
@@ -122,12 +124,73 @@ function pcatHardware(i, h) {
   return { rows, bios: PCAT_BIOS, sound: PCAT_SOUND };
 }
 
+// ---- create wizard --------------------------------------------------------
+// The stock panes are PC-98 shaped: Disks lists the flat pc98 shelf, Network
+// offers a bridge, and Host's shared folder / serial / GP-IB mean nothing
+// here.  So Disks is drawn on the dosv shelf, Host/Memory/Network are dropped
+// (Memory comes from the defaults above), and the machine's own choices go on
+// an Options pane.
+function pcatWizardDisks(h) {
+  return '<div class="row"><label>Hard disk</label>' +
+      h.diskSelect('hdd1', 'hdd', '', null, 'dosv') +
+      h.note('a blank raw disk from Storage, or leave it empty and add one ' +
+             'in Edit') + '</div>' +
+    '<div class="row"><label>Floppy A</label>' +
+      h.diskSelect('fdd1', 'fdd', '', null, 'dosv') + '</div>' +
+    '<div class="row"><label>Floppy B</label>' +
+      h.diskSelect('fdd2', 'fdd', '', null, 'dosv') + '</div>' +
+    '<div class="row"><label>CD-ROM</label>' +
+      h.diskSelect('cd', 'cdrom', '', null, 'dosv') + '</div>' +
+    '<div class="note">Images live in Storage, on the shared dosv shelf. ' +
+    'The CD and floppies can be swapped live from the detail page later; ' +
+    'the hard disk needs the machine stopped.</div>';
+}
+
+function pcatWizardOptions(h) {
+  const opts = (list, cur) => list.map(([v, l]) =>
+    '<option value="' + v + '"' + ((cur || '') === v ? ' selected' : '') +
+    '>' + h.esc(l) + '</option>').join('');
+  return '<div class="row"><label>Video</label>' +
+      '<select name="vga">' + opts(PCAT_VGAS, 'std') + '</select>' +
+      h.note('std for the SoftGPU driver; Cirrus for the stock one') +
+      '</div>' +
+    '<div class="row"><label>Boot from</label>' +
+      '<select name="boot">' + opts(PCAT_BOOTS, 'hd') + '</select></div>' +
+    '<div class="row"><label>Network</label>' +
+      '<select name="net">' + opts(PCAT_NETS, '') + '</select>' +
+      h.note('isolated by default; NAT gives outbound through QEMU') +
+      '</div>' +
+    '<div class="row"><label>Execution</label>' +
+      '<label class="check"><input type="checkbox" name="kvm" checked> ' +
+      'run on the host CPU (KVM), fall back to translation</label></div>' +
+    '<div class="row"><label>Snapshot</label>' +
+      '<label class="check"><input type="checkbox" name="snapshot"> ' +
+      'discard changes</label></div>';
+}
+
+function pcatWizardConfirm(v, h) {
+  const pick = (list, cur, dflt) =>
+    (list.find(([x]) => x === (cur || dflt)) || ['', cur || dflt])[1];
+  const rows = [
+    ['Name', h.esc(v.name || '(unnamed)')],
+    ['Machine type', 'DOS/V PC (KVM, std VGA)'],
+    ['Video', pick(PCAT_VGAS, v.vga, 'std')],
+    ['Acceleration', v.kvm ? 'KVM' : 'TCG'],
+    ['Boot from', pick(PCAT_BOOTS, v.boot, 'hd')],
+    ['Network', pick(PCAT_NETS, v.net, '') || 'Isolated']];
+  for (const [k, label] of [['hdd1', 'Hard disk'], ['fdd1', 'Floppy A'],
+                            ['fdd2', 'Floppy B'], ['cd', 'CD-ROM']])
+    if (v[k]) rows.push([label, h.esc(v[k])]);
+  rows.push(['Snapshot', v.snapshot ? 'yes' : 'no']);
+  return rows;
+}
+
 window.registerMachinePlugin({
   machines: ['pcat'],
   // its disks live on the shared dosv shelf, beside box86's
   platform: 'dosv',
   defaults: {
-    pcat: { memory: '256M', vga: 'std', boot: 'hdd', net: 'off',
+    pcat: { memory: '256M', vga: 'std', boot: 'hd', net: '',
             accel: 'kvm', sound: 'none', bios: 'real',
             lockSound: true, lockBios: true }
   },
@@ -139,8 +202,13 @@ window.registerMachinePlugin({
   // floppy layouts and the CD come from box86's own registration on the
   // same shelf, so they are not repeated here.
   diskFormats: {
-    hdd: [{ value: 'pcat-raw', label: 'PC/AT hard disk (blank .img, raw)',
-            note: 'a sparse raw image; attach as the hard disk and let ' +
-                  'Win98 FDISK/FORMAT partition it, as on a real machine' }]
-  }
+    hdd: [{ value: 'pcat-raw', label: 'PC/AT hard disk (blank, raw)',
+            note: 'a sparse raw image of the size you give (in MB); name it ' +
+                  '.img so it is read as a raw disk, then let Win98 ' +
+                  'FDISK/FORMAT partition it, as on a real machine' }]
+  },
+  wizard: { pcat: { panes: { Disks: pcatWizardDisks, Host: null,
+                             Memory: null, Network: null,
+                             Options: pcatWizardOptions },
+                    confirm: pcatWizardConfirm } }
 });

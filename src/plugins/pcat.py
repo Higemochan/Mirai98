@@ -24,28 +24,33 @@ PCAT_CPU_LABEL = "Pentium III (pentium3, +SSE/SSE2/SSE3)"
 PCAT_SOUND_LABEL = "Sound Blaster 16 (ISA)"
 PCAT_VGA_LABELS = {"std": "Bochs VBE (std)", "cirrus": "Cirrus CLGD5446"}
 
-_BOOT_LETTER = {"hdd": "c", "fdd": "a", "cd": "d"}
+# boot values are "hd"/"fd"/"cd" -- a subset of FM TOWNS' own "boot" field,
+# so its validator accepts them and this machine reuses that field rather
+# than registering a colliding one.  QEMU's own -boot letters: a=floppy,
+# c=first hard disk, d=CD-ROM.
+_BOOT_LETTER = {"hd": "c", "fd": "a", "cd": "d"}
 
 
 def register(api):
     api.add_machine("pcat", platform="dosv")
     api.machine_argv("pcat", lambda inst: pcat_argv(api, inst))
     api.machine_shown("pcat", lambda inst: pcat_hardware(api, inst))
-    # the machine-specific choices, so the record keeps them; unknown
-    # values are turned back rather than silently kept
+    # "vga" is this machine's own field, registered so the record keeps it.
+    # "boot" is not registered here: it is already a plugin field (FM TOWNS'),
+    # and the values used here are a subset it accepts, so registering a
+    # second validator would only risk clobbering the other one by load
+    # order.  "net" is a core field (empty/nat/bridge, validated in the core
+    # sanitize); a validator of our own would run against every machine, not
+    # just this one, so it is left alone -- this machine uses "" (isolated)
+    # or "nat".
     api.add_field("vga", lambda v: None if v in ("", "std", "cirrus")
                   else "unknown video card")
-    api.add_field("boot", lambda v: None if v in ("", "hdd", "fdd", "cd")
-                  else "unknown boot device")
-    api.add_field("net", lambda v: None if v in ("", "off", "nat")
-                  else "unknown network mode")
     # a plain raw hard disk of this machine's own; box86's VHD is for
     # 86Box, and the one dosv shelf holds both, told apart by format
     api.disk_builder("dosv", "hdd", "pcat-raw", pcat_new_hard_disk)
 
 
 def pcat_argv(api, inst):
-    os = api.os
     cfg = api.CONFIG
     # ports_of hands back a fourth port (box86's own audio websocket);
     # a QEMU machine carries its audio on the VNC stream, so it is dropped
@@ -58,7 +63,7 @@ def pcat_argv(api, inst):
     host = "127.0.0.1" if api.LOOPBACK else "0.0.0.0"
     pcbios = cfg.get("pc_bios") or PCAT_PC_BIOS
     vga = inst.get("vga") or "std"
-    boot = _BOOT_LETTER.get(inst.get("boot") or "hdd", "c")
+    boot = _BOOT_LETTER.get(inst.get("boot") or "hd", "c")
     argv = [
         cfg["qemu"],
         # the standard-PC BIOS and vgabios first, then the fork's own data
@@ -116,19 +121,30 @@ def pcat_argv(api, inst):
     return argv
 
 
-def pcat_hardware(api, inst):
-    """The read-only hardware card's facts, put on the record as its own
-    `hardware` field.  A QEMU machine keeps no config file -- the record
-    and the argv are the configuration -- so the board, CPU, video and
-    memory come straight from the instance's fields and the fixed machine.
+# the effective accelerator, cached per running instance.  The listing asks
+# for the hardware card several times a minute, and query-kvm over QMP (a 3 s
+# timeout) is too much to pay each time; it does not change within a run, so
+# it is asked once and kept, and the entry is dropped when the instance is
+# not running so the next start asks again.
+_ACCEL_CACHE = {}
 
-    The one thing worth asking the running machine is which accelerator it
-    actually got: `accel=kvm:tcg` falls back to translation when KVM is
-    unavailable, and the card should say what is really running rather than
-    what was asked for.
+
+def pcat_hardware(api, inst):
+    """The read-only hardware card's facts, wrapped as the record's own
+    `hardware` field.  The wrap matters: shown() merges the plugin's answer
+    into the record, so a bare {"machine": ...} would overwrite the record's
+    real machine name and break every lookup by it (box86.py wraps it the
+    same way).
+
+    A QEMU machine keeps no config file -- the record and the argv are the
+    configuration -- so board/CPU/video/memory come from the instance's own
+    fields and the fixed machine.  The one thing worth asking the running
+    machine is which accelerator it actually got: `accel=kvm:tcg` falls back
+    to translation when KVM is unavailable, and the card should say what is
+    really running rather than what was asked for.
     """
     vga = inst.get("vga") or "std"
-    out = {
+    hw = {
         "machine": PCAT_MACHINE_LABEL,
         "cpu": PCAT_CPU_LABEL,
         "video": PCAT_VGA_LABELS.get(vga, vga),
@@ -136,47 +152,40 @@ def pcat_hardware(api, inst):
         "sound": PCAT_SOUND_LABEL,
     }
     requested = "KVM" if inst.get("accel", "kvm") == "kvm" else "TCG"
-    accel = None
+    name = inst.get("name")
     if api.is_running(inst):
-        reply = api.qmp(inst, "query-kvm")
-        if reply and isinstance(reply.get("return"), dict):
-            enabled = reply["return"].get("enabled")
-            if enabled is True:
-                accel = "KVM (host CPU)"
-            elif enabled is False:
-                # asked for KVM, running translated -- the fallback fired
-                accel = "TCG (translated%s)" % (
-                    ", KVM unavailable" if requested == "KVM" else "")
+        accel = _ACCEL_CACHE.get(name)
         if accel is None:
-            accel = requested + " (running)"
+            reply = api.qmp(inst, "query-kvm")
+            if reply and isinstance(reply.get("return"), dict):
+                enabled = reply["return"].get("enabled")
+                if enabled is True:
+                    accel = "KVM (host CPU)"
+                elif enabled is False:
+                    # asked for KVM, running translated: the fallback fired
+                    accel = "TCG (translated%s)" % (
+                        ", KVM unavailable" if requested == "KVM" else "")
+            if accel is not None:
+                # only a definite query-kvm answer is cached; a transient
+                # failure shows the request and is asked again next time
+                _ACCEL_CACHE[name] = accel
+            else:
+                accel = requested + " (running)"
     else:
+        _ACCEL_CACHE.pop(name, None)
         accel = requested
-    out["accel"] = accel
-    return out
-
-
-def _parse_size(text):
-    """Bytes from a size like "2G" / "512M"; 2 GB when it cannot be read."""
-    text = str(text).strip().upper()
-    mult = 1
-    if text.endswith("G"):
-        mult, text = 1 << 30, text[:-1]
-    elif text.endswith("M"):
-        mult, text = 1 << 20, text[:-1]
-    elif text.endswith("K"):
-        mult, text = 1 << 10, text[:-1]
-    try:
-        return int(float(text) * mult)
-    except ValueError:
-        return 2 << 30
+    hw["accel"] = accel
+    return {"hardware": hw}
 
 
 def pcat_new_hard_disk(dest, data):
-    """A blank hard disk for the PC/AT machine: a sparse raw image, sized
-    from the create form (2 GB by default).  Win98's own FDISK/FORMAT
-    partitions and formats it, as on a real machine.  Kept raw (not qcow2)
-    so no qemu-img is needed to make one; drive_backing reads it as raw.
+    """A blank hard disk for the PC/AT machine: a sparse raw image, sized in
+    megabytes from the create form the same way every other shelf builder
+    reads it (the shelf's own default of 40 is small -- a Win98 install
+    wants a few hundred).  Win98 FDISK/FORMAT partitions and formats it, as
+    on a real machine.  Kept raw so no qemu-img is needed; drive_backing
+    reads any non-qcow2 file as raw.
     """
-    size = _parse_size(data.get("size") or "2G")
+    megabytes = int(data.get("size") or 40)
     with open(dest, "wb") as f:
-        f.truncate(size)
+        f.truncate(megabytes << 20)
