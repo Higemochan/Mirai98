@@ -1852,7 +1852,7 @@ window.connectConsole = async (name, ws, attempt) => {
   // number that follows rather than one the teardown would invalidate
   const myGen = ++consoleGen;
   window.toggleConsolePane(true);      // a hidden box has no size to scale to
-  const target = document.getElementById('console-box');
+  let target = document.getElementById('console-box');
   target.innerHTML = '';
   try {
     await loadRFB();
@@ -1887,6 +1887,22 @@ window.connectConsole = async (name, ws, attempt) => {
   // own, so building an RFB now would leave two connections live with
   // only the later one remembered.
   if (consoleGen !== myGen) return;
+  // The page this began on can be replaced while the awaits above run --
+  // the detail view redraws itself on every status poll, which at startup
+  // is exactly when a console is being opened. `target` is then a node
+  // that is no longer in the document, and connecting to it produces the
+  // state that looks like a half-open console: a canvas drawing where
+  // nobody can see it, a pane rebuilt closed, and the buttons below --
+  // looked up by id, after all the waiting -- landing on the page in
+  // front of the person and announcing a connection it cannot show.
+  // Attach to the box that is actually there now instead.
+  if (!target.isConnected) {
+    const fresh = document.getElementById('console-box');
+    if (!fresh) return;                  // the view has moved on entirely
+    window.toggleConsolePane(true);      // the redraw built it closed
+    fresh.innerHTML = '';
+    target = fresh;
+  }
   rfb = new RFB(target, 'ws://' + location.hostname + ':' + ws + '/');
   rfb.scaleViewport = true;
   rfb.background = '#000';
