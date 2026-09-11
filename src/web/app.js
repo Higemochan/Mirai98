@@ -1737,7 +1737,7 @@ function capturePointer(rfb, target, absolute) {
   // pointer invisible after Esc.  Ask noVNC for a dot cursor instead.
   rfb.showDotCursor = true;
   let locked = false, mask = 0, accX = 0, accY = 0, flush = false;
-  let seeded = false;
+  let firstLock = true;
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
     if (!rfb || rfb._rfbConnectionState !== 'connected') return;
@@ -1786,7 +1786,28 @@ function capturePointer(rfb, target, absolute) {
   const onDown = (ev) => {
     if (!locked) {
       if (target.contains(ev.target)) {
-        if (absolute && !seeded) { seedFrom(ev); seeded = true; }
+        if (absolute && firstLock) {
+          seedFrom(ev);
+          // 86Box takes its own capture on a button release it can see,
+          // and it throws motion away until it has one. The click that
+          // asks for the pointer lock cannot also be that release: it is
+          // swallowed here, because sending it is not what it is for.
+          // So the first click did nothing at all, and the second one --
+          // arriving with the lock already held, and therefore sent --
+          // was what started the mouse working. Give the emulator a
+          // press and release of our own instead, at the position just
+          // seeded. Neither reaches the guest: uncaptured, 86Box
+          // forwards a press only when mouse_capture is set, and takes
+          // the release for the capture and returns
+          // (qt_rendererstack.cpp mousePressEvent/mouseReleaseEvent).
+          //
+          // Only the first time on this connection. Later locks find it
+          // captured already, and a click then is a real one in the
+          // guest.
+          send(0, 0, 1);
+          send(0, 0, 0);
+          firstLock = false;
+        }
         const c = canvas();
         if (c) c.requestPointerLock();
       }
