@@ -2998,7 +2998,7 @@ window.pickZip = (kind, name) => {
 
 // pc98/towns/dosv label the same way a machine type does, since each is
 // exactly one plugin's own platform (or none, for pc98 itself)
-const PLATFORM_LABELS = { pc98: 'PC-98', dosv: 'DOS/V' };
+const PLATFORM_LABELS = { pc98: 'PC-98', dosv: 'DOS/V', towns: 'FM TOWNS' };
 const platformLabel = (p) => PLATFORM_LABELS[p] ||
   Object.entries(window.MiraiPlugins.platform || {})
     .filter(([, v]) => v === p).map(([m]) => machineLabel(m))[0] || p;
