@@ -1737,6 +1737,7 @@ function capturePointer(rfb, target, absolute) {
   // pointer invisible after Esc.  Ask noVNC for a dot cursor instead.
   rfb.showDotCursor = true;
   let locked = false, mask = 0, accX = 0, accY = 0, flush = false;
+  let seeded = false;
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
     if (!rfb || rfb._rfbConnectionState !== 'connected') return;
@@ -1751,9 +1752,23 @@ function capturePointer(rfb, target, absolute) {
     py = Math.min(g.h - 1, Math.max(0, py + dy * f.y));
     RFB.messages.pointerEvent(rfb._sock, Math.round(px), Math.round(py), m);
   };
-  // Take the position the pointer was actually at when it was clicked,
-  // so taking the capture does not teleport the guest cursor somewhere
-  // else first.
+  // Where the pointer was when it was clicked, as a starting point for
+  // the position this end keeps. Once per connection, and the once
+  // matters: these guests are driven by a relative mouse, whose cursor
+  // cannot be put anywhere -- it can only be pushed. This end's position
+  // is sent as an absolute coordinate, the VNC server warps the X pointer
+  // there, and 86Box hands the guest the distance that warp covered. So
+  // moving this position to wherever the pointer was clicked does not
+  // avoid teleporting the guest cursor: it is how the guest cursor gets
+  // teleported, by a single step as long as the gap between where the
+  // pointer left the canvas and where it came back.
+  //
+  // That step is also the one place the guest's own pointer acceleration
+  // has something big enough to act on, and what it overshoots by is lost
+  // against the edge of the guest's screen -- after which the far edge is
+  // short by that much, for good. Leaving the position alone across a
+  // re-capture asks the guest for no movement at all, which is the truth:
+  // its cursor did not move while nothing was being sent to it.
   const seedFrom = (ev) => {
     const g = geom();
     if (!g.r || !g.r.width || !g.r.height) return;
@@ -1771,7 +1786,7 @@ function capturePointer(rfb, target, absolute) {
   const onDown = (ev) => {
     if (!locked) {
       if (target.contains(ev.target)) {
-        if (absolute) seedFrom(ev);
+        if (absolute && !seeded) { seedFrom(ev); seeded = true; }
         const c = canvas();
         if (c) c.requestPointerLock();
       }
