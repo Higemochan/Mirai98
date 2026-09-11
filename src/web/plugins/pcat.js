@@ -108,6 +108,7 @@ function pcatHardware(i, h) {
     ['&#9635; Video', h.esc(spec.video || i.vga || 'std')],
     ['&#9737; Memory', h.esc(spec.memory || i.memory || '')],
     ['&#9834; Sound', h.esc(spec.sound || 'Sound Blaster 16')],
+    ['&#9750; BIOS', h.esc(spec.bios || PCAT_BIOS)],
     ['&#9707; Hard disk', i.hdd1 ? h.esc(i.hdd1) : '(empty)']];
   if (i.hdd2) rows.push(['&#9707; Hard disk 2', h.esc(i.hdd2)]);
   rows.push(['&#9707; CD-ROM', i.cd ? h.esc(i.cd) +
@@ -121,7 +122,7 @@ function pcatHardware(i, h) {
   if (i.snapshot)
     rows.push(['&#8635; Snapshot', 'changes discarded on shutdown']);
   if (i.extra) rows.push(['&#9656; Extra args', h.esc(i.extra)]);
-  return { rows, bios: PCAT_BIOS, sound: PCAT_SOUND };
+  return { rows, bios: spec.bios || PCAT_BIOS, sound: PCAT_SOUND };
 }
 
 // ---- create wizard --------------------------------------------------------

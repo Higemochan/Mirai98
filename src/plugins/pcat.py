@@ -68,6 +68,19 @@ def pcat_sanitize(record):
     return None
 
 
+def _nopnp_bios(api):
+    """The no-PnP SeaBIOS beside the data dir, or None when it is not there.
+
+    SoftGPU's install notes: Windows 98 mistakes QEMU's PCI bus for a PnP
+    BIOS and a fresh install then wedges; a SeaBIOS built with
+    CONFIG_PNPBIOS=n avoids it.  The stock bios-256k.bin has PnP on, so when
+    this file is present it is used in its place with -bios, and when it is
+    not, nothing changes and the stock BIOS is used.
+    """
+    path = api.os.path.join(api.CONFIG["datadir"], "pc-bios", "bios-nopnp.bin")
+    return path if api.os.path.exists(path) else None
+
+
 def pcat_argv(api, inst):
     cfg = api.CONFIG
     # ports_of hands back a fourth port (box86's own audio websocket);
@@ -82,11 +95,16 @@ def pcat_argv(api, inst):
     pcbios = cfg.get("pc_bios") or PCAT_PC_BIOS
     vga = inst.get("vga") or "std"
     boot = _BOOT_LETTER.get(inst.get("boot") or "hd", "c")
-    argv = [
-        cfg["qemu"],
-        # the standard-PC BIOS and vgabios first, then the fork's own data
-        "-L", api.win_short(pcbios),
-        "-L", api.win_short(cfg["datadir"]),
+    argv = [cfg["qemu"],
+            # the standard-PC BIOS and vgabios first, then the fork's own data
+            "-L", api.win_short(pcbios),
+            "-L", api.win_short(cfg["datadir"])]
+    nopnp = _nopnp_bios(api)
+    if nopnp:
+        # a SeaBIOS with PnP off, so Win98 does not read the PCI bus as a
+        # PnP BIOS and wedge a fresh install -- only when the file is there
+        argv += ["-bios", api.win_short(nopnp)]
+    argv += [
         # ACPI off for now: this Win98 SE goes through APM, and the ACPI
         # path is still being brought up on the isolated bench
         "-M", "pc-i440fx-9.2,acpi=off,accel=%s" % accel,
@@ -168,6 +186,10 @@ def pcat_hardware(api, inst):
         "video": PCAT_VGA_LABELS.get(vga, vga),
         "memory": inst.get("memory") or "256M",
         "sound": PCAT_SOUND_LABEL,
+        # which SeaBIOS the next start will use: the PnP-off one when it is
+        # on the shelf, the stock (PnP-on) one otherwise
+        "bios": ("SeaBIOS (PnP disabled)" if _nopnp_bios(api)
+                 else "SeaBIOS (default)"),
     }
     requested = "KVM" if inst.get("accel", "kvm") == "kvm" else "TCG"
     # keyed on the requested accelerator too, so a stop -> edit (kvm<->tcg)
