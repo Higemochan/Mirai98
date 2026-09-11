@@ -45,6 +45,12 @@ def register(api):
     # or "nat".
     api.add_field("vga", lambda v: None if v in ("", "std", "cirrus")
                   else "unknown video card")
+    # "acpi" (""/on/off) is this machine's own field.  On by default:
+    # qemu-3dfx's guest wrapper needs the PIIX4 PM timer (see pcat_argv).
+    # Accepting "" keeps the global-by-name validator harmless for other
+    # machines, which never carry this field.
+    api.add_field("acpi", lambda v: None if v in ("", "on", "off")
+                  else "acpi must be on or off")
     # this machine always has SB16 sound and the QEMU BIOS; the stock
     # Sound/BIOS choices the wizard cannot replace are pinned here rather
     # than stored and ignored, and the PC-98/host-only fields are cleared
@@ -95,6 +101,13 @@ def pcat_argv(api, inst):
     pcbios = cfg.get("pc_bios") or PCAT_PC_BIOS
     vga = inst.get("vga") or "std"
     boot = _BOOT_LETTER.get(inst.get("boot") or "hd", "c")
+    # ACPI on by default: qemu-3dfx's guest wrapper (qmfxgl32.dll) reads
+    # the ACPI PM timer (I/O port 0x608) as its time source, and with no
+    # PIIX4 PM that port reads 0xFFFFFFFF forever -- the guest's
+    # QueryPerformanceCounter then freezes (FPS 0, animation and apps
+    # stall; testqmfx's triangle stops).  "off" is offered for the APM
+    # path the Win98 SE image was installed on.
+    acpi = "off" if (inst.get("acpi") or "on") == "off" else "on"
     argv = [cfg["qemu"],
             # the standard-PC BIOS and vgabios first, then the fork's own data
             "-L", api.win_short(pcbios),
@@ -105,9 +118,7 @@ def pcat_argv(api, inst):
         # PnP BIOS and wedge a fresh install -- only when the file is there
         argv += ["-bios", api.win_short(nopnp)]
     argv += [
-        # ACPI off for now: this Win98 SE goes through APM, and the ACPI
-        # path is still being brought up on the isolated bench
-        "-M", "pc-i440fx-9.2,acpi=off,accel=%s" % accel,
+        "-M", "pc-i440fx-9.2,acpi=%s,accel=%s" % (acpi, accel),
         "-cpu", "pentium3,+sse2,+sse3,+ssse3",
         "-m", inst.get("memory") or "256M",
         # the calendar clock follows the host's local time, so the guest
@@ -203,6 +214,8 @@ def pcat_hardware(api, inst):
         # on the shelf, the stock (PnP-on) one otherwise
         "bios": ("SeaBIOS (PnP disabled)" if _nopnp_bios(api)
                  else "SeaBIOS (default)"),
+        "acpi": ("ACPI enabled" if (inst.get("acpi") or "on") != "off"
+                 else "ACPI disabled (APM)"),
     }
     requested = "KVM" if inst.get("accel", "kvm") == "kvm" else "TCG"
     # keyed on the requested accelerator too, so a stop -> edit (kvm<->tcg)

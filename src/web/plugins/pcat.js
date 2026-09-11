@@ -8,6 +8,8 @@
 // create/edit form, the read-only hardware card, and one hard-disk format.
 
 const PCAT_MEMS = ['64M', '128M', '256M', '512M'];
+const PCAT_ACPIS = [['on', 'ACPI enabled (PIIX4 PM -- qemu-3dfx timer)'],
+                    ['off', 'ACPI disabled (APM)']];
 const PCAT_VGAS = [['std', 'std (Bochs VBE) -- SoftGPU'],
                    ['cirrus', 'Cirrus -- stock Win98 driver']];
 // boot values match FM TOWNS' shared "boot" field (hd/fd/cd); net is a core
@@ -56,6 +58,11 @@ function pcatEditForm(i, h) {
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + opts(PCAT_BOOTS, i.boot || 'hd') +
       '</select></div>' +
+    '<div class="row"><label>ACPI</label>' +
+      '<select name="acpi">' + opts(PCAT_ACPIS, i.acpi || 'on') +
+      '</select>' +
+      note('on gives a PIIX4 PM timer (qemu-3dfx needs it); off is the ' +
+           'APM path the SE image was installed on') + '</div>' +
     '<div class="row"><label>Network</label>' +
       '<select name="net">' + opts(PCAT_NETS, i.net || '') + '</select>' +
       note('isolated by default; NAT gives the guest outbound through QEMU ' +
@@ -105,6 +112,9 @@ function pcatHardware(i, h) {
     ['&#9636; CPU', h.esc(spec.cpu || 'Pentium III')],
     ['&#9889; Acceleration',
      h.esc(spec.accel || (i.accel === 'kvm' ? 'KVM' : 'TCG'))],
+    ['&#9203; ACPI',
+     h.esc(spec.acpi || ((i.acpi || 'on') !== 'off' ? 'ACPI enabled'
+                         : 'ACPI disabled (APM)'))],
     ['&#9635; Video', h.esc(spec.video || i.vga || 'std')],
     ['&#9737; Memory', h.esc(spec.memory || i.memory || '')],
     ['&#9834; Sound', h.esc(spec.sound || 'Sound Blaster 16')],
@@ -157,6 +167,10 @@ function pcatWizardOptions(h) {
       '</div>' +
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + opts(PCAT_BOOTS, 'hd') + '</select></div>' +
+    '<div class="row"><label>ACPI</label>' +
+      '<select name="acpi">' + opts(PCAT_ACPIS, 'on') + '</select>' +
+      h.note('on for qemu-3dfx (PIIX4 PM timer); off for the APM path') +
+      '</div>' +
     '<div class="row"><label>Network</label>' +
       '<select name="net">' + opts(PCAT_NETS, '') + '</select>' +
       h.note('isolated by default; NAT gives outbound through QEMU') +
@@ -187,6 +201,7 @@ function pcatWizardConfirm(v, h) {
     ['Video', pick(PCAT_VGAS, v.vga, 'std')],
     // wizardValues turns the kvm checkbox into accel and drops kvm
     ['Acceleration', v.accel === 'kvm' ? 'KVM' : 'TCG'],
+    ['ACPI', (v.acpi || 'on') !== 'off' ? 'Enabled' : 'Disabled (APM)'],
     ['Boot from', pick(PCAT_BOOTS, v.boot, 'hd')],
     ['Network', pick(PCAT_NETS, v.net, '') || 'Isolated']];
   for (const [k, label] of [['hdd1', 'Hard disk'], ['fdd1', 'Floppy A'],
@@ -201,7 +216,7 @@ window.registerMachinePlugin({
   // its disks live on the shared dosv shelf, beside box86's
   platform: 'dosv',
   defaults: {
-    pcat: { memory: '256M', vga: 'std', boot: 'hd', net: '',
+    pcat: { memory: '256M', vga: 'std', boot: 'hd', net: '', acpi: 'on',
             accel: 'kvm', sound: 'none', bios: 'real',
             lockSound: true, lockBios: true }
   },
