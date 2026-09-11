@@ -4440,7 +4440,13 @@ class Handler(BaseHTTPRequestHandler):
             if drive is None:
                 self.fail(404, "no drive called %s" % device)
                 return
-            path_ = disk_find(drive["kind"], name) if name else ""
+            # resolve against the machine's own shelf, not whichever
+            # one the request happens to browse: a dosv (box86/pcat)
+            # or towns image lives on its own platform's shelf, and
+            # disk_find defaults to pc98's flat shelf without this,
+            # so the drive the UI let you pick 404s on the way in.
+            with use_platform(platform_of(inst)):
+                path_ = disk_find(drive["kind"], name) if name else ""
             if name and not os.path.isfile(path_):
                 self.fail(404, "no %s image called %s"
                           % (drive["kind"], name))
