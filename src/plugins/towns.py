@@ -365,6 +365,11 @@ def towns_argv(api, inst):
         if inst.get(key):
             argv += ["-drive", "if=scsi,bus=0,unit=%d,%s" % (
                 unit, api.drive_backing(api.disk_path(inst, key)))]
+    # QEMU fits a default e1000 on a slirp user net when given no
+    # -nic/-netdev; this machine has no network of its own (net is
+    # cleared in towns_sanitize), so it is turned off rather than left
+    # to sprout a NIC that can reach the host.
+    argv += ["-nic", "none"]
     if inst.get("extra"):
         argv += inst["extra"].split()
     return argv

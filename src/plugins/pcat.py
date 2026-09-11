@@ -160,6 +160,11 @@ def pcat_argv(api, inst):
         # nothing is asked of the host, so this needs no bridge
         argv += ["-netdev", "user,id=lan",
                  "-device", "rtl8139,netdev=lan"]
+    else:
+        # Given no -nic/-netdev, QEMU fits a DEFAULT e1000 on a slirp user
+        # net (restrict=off -- it can reach the host's network), so an
+        # instance meant to be isolated would not be. Say so explicitly.
+        argv += ["-nic", "none"]
     if inst.get("extra"):
         argv += inst["extra"].split()
     return argv
