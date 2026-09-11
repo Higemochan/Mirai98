@@ -116,7 +116,15 @@ def pcat_argv(api, inst):
         # No -k: this guest was installed with a 101 (US) keyboard, so
         # QEMU's default en-us VNC keymap matches it.  PC-98's own -k ja is
         # for its JIS keyboard and would put the wrong characters here.
-        "-vga", vga,
+        #
+        # retrace=precise, not QEMU's default retrace=dumb: the last stage of
+        # the Japanese Win98 SE setup runs a V86 resident (CS=05c7) that
+        # polls the VGA input-status port 0x3DA until it reads the same value
+        # twice in a row.  retrace=dumb flips ST01 on every read, so that
+        # never happens and setup hangs (black screen, one core pinned, no
+        # I/O); retrace=precise returns a value derived from timing, which
+        # settles, so the poll ends.  The fork's -vga accepts the suffix.
+        "-vga", vga + ",retrace=precise",
         "-display", "none",
         # SB16 plays into a null backend; the VNC server captures that mix
         # (audiodev=snd on -vnc) and streams it to the browser, the same
@@ -183,7 +191,7 @@ def pcat_hardware(api, inst):
     hw = {
         "machine": PCAT_MACHINE_LABEL,
         "cpu": PCAT_CPU_LABEL,
-        "video": PCAT_VGA_LABELS.get(vga, vga),
+        "video": PCAT_VGA_LABELS.get(vga, vga) + " (retrace=precise)",
         "memory": inst.get("memory") or "256M",
         "sound": PCAT_SOUND_LABEL,
         # which SeaBIOS the next start will use: the PnP-off one when it is
