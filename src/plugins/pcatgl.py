@@ -61,6 +61,11 @@ PCATGL_VGA_LABELS = {"std": "std (Bochs VBE)", "cirrus": "Cirrus Logic"}
 # PnP BIOS and wedges a fresh install without it.
 PCATGL_PC_BIOS = "/opt/mirai98-src/qemu-pc98towns/pc-bios"
 
+# The SoundFont the MPU-401 (pc98-midi) synthesises through.  Overridable
+# from mirai98.json ("pcatgl_soundfont"); the device tolerates a missing
+# file, so this is not gated on existence.
+PCATGL_SOUNDFONT = "/opt/mirai98/soundfonts/kgs88-v1.97.sf2"
+
 _BOOT_LETTER = {"hd": "c", "fd": "a", "cd": "d"}
 
 # mesagl.cfg defaults.  FpsLimit is exposed as a field (0 == unlimited);
@@ -193,6 +198,19 @@ def _drive_args(api, inst):
     return argv
 
 
+def _midi_supported(qemu_bin):
+    """True if this binary has the pc98-midi device (MPU-401 + FluidSynth).
+    Only the CD/MIDI builds carry it; adding -device pc98-midi to one
+    without it (e.g. build-s) fails to start, so it is gated on this probe
+    (one cheap `-device pc98-midi,help` per start; no VM is launched)."""
+    try:
+        out = subprocess.run([qemu_bin, "-device", "pc98-midi,help"],
+                             capture_output=True, timeout=10)
+        return b"soundfont" in out.stdout + out.stderr
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _ide_has_audiodev(qemu_bin):
     """True if this binary's piix3-ide takes an audiodev property -- the
     fork's standard IDE that plays a CD's audio tracks (CD-DA) into an
@@ -254,6 +272,16 @@ def _qemu_argv(api, inst, ports, gl):
     # accept it (a binary without it fails to start).
     if _ide_has_audiodev(_qemu_bin(api)):
         argv += ["-global", "piix3-ide.audiodev=snd"]
+    # MPU-401 (pc98-midi) synthesised by FluidSynth, on the CD/MIDI builds.
+    # Its defaults are PC-98 values -- iobase 0xe0d0, irq 6 -- and irq 6 is
+    # the standard-PC floppy, so override to a free port and IRQ (SB16 is
+    # irq 5, and there is no NIC or other ISA IRQ user here).  No audiodev
+    # property on this device: its output rides the single pa audiodev, the
+    # same sink SB16 uses, so MIDI reaches the browser over #52's path.
+    # Gated: build-s has no pc98-midi and would refuse to start with it.
+    if _midi_supported(_qemu_bin(api)):
+        argv += ["-device", "pc98-midi,iobase=0x330,irq=9,soundfont=%s"
+                 % (api.CONFIG.get("pcatgl_soundfont") or PCATGL_SOUNDFONT)]
     if gl:
         # GL output to the X server; SDL is qemu-3dfx's GLX carrier
         argv += ["-display", "sdl"]
