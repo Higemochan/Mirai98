@@ -113,6 +113,9 @@ function pcatglHardware(i, h) {
         : (String(i.fpslimit) === '0' ? 'unlimited' : '60 FPS')))],
     ['&#128421; Display', h.esc(spec.display ||
       '3dfx GL via weston + Xwayland + x11vnc')],
+    // shown only while running in GL mode: the wrapper writes the marker
+    // when the guest first makes a GL context, so "not yet" before any 3D
+    ...(spec.cfg ? [['&#9881; mesagl.cfg', h.esc(spec.cfg)]] : []),
     ['&#9737; Memory', h.esc(spec.memory || i.memory || '')],
     ['&#9834; Sound', h.esc(spec.sound || 'Sound Blaster 16')],
     ['&#9750; BIOS', h.esc(spec.bios || PCATGL_BIOS)],

@@ -441,10 +441,12 @@ def _start_display_stack(api, inst, d, ports, pids, log):
 
 
 def _cfg_confirmed(log_path):
-    """True if the qemu-3dfx log shows the mesagl.cfg took -- either the
-    FpsLimit line or ReadbackPresent being enabled.  The cfg is read from
-    the cwd, and a cfg in the wrong directory silently does nothing, so
-    this is checked rather than assumed."""
+    """True if this generation's qemu-3dfx log shows the mesagl.cfg took --
+    the FpsLimit line or ReadbackPresent being enabled, both written when
+    the guest creates its first GL context.  The log is rotated at start
+    (on_start), so the file read here holds only the current run; a cfg in
+    the wrong directory silently does nothing, so this is checked rather
+    than assumed."""
     try:
         with open(log_path, "rb") as f:
             data = f.read()
@@ -466,6 +468,14 @@ def on_start(api, inst):
         pass
 
     log_path = os.path.join(d, "pcatgl.log")
+    # keep one generation back: this generation's log then stands alone, so
+    # the cfg-applied marker read from it (pcatgl_hardware) belongs to this
+    # run and not a previous one, and the file cannot grow without bound.
+    try:
+        if os.path.exists(log_path):
+            os.replace(log_path, log_path + ".1")
+    except OSError:
+        pass
     log = open(log_path, "ab")
     log.write(("\n--- %s\n" % time.strftime("%F %T")).encode())
     log.flush()
@@ -534,20 +544,12 @@ def on_start(api, inst):
         result = "started (slow to come up)"
 
     _save_pids(d, pids)
-
-    if gl:
-        # cheap poll for the cfg-applied line; not fatal if unseen, but
-        # logged so a cwd/cfg mixup is caught rather than shipped silently
-        for _ in range(20):
-            if _cfg_confirmed(log_path):
-                break
-            time.sleep(0.25)
-        else:
-            log.write(b"[pcatgl] mesagl.cfg not confirmed in log "
-                      b"(no 'FpsLimit ['/'ReadbackPresent enabled') -- "
-                      b"cfg may not have been read from the cwd\n")
-            log.flush()
-
+    # The mesagl.cfg-applied marker (FpsLimit [ N FPS ] / ReadbackPresent
+    # enabled) is not written until the guest loads the wrapper DLL and
+    # creates a GL context -- long after this returns and after Win98 has
+    # booted -- so it is pointless to poll for it here.  pcatgl_hardware
+    # reads this generation's log lazily and reports "applied" or "not yet
+    # (3D unused)" once it appears.
     log.close()
     return result
 
@@ -690,7 +692,8 @@ def pcatgl_hardware(api, inst):
         "fpslimit": ("unlimited" if str(fps) == "0" else "%s FPS" % fps),
     }
     fb = _fallback_marker(d)
-    if api.is_running(inst) and os.path.exists(fb):
+    running = api.is_running(inst)
+    if running and os.path.exists(fb):
         try:
             with open(fb, encoding="utf-8") as f:
                 reason = f.read().strip()
@@ -698,6 +701,13 @@ def pcatgl_hardware(api, inst):
             reason = ""
         hw["display"] = ("plain VGA over VNC -- GL unavailable"
                          + (": %s" % reason if reason else ""))
+        # no GL stack in the fallback, so there is no mesagl.cfg to apply
     else:
         hw["display"] = "3dfx GL via weston + Xwayland + x11vnc"
+        if running:
+            # the marker only appears once the guest has made a GL context,
+            # so before any 3D runs "not yet" is normal, not a fault
+            hw["cfg"] = ("mesagl.cfg applied"
+                         if _cfg_confirmed(os.path.join(d, "pcatgl.log"))
+                         else "mesagl.cfg not yet confirmed (3D not used yet)")
     return {"hardware": hw}
