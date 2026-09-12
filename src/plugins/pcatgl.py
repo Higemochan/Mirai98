@@ -193,6 +193,20 @@ def _drive_args(api, inst):
     return argv
 
 
+def _ide_has_audiodev(qemu_bin):
+    """True if this binary's piix3-ide takes an audiodev property -- the
+    fork's standard IDE that plays a CD's audio tracks (CD-DA) into an
+    audiodev.  Adding -global piix3-ide.audiodev to a binary without the
+    property fails to start, so it is gated on this probe (one cheap
+    `-device piix3-ide,help` per start; no VM is launched)."""
+    try:
+        out = subprocess.run([qemu_bin, "-device", "piix3-ide,help"],
+                             capture_output=True, timeout=10)
+        return b"audiodev" in out.stdout + out.stderr
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _qemu_argv(api, inst, ports, gl):
     """The qemu-3dfx command line.  gl=True routes output to the X server
     (SDL, no -vnc); gl=False is the fallback -- the same binary and disks,
@@ -227,6 +241,12 @@ def _qemu_argv(api, inst, ports, gl):
         # to 127.0.0.1 to match.
         "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port,
     ]
+    # the fork's standard IDE plays CD-DA into an audiodev; the PIIX3
+    # controller takes it as -global piix3-ide.audiodev, sharing the sb16
+    # audiodev id.  Gated: only builds whose piix3-ide has the property
+    # accept it (a binary without it fails to start).
+    if _ide_has_audiodev(_qemu_bin(api)):
+        argv += ["-global", "piix3-ide.audiodev=snd"]
     if gl:
         # GL output to the X server; SDL is qemu-3dfx's GLX carrier
         argv += ["-display", "sdl"]

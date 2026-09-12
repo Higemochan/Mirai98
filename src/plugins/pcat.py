@@ -11,6 +11,8 @@
 # engine of its own, so add_machine + machine_argv is the whole of it, plus
 # the read-only hardware card (machine_shown) and one blank-disk format.
 
+import subprocess
+
 # The BIOS this boots is the QEMU fork's own pc-bios (bios-256k.bin,
 # vgabios-*.bin); the fork does not put a standard-PC BIOS on its default
 # search path, so the builder names it.  Overridable from mirai98.json
@@ -29,6 +31,20 @@ PCAT_VGA_LABELS = {"std": "Bochs VBE (std)", "cirrus": "Cirrus CLGD5446"}
 # than registering a colliding one.  QEMU's own -boot letters: a=floppy,
 # c=first hard disk, d=CD-ROM.
 _BOOT_LETTER = {"hd": "c", "fd": "a", "cd": "d"}
+
+
+def _ide_has_audiodev(qemu_bin):
+    """True if this binary's piix3-ide takes an audiodev property -- the
+    fork's standard IDE that plays a CD's audio tracks (CD-DA) into an
+    audiodev.  Adding -global piix3-ide.audiodev to a binary without the
+    property fails to start, so it is gated on this probe (one cheap
+    `-device piix3-ide,help` per start; no VM is launched)."""
+    try:
+        out = subprocess.run([qemu_bin, "-device", "piix3-ide,help"],
+                             capture_output=True, timeout=10)
+        return b"audiodev" in out.stdout + out.stderr
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def register(api):
@@ -146,6 +162,12 @@ def pcat_argv(api, inst):
         "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port,
         "-boot", "order=%s" % boot,
     ]
+    # the fork's standard IDE plays a CD's audio tracks (CD-DA) into an
+    # audiodev; the PIIX3 controller takes it as -global piix3-ide.audiodev,
+    # sharing the sb16 audiodev id.  Only some builds have the property, so
+    # it is added only when the running binary accepts it.
+    if _ide_has_audiodev(cfg["qemu"]):
+        argv += ["-global", "piix3-ide.audiodev=snd"]
     if inst.get("snapshot"):
         argv.append("-snapshot")
     # IDE: primary master/slave are the hard disks (index 0/1), the CD is
