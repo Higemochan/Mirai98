@@ -122,10 +122,11 @@ def pcatgl_sanitize(record):
 
 def _inst_dir(api, inst):
     """This instance's own directory -- the QEMU cwd, where mesagl.cfg and
-    the helper pid file and logs live.  Kept beside the instance's other
-    per-index state under the data dir."""
-    d = api.os.path.join(api.CONFIG["datadir"], "pcatgl",
-                         "vm-%d" % inst["index"])
+    the helper pid file and logs live.  Under the instance's own state
+    dir (api.inst_dir, /storage/.../vm/vm-N), beside box86's, NOT under
+    the deployment tree: a redeploy must not carry off or wipe a running
+    instance's cfg, pids and logs."""
+    d = api.os.path.join(api.inst_dir(inst), "pcatgl")
     api.os.makedirs(d, exist_ok=True)
     return d
 
@@ -323,12 +324,17 @@ def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
     tokens = (
         "%s " % _wl_socket(index),          # weston --socket=wl-pcatgl-N
         "Xwayland :%d " % display_num,      # the X server
-        "-display :%d " % display_num,      # x11vnc, and qemu's SDL
+        "-display :%d " % display_num,      # x11vnc's -display
         "-rfbport %d " % vnc,               # x11vnc
         "127.0.0.1:%d " % vnc,              # websockify -> x11vnc
-        "127.0.0.1:%d " % qmp_port,         # qemu QMP
+        # qemu's QMP arg is "tcp:127.0.0.1:<port>,server=on,..." -- the
+        # trailing comma, not a space, is what follows the port here, so
+        # the space-terminated form never matched and a leftover QEMU
+        # (still holding the disk) went unswept.
+        "tcp:127.0.0.1:%d," % qmp_port,     # qemu QMP
     )
     mine = os.getpid()
+    signaled = []
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -344,11 +350,13 @@ def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
             continue
         try:
             os.killpg(pid, 15)
+            signaled.append(pid)
             log.write(("[pcatgl] swept orphan pid %d: %s\n"
                        % (pid, cmd[:200])).encode())
             log.flush()
         except OSError:
             pass
+    return signaled
 
 
 def _kill_pids(pids):
@@ -376,6 +384,36 @@ def _kill_pids(pids):
                 os.killpg(pid, 9)
             except OSError:
                 pass
+
+
+def _reap(pids, timeout=5):
+    """Wait for a set of already-TERMed pids to exit, then SIGKILL any that
+    are still standing -- used after the orphan sweep so a new generation
+    does not start on top of a previous one's dying processes."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not any(_alive(p) for p in pids):
+            return
+        time.sleep(0.2)
+    for p in pids:
+        if _alive(p):
+            try:
+                os.killpg(p, 9)
+            except OSError:
+                pass
+
+
+def _pid_runs_qemu(pid):
+    """True if pid is alive and its command line still names our QEMU.
+    pids.json survives a restart, so a recycled pid could otherwise read
+    as a running instance and refuse every start with 'already running'."""
+    if not _alive(pid):
+        return False
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return b"qemu" in f.read()
+    except OSError:
+        return True     # unreadable: do not claim it died
 
 
 # --- start -----------------------------------------------------------------
@@ -489,8 +527,13 @@ def on_start(api, inst):
         return proc
 
     # a previous generation still on this display/ports would make the new
-    # helpers attach to leftovers; clear them first (loud, in the log)
-    _sweep_orphans(d, index, display_num, vnc, qmp_port, log)
+    # helpers attach to leftovers; clear them first (loud, in the log) and
+    # wait for them to actually exit before spawning -- otherwise _wait_for
+    # below finds the old compositor/X sockets still present and the new
+    # x11vnc/QEMU attach to a dying server
+    swept = _sweep_orphans(d, index, display_num, vnc, qmp_port, log)
+    if swept:
+        _reap(swept)
 
     _write_mesagl_cfg(api, inst, d)
 
@@ -563,14 +606,20 @@ def _stop_now(api, inst):
     d = _inst_dir(api, inst)
     pids = _load_pids(d)
     qmp_port = api.ports_of(inst)[2]
-    # ask the guest to quit over QMP first, then escalate.  Win98 is APM,
-    # not ACPI, so system_powerdown may do nothing; a plain "quit" ends
-    # QEMU itself, which is what stop means here.
+    qemu = pids.get("qemu")
+    # ask QEMU to quit over QMP first; "quit" ends QEMU and flushes on its
+    # own, which is what stop means here (Win98 is APM, so a guest-side
+    # powerdown would do nothing).  Give it room to finish that flush
+    # before anything is forced -- a KILL mid write-back to a raw disk
+    # corrupts it -- then fall back to _kill_pids for the display stack
+    # (and for QEMU too, if QMP was unreachable).
     try:
         _qmp_command(qmp_port, "quit")
     except OSError:
         pass
-    time.sleep(0.5)
+    deadline = time.time() + 15
+    while qemu and _alive(qemu) and time.time() < deadline:
+        time.sleep(0.25)
     _kill_pids(pids)
     _save_pids(d, {})
 
@@ -606,7 +655,7 @@ def pcatgl_reset(api, inst):
 
 
 def is_up(api, inst):
-    return _alive(_load_pids(_inst_dir(api, inst)).get("qemu"))
+    return _pid_runs_qemu(_load_pids(_inst_dir(api, inst)).get("qemu"))
 
 
 # --- QMP (a minimal client; the core never speaks to an engine over QMP) ---
