@@ -28,6 +28,7 @@ and the hardware card says so.
 
 import json
 import os
+import re
 import socket
 import subprocess
 import threading
@@ -340,6 +341,48 @@ def _fallback_marker(d):
     return os.path.join(d, "gl_fallback")
 
 
+def _vncloop_marker(index):
+    """A stable, per-instance token for the x11vnc respawn loop's command
+    line, so the orphan sweep and _kill_pids can find it (a bare
+    'x11vnc -id 0x..' carries nothing tied to this instance).  The
+    '.vncloop' suffix keeps it text-final, so it cannot prefix-collide with
+    another index."""
+    return "pcatgl-%d.vncloop" % index
+
+
+# The QEMU SDL top-level window, matched by WM_CLASS "qemu-system-i386"
+# (both the instance and class field xwininfo -tree prints).  The title is
+# not used: it carries a grab hint ("QEMU - Press Ctrl-Alt-G to exit grab")
+# that changes.  Largest match wins, over QEMU's smaller child surfaces.
+_QEMU_WIN_RE = re.compile(
+    r'^\s*(0x[0-9a-fA-F]+)\s+"[^"]*":\s*\([^)]*"qemu-system-i386"\)\s+'
+    r'(\d+)x(\d+)\+', re.MULTILINE)
+
+_FINDWIN_SRC = """import re, subprocess, sys
+WIN_RE = re.compile(%(pattern)r, re.MULTILINE)
+try:
+    out = subprocess.run(
+        ["xwininfo", "-root", "-tree", "-display", sys.argv[1]],
+        capture_output=True, text=True, timeout=5, check=False).stdout
+except OSError:
+    sys.exit(1)
+best, best_area = None, 0
+for m in WIN_RE.finditer(out):
+    w, h = int(m.group(2)), int(m.group(3))
+    if w > 50 and h > 50 and w * h > best_area:
+        best, best_area = m.group(1), w * h
+if best:
+    print(best)
+"""
+
+
+def _write_findwin(d):
+    path = os.path.join(d, "findwin.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_FINDWIN_SRC % {"pattern": _QEMU_WIN_RE.pattern})
+    return path
+
+
 def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
     """Kill anything still holding this instance's display, compositor
     socket or ports.  Reaching on_start means the core found this instance
@@ -362,6 +405,7 @@ def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
         # the space-terminated form never matched and a leftover QEMU
         # (still holding the disk) went unswept.
         "tcp:127.0.0.1:%d," % qmp_port,     # qemu QMP
+        _vncloop_marker(index),             # the x11vnc respawn loop
     )
     mine = os.getpid()
     signaled = []
@@ -520,13 +564,30 @@ def _start_display_stack(api, inst, d, ports, pids, log):
         if not _wait_for("/tmp/.X11-unix/X%d" % display_num):
             return "Xwayland :%d never appeared" % display_num
 
-        # x11vnc quits at once if it sees WAYLAND_DISPLAY (it mistakes the
-        # session for Wayland).  The base env never carries it -- only
-        # Xwayland's own extra_env did, per-child -- so x11vnc is spawned
-        # with the base env and never sees it.
-        spawn("x11vnc", ["x11vnc", "-display", ":%d" % display_num,
-                         "-rfbport", str(vnc), "-listen", "127.0.0.1",
-                         "-noipv6", "-forever", "-shared", "-nopw", "-q"])
+        # x11vnc tracks the QEMU SDL window (-id), not the whole 1024x768
+        # root: the guest draws a smaller window centred in the root (e.g.
+        # 640x480 at +192+144), so exporting the root would show it framed
+        # in black margins that noVNC's scaleViewport only enlarges.  The
+        # window is found by WM_CLASS "qemu-system-i386", largest match.
+        #
+        # x11vnc -id exits when that window goes away, and QEMU replaces its
+        # top-level on a guest video-mode change (and when GL first makes
+        # its context -- the XID changes).  So it runs under a respawn loop
+        # that re-finds the window each time round -- which is also how the
+        # console follows a resolution change.  No window yet (QEMU starts
+        # after this) is not an error, only a reason to wait and look again.
+        # The base env carries no WAYLAND_DISPLAY (only Xwayland's child
+        # did), so x11vnc does not mistake the session for Wayland.
+        findwin = _write_findwin(d)
+        spawn("x11vnc", ["bash", "-c",
+              "VNCLOOP=%s; while true; do "
+              "W=$(python3 %s ':%d' 2>/dev/null); "
+              "if [ -n \"$W\" ]; then "
+              "x11vnc -display ':%d' -id \"$W\" -forever -shared "
+              "-rfbport %d -listen 127.0.0.1 -noipv6 -nopw -q; "
+              "fi; sleep 1; done"
+              % (_vncloop_marker(index), findwin, display_num,
+                 display_num, vnc)])
 
         spawn("websockify", ["websockify", str(ws), "127.0.0.1:%d" % vnc])
     except _DisplayHelperLaunchError as exc:
