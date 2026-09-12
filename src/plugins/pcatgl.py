@@ -453,6 +453,17 @@ def _wait_for(path, tries=50, interval=0.2):
     return False
 
 
+class _DisplayHelperLaunchError(Exception):
+    """A helper's own Popen() never started (binary missing, not
+    executable, ...).  Carries which helper so the fallback reason names
+    it; _start_display_stack's own try/except is the only place this is
+    ever caught."""
+    def __init__(self, key, cause):
+        super().__init__(key, cause)
+        self.key = key
+        self.cause = cause
+
+
 def _start_display_stack(api, inst, d, ports, pids, log):
     """Bring up weston -> Xwayland -> x11vnc -> websockify.  Returns None on
     success, or a short reason string on failure (the caller falls back to
@@ -466,8 +477,15 @@ def _start_display_stack(api, inst, d, ports, pids, log):
 
     def spawn(key, argv, extra_env=None):
         e = env if extra_env is None else dict(env, **extra_env)
-        proc = subprocess.Popen(argv, stdout=log, stderr=log, env=e,
-                                start_new_session=True)
+        try:
+            proc = subprocess.Popen(argv, stdout=log, stderr=log, env=e,
+                                    start_new_session=True)
+        except OSError as exc:
+            # covers FileNotFoundError (binary missing) along with any
+            # other launch-time OSError (e.g. permission denied); pids
+            # already has whatever earlier helpers in this stack did
+            # start, and the caller's own fallback cleans those up.
+            raise _DisplayHelperLaunchError(key, exc) from exc
         pids[key] = proc.pid
         return proc
 
@@ -477,31 +495,35 @@ def _start_display_stack(api, inst, d, ports, pids, log):
     except OSError:
         pass
 
-    spawn("weston", ["weston", "--backend=headless-backend.so",
-                     "--renderer=gl", "--width=%d" % SCREEN_W,
-                     "--height=%d" % SCREEN_H, "--idle-time=0",
-                     "--socket=%s" % wlsock,
-                     "--log=%s" % os.path.join(d, "weston.log")])
-    if not _wait_for(os.path.join(XDG_RUNTIME_DIR, wlsock)):
-        return "weston compositor socket never appeared"
+    try:
+        spawn("weston", ["weston", "--backend=headless-backend.so",
+                         "--renderer=gl", "--width=%d" % SCREEN_W,
+                         "--height=%d" % SCREEN_H, "--idle-time=0",
+                         "--socket=%s" % wlsock,
+                         "--log=%s" % os.path.join(d, "weston.log")])
+        if not _wait_for(os.path.join(XDG_RUNTIME_DIR, wlsock)):
+            return "weston compositor socket never appeared"
 
-    # Xwayland alone is told which compositor to attach to (WAYLAND_DISPLAY);
-    # the base env has none, so no other helper inherits it.
-    spawn("xwayland", ["Xwayland", ":%d" % display_num,
-                       "-geometry", "%dx%d" % (SCREEN_W, SCREEN_H)],
-          extra_env={"WAYLAND_DISPLAY": wlsock})
-    if not _wait_for("/tmp/.X11-unix/X%d" % display_num):
-        return "Xwayland :%d never appeared" % display_num
+        # Xwayland alone is told which compositor to attach to
+        # (WAYLAND_DISPLAY); the base env has none, so no other helper
+        # inherits it.
+        spawn("xwayland", ["Xwayland", ":%d" % display_num,
+                           "-geometry", "%dx%d" % (SCREEN_W, SCREEN_H)],
+              extra_env={"WAYLAND_DISPLAY": wlsock})
+        if not _wait_for("/tmp/.X11-unix/X%d" % display_num):
+            return "Xwayland :%d never appeared" % display_num
 
-    # x11vnc quits at once if it sees WAYLAND_DISPLAY (it mistakes the
-    # session for Wayland).  The base env never carries it -- only
-    # Xwayland's own extra_env did, per-child -- so x11vnc is spawned with
-    # the base env and never sees it.
-    spawn("x11vnc", ["x11vnc", "-display", ":%d" % display_num,
-                     "-rfbport", str(vnc), "-listen", "127.0.0.1",
-                     "-noipv6", "-forever", "-shared", "-nopw", "-q"])
+        # x11vnc quits at once if it sees WAYLAND_DISPLAY (it mistakes the
+        # session for Wayland).  The base env never carries it -- only
+        # Xwayland's own extra_env did, per-child -- so x11vnc is spawned
+        # with the base env and never sees it.
+        spawn("x11vnc", ["x11vnc", "-display", ":%d" % display_num,
+                         "-rfbport", str(vnc), "-listen", "127.0.0.1",
+                         "-noipv6", "-forever", "-shared", "-nopw", "-q"])
 
-    spawn("websockify", ["websockify", str(ws), "127.0.0.1:%d" % vnc])
+        spawn("websockify", ["websockify", str(ws), "127.0.0.1:%d" % vnc])
+    except _DisplayHelperLaunchError as exc:
+        return "display helper %s failed to launch: %s" % (exc.key, exc.cause)
     return None
 
 
