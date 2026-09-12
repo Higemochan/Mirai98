@@ -203,6 +203,14 @@ window.registerMachinePlugin({
   // box86 makes for the same x11vnc reason.  (Default without this is
   // relative -- relativePointer[machine] !== false in app.js.)
   relativePointer: false,
+  // no QEMU VNC audio extension (rfb.enableAudio, message type 255):
+  // the GL console is x11vnc, a plain RFB server with no defined way to
+  // ignore type 255 -- it closes the connection instead, tearing the
+  // console down ~1.5s after every connect (app.js sends it on the
+  // 'connect' event when wantsVncAudio; box86 hit exactly this,
+  // 2026-09-08).  Opt out as box86 does.  The GL path carries no audio
+  // yet regardless (x11vnc does not) -- a separate task.
+  vncAudio: false,
   defaults: {
     'pcat-gl': { memory: '256M', vga: 'std', boot: 'hd', net: '',
                  fpslimit: '60', accel: 'kvm', sound: 'none', bios: 'real',
