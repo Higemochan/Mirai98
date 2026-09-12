@@ -235,6 +235,13 @@ def _qemu_argv(api, inst, ports, gl):
         "-vga", vga + ",retrace=precise",
         "-audiodev", "none,id=snd",
         "-device", "sb16,audiodev=snd",
+        # an absolute pointer for the VNC console: the guest's PS/2 mouse is
+        # relative, so a VNC/xdotool click at an absolute position lands at
+        # the wrong place (moves work, clicks miss).  usb-tablet reports
+        # absolute coordinates (UHCI is on the PIIX3, enabled by -usb), so a
+        # click hits where it is aimed.  Always on -- not a toggle.
+        "-usb",
+        "-device", "usb-tablet",
         # QMP stays on loopback whatever LOOPBACK is: it is unauthenticated
         # and the production service runs without --loopback, so binding
         # the host address would put it on the LAN.  _qmp_command connects

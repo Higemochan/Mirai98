@@ -158,6 +158,13 @@ def pcat_argv(api, inst):
         # path PC-98 and Towns sound takes
         "-audiodev", "none,id=snd",
         "-device", "sb16,audiodev=snd",
+        # an absolute pointer for the VNC console: the guest's PS/2 mouse is
+        # relative, so a VNC/xdotool click at an absolute position lands at
+        # the wrong place (moves work, clicks miss).  usb-tablet reports
+        # absolute coordinates (UHCI is on the PIIX3, enabled by -usb), so a
+        # click hits where it is aimed.  Always on -- not a toggle.
+        "-usb",
+        "-device", "usb-tablet",
         "-vnc", "%s:%d,websocket=%d,audiodev=snd" % (host, display, ws),
         "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port,
         "-boot", "order=%s" % boot,
