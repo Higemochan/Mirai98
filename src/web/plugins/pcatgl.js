@@ -194,6 +194,152 @@ function pcatglWizardConfirm(v, h) {
   return rows;
 }
 
+// --- console audio (box86's PCM-over-websocket path) -----------------------
+// The GL console is x11vnc (no audio) and QEMU's VNC audio is off, so sound
+// rides its own websocket -- ports_of[3], the same shape box86 uses -- into
+// the shared AudioWorklet sink.  consolePrep learns the port before the RFB
+// video connects; the console hook drives the one btn-audio toggle.
+const pcatglAudioPort = new Map();
+
+async function prepPcatglConsole(name) {
+  try {
+    const r = await fetch('/api/instances/' + encodeURIComponent(name));
+    const inst = await r.json();
+    if (inst && inst.machine === 'pcat-gl' && Array.isArray(inst.ports) &&
+        inst.ports.length > 3) {
+      pcatglAudioPort.set(name, inst.ports[3]);
+    } else {
+      pcatglAudioPort.delete(name);
+    }
+  } catch (e) { pcatglAudioPort.delete(name); }
+}
+
+function startPcatglAudio(target, port, onPlayFailed) {
+  // Raw s16le stereo at the worklet's own rate, straight into the same
+  // AudioWorklet ring a PC-98 console plays through.
+  //
+  // This used to be Opus in WebM through MediaSource, and that was the
+  // wrong shape for what it is for. MediaSource is a buffered-playback
+  // API: it is designed to sit behind the live edge, and the encoder
+  // feeding it only emitted at WebM cluster boundaries. Measured
+  // 2026-09-09 the player alone ran 0.38-0.60s behind, with more delay
+  // upstream of it -- fine for listening to something, useless for
+  // playing a game, which is what this is actually for.
+  //
+  // Nothing here decodes: the bytes are PCM already. The worklet owns
+  // the jitter buffer (its own prefill, and a lag cap that discards
+  // rather than drifts), and app.js's own audioChunk owns the framing,
+  // including carrying a stereo frame split across two websocket
+  // messages -- dropping those odd bytes would cross the channels for
+  // the rest of the connection.
+  const sink = window.consoleAudioSink;
+  if (!sink) {
+    console.error('pcatgl audio: app.js exposes no worklet sink');
+    return () => {};
+  }
+  let ws = null, streamer = null, stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (streamer) { try { streamer.stop(); } catch (e) {} }
+    streamer = null;
+    if (ws) { try { ws.close(); } catch (e) {} }
+    ws = null;
+    try { sink.stop(); } catch (e) {}
+  };
+  const url = 'ws://' + location.hostname + ':' + port + '/';
+
+  sink.start().then(async () => {
+    if (stopped) return;
+    // a click got us here, so the context may be resumed straight away
+    sink.resume();
+    // What this is for: a worker owns the socket and hands PCM to the
+    // worklet directly, so noVNC decoding a burst of framebuffer updates
+    // on the main thread cannot starve the sound. It returns null where
+    // that cannot be built (no Worker, or a policy that forbids one), and
+    // then the socket is read here exactly as it always was.
+    if (sink.stream) {
+      try {
+        streamer = await sink.stream(url, (err) => {
+          if (stopped) return;
+          if (typeof onPlayFailed === 'function') onPlayFailed(err);
+        });
+      } catch (err) {
+        console.warn('pcatgl audio: no worker path', err);
+        streamer = null;
+      }
+      // stopped while that was being set up
+      if (stopped) { if (streamer) { try { streamer.stop(); } catch (e) {} } return; }
+      if (streamer) return;
+    }
+    ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (e) => {
+      if (stopped) return;
+      sink.feed(new Uint8Array(e.data));
+    };
+    ws.onerror = () => {
+      console.warn('pcatgl audio: websocket error');
+      if (typeof onPlayFailed === 'function') onPlayFailed(new Error('websocket'));
+    };
+    ws.onclose = () => {
+      if (stopped) return;
+      if (typeof onPlayFailed === 'function') onPlayFailed(new Error('closed'));
+    };
+  }).catch(err => {
+    console.error('pcatgl audio: worklet would not start', err);
+    if (typeof onPlayFailed === 'function') onPlayFailed(err);
+  });
+
+  return stop;
+}
+
+
+// The detail console's sound control (app.js's own btn-audio, via
+// window._pluginConsoleAudio -- the same button every console has, driving
+// this pipeline).  No 86Box menubar here: this is QEMU.
+function pcatglConsole(rfb, target, name) {
+  const port = pcatglAudioPort.get(name);
+  if (port == null) return () => {};
+  let stop = null;
+  const label = (on) => {
+    const btn = document.getElementById('btn-audio');
+    if (btn) btn.textContent = on ? '\u{1F50A} Sound on' : '\u{1F507} Sound off';
+  };
+  const off = () => {
+    if (stop) { try { stop(); } catch (e) {} }
+    stop = null;
+    label(false);
+  };
+  window._pluginConsoleAudio = {
+    isOn: () => !!stop,
+    toggle: async () => {
+      if (stop) { off(); toast('sound off'); return; }
+      try {
+        stop = startPcatglAudio(target, port, () => {
+          off();
+          toast('sound blocked by the browser');
+        });
+        label(true);
+        toast('sound on');
+        setTimeout(() => {
+          if (!stop) return;
+          const sink = window.consoleAudioSink;
+          if (sink && sink.played && sink.played()) return;
+          off();
+          toast('sound did not start -- press it again');
+        }, 8000);
+      } catch (err) {
+        console.error('pcatgl audio', err);
+        off();
+        toast('sound failed: ' + err.message);
+      }
+    }
+  };
+  label(false);
+  return () => { off(); window._pluginConsoleAudio = null; };
+}
+
 window.registerMachinePlugin({
   machines: ['pcat-gl'],
   platform: 'dosv',
@@ -211,6 +357,8 @@ window.registerMachinePlugin({
   // 2026-09-08).  Opt out as box86 does.  The GL path carries no audio
   // yet regardless (x11vnc does not) -- a separate task.
   vncAudio: false,
+  consolePrep: prepPcatglConsole,
+  console: pcatglConsole,
   defaults: {
     'pcat-gl': { memory: '256M', vga: 'std', boot: 'hd', net: '',
                  fpslimit: '60', accel: 'kvm', sound: 'none', bios: 'real',
