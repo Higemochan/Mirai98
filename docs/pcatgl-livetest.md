@@ -60,6 +60,8 @@ md5(HEAD 585d754 時点。**再レビュー修正が入れば変わるので配�
    追うので、両 symlink は棚一覧に raw イメージとして出る(確認済 pc98web.py:1369、islink 拒否なし)。
 2. Web UI の作成ウィザードで機種「DOS/V PC + 3dfx (GL)」を選び:
    - Hard disk = pcatgl-livetest.img
+   - CD-ROM = softgpu-0.8.2025.53.iso(ウィザードの Disks ペインに CD-ROM 選択欄があり、
+     dosv cdrom 棚から選べる=確認済 pcatgl.js:143-144。ここで選べば起動時から D: に入る)
    - Frame limit = 60(既定)
    - Network = Isolated(net="")
    - Snapshot = **on**(必須)。-snapshot なら raw 基底は読み取り専用+共有ロックのまま、書き込みは
@@ -67,6 +69,9 @@ md5(HEAD 585d754 時点。**再レビュー修正が入れば変わるので配�
    - 名前 = pcatgl-test 等
 3. index は manager が空き番号を自動採番(既存 0/2/3/4 を避けた最小空き)。作成後
    `cat /storage/pc98/vm/vm-<N>/vm.xml` で machine=pcat-gl / net 空 / snapshot=true を確認。
+   > API で駆動する場合、起動/停止/リセット等は **by-name**(index 不可):
+   > `POST /api/instances/<name>/start`。find_instance が name 一致で引く(確認済
+   > pc98web.py:4463-4470, 1560-1562)。動詞は start|stop|reset|delete|save|resume。
 
 > ⚠ -snapshot の一時オーバレイは TMPDIR=/tmp に出来、棚と同一 FS(空き僅少)。ゲスト内で大量
 > 書き込み(大きなインストール等)はしないこと。検証後は symlink とレコードを削除(手順 7.4)。
@@ -101,6 +106,8 @@ vnc=5920+index、ws=5830+index、qmp=4820+index)。
 ## (4) ブラウザコンソールで 3D 表示
 
 1. UI でコンソールを開く → **Win98 デスクトップ**が表示(マウス捕捉は Ctrl+End で解放)。
+   ※ softgpu iso をウィザードで選んでいれば起動時から D: にある。付けていない場合は Media 行から
+     softgpu-0.8.2025.53.iso を装着(中4修正でトレイ常設なので稼働中でも挿せる)。
 2. glchecker(または SoftGPU 添付の 3D テスタ)を起動。
 3. ハードウェアカードを再表示 → 行「mesagl.cfg」が **「mesagl.cfg applied」** に変わる
    (3D コンテキスト生成後。それ以前は「not yet confirmed (3D not used yet)」が正常)。
