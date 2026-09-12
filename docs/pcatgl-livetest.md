@@ -51,19 +51,27 @@ md5(HEAD 585d754 時点。**再レビュー修正が入れば変わるので配�
 
 ## (2) 使い捨て pcat-gl 機の作成
 
-1. テスト用ディスクを dosv hdd 棚へコピー(原本を汚さない):
-   `cp --reflink=auto /storage/work/kvm98/DOSV4300-stage2 /storage/pc98/disks/dosv/hdd/pcatgl-livetest.img`
-   (raw イメージ。drive_backing が format=raw と判定)。
+棚 FS は ext4 で reflink 不可、4.5GB の実コピー×2 は空き(≈7.4G)に収まらない。原本を汚さず
+2 台ぶんを賄うため **symlink + snapshot** 方式を使う(実体コピーしない)。
+
+1. dosv hdd 棚に原本への symlink を張る(0 バイト):
+   `ln -s /storage/work/kvm98/DOSV4300-stage2 /storage/pc98/disks/dosv/hdd/pcatgl-livetest.img`
+   (2 台目用に pcatgl-livetest2.img も同様)。manager は `os.path.isfile` で列挙し symlink を
+   追うので、両 symlink は棚一覧に raw イメージとして出る(確認済 pc98web.py:1369、islink 拒否なし)。
 2. Web UI の作成ウィザードで機種「DOS/V PC + 3dfx (GL)」を選び:
    - Hard disk = pcatgl-livetest.img
    - Frame limit = 60(既定)
    - Network = Isolated(net="")
-   - Snapshot = **on**(原本破棄、検証を繰り返せる)
+   - Snapshot = **on**(必須)。-snapshot なら raw 基底は読み取り専用+共有ロックのまま、書き込みは
+     一時オーバレイに行く=原本不変、2 台が同じ基底を同時に開ける。
    - 名前 = pcatgl-test 等
 3. index は manager が空き番号を自動採番(既存 0/2/3/4 を避けた最小空き)。作成後
    `cat /storage/pc98/vm/vm-<N>/vm.xml` で machine=pcat-gl / net 空 / snapshot=true を確認。
 
-合否記入: (2) 作成成功 [ ] / vm.xml 期待通り [ ]
+> ⚠ -snapshot の一時オーバレイは TMPDIR=/tmp に出来、棚と同一 FS(空き僅少)。ゲスト内で大量
+> 書き込み(大きなインストール等)はしないこと。検証後は symlink とレコードを削除(手順 7.4)。
+
+合否記入: (2) symlink が一覧に出る [ ] / 作成成功 [ ] / vm.xml 期待通り [ ]
 
 ---
 
@@ -108,7 +116,8 @@ vnc=5920+index、ws=5830+index、qmp=4820+index)。
 
 ## (5) 2 インスタンス同時起動(分離)
 
-1. 手順(2)をもう 1 台(別ディスクコピー、別名)作成。index は別値になる。
+1. 手順(2)をもう 1 台作成(ディスク = pcatgl-livetest2.img の symlink、別名)。index は別値になる。
+   両者は同じ raw 基底を -snapshot で共有(読み取り専用+共有ロック)ので実コピーは不要。
 2. 両方起動し、次が**別々**であること:
    - DISPLAY(:20+i)、wl ソケット(`ls $XDG_RUNTIME_DIR` に wl-pcatgl-<i1>/<i2>)、
      rfbport/ws/qmp ポート、pcatgl/vm-<N> ディレクトリ。
@@ -156,8 +165,11 @@ vnc=5920+index、ws=5830+index、qmp=4820+index)。
 3. 孤児掃除の確認(前世代残置の回収): 停止直後にもう一度起動 → on_start の sweep+reap が
    前世代の残骸を掃除してから新規起動する(ポート衝突で "exited during startup" が出ないこと)。
    ログに `[pcatgl] swept orphan pid …` が出れば掃除が働いた証跡。
+4. 検証終了後の後始末: 使い捨て pcat-gl レコードを UI で削除(停止後)→棚の symlink を消す:
+   `rm -f /storage/pc98/disks/dosv/hdd/pcatgl-livetest.img /storage/pc98/disks/dosv/hdd/pcatgl-livetest2.img`
+   (symlink なので原本 DOSV4300-stage2 は消えない)。/tmp の -snapshot オーバレイは QEMU 終了時に自動削除。
 
-合否記入: (7) 全プロセス消滅 [ ] / pids.json 空 [ ] / SHM・ソケット残置なし [ ] / 再起動でポート衝突なし [ ]
+合否記入: (7) 全プロセス消滅 [ ] / pids.json 空 [ ] / SHM・ソケット残置なし [ ] / 再起動でポート衝突なし [ ] / symlink・レコード削除 [ ]
 
 ---
 
