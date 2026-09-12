@@ -197,6 +197,12 @@ function pcatglWizardConfirm(v, h) {
 window.registerMachinePlugin({
   machines: ['pcat-gl'],
   platform: 'dosv',
+  // absolute RFB pointer, not QEMU's relative pseudo-encoding (-257):
+  // the GL console is x11vnc, which does not speak -257, and the guest's
+  // absolute HID (usb-tablet) wants absolute coordinates.  Same opt-out
+  // box86 makes for the same x11vnc reason.  (Default without this is
+  // relative -- relativePointer[machine] !== false in app.js.)
+  relativePointer: false,
   defaults: {
     'pcat-gl': { memory: '256M', vga: 'std', boot: 'hd', net: '',
                  fpslimit: '60', accel: 'kvm', sound: 'none', bios: 'real',
