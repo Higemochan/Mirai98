@@ -29,6 +29,7 @@ and the hardware card says so.
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -809,6 +810,12 @@ def _start_display_stack(api, inst, d, ports, pids, log):
         # after this) is not an error, only a reason to wait and look again.
         # The base env carries no WAYLAND_DISPLAY (only Xwayland's child
         # did), so x11vnc does not mistake the session for Wayland.
+        if not shutil.which("x11vnc"):
+            # the respawn loop would spin forever finding no binary -- no
+            # video, a retry every second, yet on_start still "started".
+            # Fall to the plain-VGA path (which needs no x11vnc), the same
+            # discipline a missing display-stack binary already gets.
+            return "x11vnc not found"
         findwin = _write_findwin(d)
         spawn("x11vnc", ["bash", "-c",
               "VNCLOOP=%s; while true; do "
@@ -908,26 +915,35 @@ def on_start(api, inst):
     # In effect in the fallback (-vnc) mode too.
     sink = _sink_name(inst)
     audio_tcp = 4620 + index
-    for stale in _find_sink_modules(sink):
-        _pactl(["unload-module", stale])
-    loaded = _pactl(["load-module", "module-null-sink",
-                     "sink_name=%s" % sink,
-                     "sink_properties=device.description=%s" % sink])
-    if loaded.returncode != 0:
-        log.write(("[pcatgl] pactl load-module failed (rc=%d): %s\n"
-                   % (loaded.returncode,
-                      (loaded.stderr or "").strip())).encode())
+    # audio needs parec (to read the sink monitor) and websockify (to wrap
+    # it for the browser); if either is missing, disable sound only and let
+    # video carry on rather than failing the start.
+    audio_ok = bool(shutil.which("parec") and shutil.which("websockify"))
+    if audio_ok:
+        for stale in _find_sink_modules(sink):
+            _pactl(["unload-module", stale])
+        loaded = _pactl(["load-module", "module-null-sink",
+                         "sink_name=%s" % sink,
+                         "sink_properties=device.description=%s" % sink])
+        if loaded.returncode != 0:
+            log.write(("[pcatgl] pactl load-module failed (rc=%d): %s\n"
+                       % (loaded.returncode,
+                          (loaded.stderr or "").strip())).encode())
+            log.flush()
+        relay = _write_relay(d)
+        spawn("audio_relay", ["bash", "-c",
+              "AUDIORELAY=%s; while true; do "
+              "parec --device='%s.monitor' --format=s16le --rate=%d "
+              "--channels=2 --latency-msec=20 --raw "
+              "| python3 %s %d pcm; sleep 0.2; done"
+              % ("%s.audiorelay" % sink, sink, AUDIO_RATE, relay, audio_tcp)],
+              env=_pulse_env())
+        spawn("websockify_audio",
+              ["websockify", str(_audio), "127.0.0.1:%d" % audio_tcp])
+    else:
+        log.write(b"[pcatgl] audio disabled: parec or websockify not found;"
+                  b" video continues\n")
         log.flush()
-    relay = _write_relay(d)
-    spawn("audio_relay", ["bash", "-c",
-          "AUDIORELAY=%s; while true; do "
-          "parec --device='%s.monitor' --format=s16le --rate=%d "
-          "--channels=2 --latency-msec=20 --raw "
-          "| python3 %s %d pcm; sleep 0.2; done"
-          % ("%s.audiorelay" % sink, sink, AUDIO_RATE, relay, audio_tcp)],
-          env=_pulse_env())
-    spawn("websockify_audio",
-          ["websockify", str(_audio), "127.0.0.1:%d" % audio_tcp])
 
     argv = _qemu_argv(api, inst, ports, gl)
     log.write((" ".join(argv) + "\n").encode())
@@ -936,7 +952,11 @@ def on_start(api, inst):
     # QEMU's audio is a PulseAudio client (-audiodev pa) routed to this
     # instance's null sink: _pulse_env gives it the runtime dir a systemd
     # unit lacks, PULSE_SINK names the sink.
-    qemu_env = dict(_pulse_env(), PULSE_SINK=sink)
+    qemu_env = dict(_pulse_env())
+    if audio_ok:
+        # route QEMU's pa output to this instance's sink; with no pipeline
+        # there is nothing to route to, so leave pa on the default
+        qemu_env["PULSE_SINK"] = sink
     qemu_cwd = d
     if gl:
         # GL output to the X server; SDL on x11, WAYLAND_DISPLAY absent so
