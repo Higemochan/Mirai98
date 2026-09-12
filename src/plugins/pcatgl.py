@@ -836,13 +836,19 @@ def _start_display_stack(api, inst, d, ports, pids, log):
         # more) actually reaches the browser; 0 (unlimited) polls fast.
         fps = _console_fps(inst)          # clamped 20-75
         wait_ms = round(1000 / fps)       # 60 -> 17ms, 75 -> 13ms
+        # -cursor most: this guest draws no cursor into the framebuffer (the
+        # SDL/host draws a sprite x11vnc's -id capture never sees), so noVNC
+        # would only show its fallback dot.  -cursor most fetches the real
+        # X cursor shape via XFIXES; x11vnc's default CursorShapeUpdates then
+        # sends it to noVNC as the Cursor pseudo-encoding, and with the
+        # usb-tablet absolute pointer it tracks 1:1.
         spawn("x11vnc", ["bash", "-c",
               "VNCLOOP=%s; while true; do "
               "W=$(python3 %s ':%d' 2>/dev/null); "
               "if [ -n \"$W\" ]; then "
               "x11vnc -display ':%d' -id \"$W\" -forever -shared "
               "-rfbport %d -listen 127.0.0.1 -noipv6 -nopw -q "
-              "-wait %d -defer %d; "
+              "-wait %d -defer %d -cursor most; "
               "fi; sleep 1; done"
               % (_vncloop_marker(index), findwin, display_num,
                  display_num, vnc, wait_ms, wait_ms)])
