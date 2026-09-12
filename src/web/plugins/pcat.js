@@ -68,11 +68,19 @@ function pcatEditForm(i, h) {
       note('isolated by default; NAT gives the guest outbound through QEMU ' +
            'with no host bridge') + '</div>' +
     '<div class="row"><label>Machine type</label>' +
-      '<select name="machine">' + h.machineList().map(m =>
-        '<option value="' + m + '"' +
-        ((i.machine || 'pcat') === m ? ' selected' : '') + '>' +
-        h.esc(h.machineLabel ? h.machineLabel(m) : m) +
-        '</option>').join('') + '</select></div>' +
+      // pcat <-> pcat-gl only: the same DOS/V disk, with or without 3dfx
+      // GL.  Other machines draw their disks from a different shelf, so
+      // switching this record to one would leave its disk behind.
+      '<select name="machine">' + h.machineList()
+        .filter(m => m === 'pcat' || m === 'pcat-gl' ||
+                     m === (i.machine || 'pcat'))
+        .map(m =>
+          '<option value="' + m + '"' +
+          ((i.machine || 'pcat') === m ? ' selected' : '') + '>' +
+          h.esc(h.machineLabel ? h.machineLabel(m) : m) +
+          '</option>').join('') + '</select>' +
+      note('switch to pcat-gl to run the same disk with 3dfx GL; stop ' +
+           'the machine first') + '</div>' +
     '<div class="row"><label>Memory</label>' +
       '<select name="memory">' + memOpts + '</select></div>' +
     '<div class="row"><label>BIOS</label>' + note(PCAT_BIOS) +
