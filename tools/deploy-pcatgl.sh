@@ -93,23 +93,48 @@ for pair in "${FILES[@]}"; do
 done
 
 # --- snapshot running guests BEFORE the restart ----------------------------
-# vm-N with a qemu.pid whose pid is alive: these must survive the restart.
+# Every running guest must survive the restart (KillMode=process).  Core
+# QEMU machines (pc98/towns/pcat) write vm-N/qemu.pid; engine machines write
+# their main pid into a pids.json -- pcat-gl at vm-N/pcatgl/pids.json under
+# "qemu", box86 at vm-N/box86/pids.json under "86box".  All three are
+# counted, or a running pcat-gl reads as "none" (as it did on 2026-09-12,
+# hiding a live idx1).
 declare -A GUEST_PID=()
+
+epid() {   # epid <pids.json> <key> -> pid, or empty
+  python3 -c 'import json,sys
+try:
+    print(json.load(open(sys.argv[1])).get(sys.argv[2]) or "")
+except Exception:
+    pass' "$1" "$2" 2>/dev/null
+}
+
+note_guest() {   # note_guest <label> <pid>: record it if alive
+  local label="$1" pid="$2"
+  [ -n "$pid" ] || return 0
+  if kill -0 "$pid" 2>/dev/null; then
+    GUEST_PID["$label"]="$pid"
+    printf '  %-14s pid %s  %s\n' "$label" "$pid" \
+      "$(ps -o cmd= -p "$pid" 2>/dev/null | cut -c1-55)"
+  fi
+}
+
 echo "running guests before restart:"
-before_any=0
 for pidf in "$VMROOT"/vm-*/qemu.pid; do
   [ -f "$pidf" ] || continue
-  pid="$(cat "$pidf" 2>/dev/null || true)"
-  [ -n "$pid" ] || continue
-  vm="$(basename "$(dirname "$pidf")")"
-  if kill -0 "$pid" 2>/dev/null; then
-    GUEST_PID["$vm"]="$pid"
-    before_any=1
-    printf '  %-8s pid %s  %s\n' "$vm" "$pid" \
-      "$(ps -o cmd= -p "$pid" 2>/dev/null | cut -c1-60)"
-  fi
+  note_guest "$(basename "$(dirname "$pidf")")" "$(cat "$pidf" 2>/dev/null)"
 done
-[ "$before_any" = 1 ] || echo "  (none)"
+for pidf in "$VMROOT"/vm-*/pcatgl/pids.json; do
+  [ -f "$pidf" ] || continue
+  note_guest "$(basename "$(dirname "$(dirname "$pidf")")")(gl)" \
+             "$(epid "$pidf" qemu)"
+done
+for pidf in "$VMROOT"/vm-*/box86/pids.json; do
+  [ -f "$pidf" ] || continue
+  note_guest "$(basename "$(dirname "$(dirname "$pidf")")")(86box)" \
+             "$(epid "$pidf" 86box)"
+done
+[ "${#GUEST_PID[@]}" -eq 0 ] && echo "  (none)"
 echo
 
 # --- backup + copy + re-verify each file -----------------------------------
@@ -170,10 +195,10 @@ else
   for vm in "${!GUEST_PID[@]}"; do
     pid="${GUEST_PID[$vm]}"
     if kill -0 "$pid" 2>/dev/null; then
-      printf '  %-8s pid %s  ALIVE  %s\n' "$vm" "$pid" \
+      printf '  %-14s pid %s  ALIVE  %s\n' "$vm" "$pid" \
         "$(ps -o cmd= -p "$pid" 2>/dev/null | cut -c1-50)"
     else
-      printf '  %-8s pid %s  *** GONE ***\n' "$vm" "$pid"
+      printf '  %-14s pid %s  *** GONE ***\n' "$vm" "$pid"
       survived=0
     fi
   done
