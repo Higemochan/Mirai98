@@ -160,12 +160,10 @@ def _write_mesagl_cfg(api, inst, d):
     wrapper reads as unlimited, so a present "0" is written through rather
     than treated as unset.
     """
-    fps = inst.get("fpslimit")
-    if fps in ("", None):
-        fps = "60"
+    fps = _console_fps(inst)
     lines = []
     for key, default in MESAGL_DEFAULTS:
-        value = fps if key == "FpsLimit" else default
+        value = str(fps) if key == "FpsLimit" else default
         lines.append("%s,%s" % (key, value))
     path = api.os.path.join(d, "mesagl.cfg")
     with open(path, "w", encoding="utf-8") as f:
@@ -569,6 +567,21 @@ def _sink_name(inst):
     return _sink_for_index(inst["index"])
 
 
+def _console_fps(inst):
+    """The console frame rate (FPS) this instance targets: the mesagl guest
+    cap (FpsLimit) and the x11vnc capture/send rate both follow it.  Read
+    from the "fpslimit" field (kept for back-compat); default 60, clamped
+    to 20-75.  Below ~20 is choppy; above ~75 only adds host readback
+    (glReadPixels) load for frames the guest (~60) never makes, and a poll
+    faster than the guest presents buys nothing."""
+    v = inst.get("fpslimit")
+    try:
+        n = 60 if v in ("", None) else int(v)
+    except (TypeError, ValueError):
+        n = 60
+    return max(20, min(75, n))
+
+
 def _vncloop_marker(index):
     """A stable, per-instance token for the x11vnc respawn loop's command
     line, so the orphan sweep and _kill_pids can find it (a bare
@@ -817,15 +830,22 @@ def _start_display_stack(api, inst, d, ports, pids, log):
             # discipline a missing display-stack binary already gets.
             return "x11vnc not found"
         findwin = _write_findwin(d)
+        # x11vnc's default screen poll (-wait) and update defer are ~20ms,
+        # which caps the console at ~50fps regardless of how fast the guest
+        # presents.  Drive both from the target frame rate so ~60fps (or
+        # more) actually reaches the browser; 0 (unlimited) polls fast.
+        fps = _console_fps(inst)          # clamped 20-75
+        wait_ms = round(1000 / fps)       # 60 -> 17ms, 75 -> 13ms
         spawn("x11vnc", ["bash", "-c",
               "VNCLOOP=%s; while true; do "
               "W=$(python3 %s ':%d' 2>/dev/null); "
               "if [ -n \"$W\" ]; then "
               "x11vnc -display ':%d' -id \"$W\" -forever -shared "
-              "-rfbport %d -listen 127.0.0.1 -noipv6 -nopw -q; "
+              "-rfbport %d -listen 127.0.0.1 -noipv6 -nopw -q "
+              "-wait %d -defer %d; "
               "fi; sleep 1; done"
               % (_vncloop_marker(index), findwin, display_num,
-                 display_num, vnc)])
+                 display_num, vnc, wait_ms, wait_ms)])
 
         spawn("websockify", ["websockify", str(ws), "127.0.0.1:%d" % vnc])
     except _DisplayHelperLaunchError as exc:
@@ -1136,9 +1156,7 @@ def pcatgl_hardware(api, inst):
     the machine name -- box86/pcat wrap it the same way)."""
     d = _inst_dir(api, inst)
     vga = inst.get("vga") or "std"
-    fps = inst.get("fpslimit")
-    if fps in ("", None):
-        fps = "60"
+    fps = _console_fps(inst)
     hw = {
         "machine": PCATGL_MACHINE_LABEL,
         "cpu": PCATGL_CPU_LABEL,
@@ -1148,7 +1166,7 @@ def pcatgl_hardware(api, inst):
         "bios": ("SeaBIOS (PnP disabled)" if _nopnp_bios(api)
                  else "SeaBIOS (default)"),
         "acpi": "ACPI enabled",
-        "fpslimit": ("unlimited" if str(fps) == "0" else "%s FPS" % fps),
+        "fpslimit": "%d FPS" % fps,
     }
     fb = _fallback_marker(d)
     running = api.is_running(inst)

@@ -55,10 +55,11 @@ function pcatglEditForm(i, h) {
     '<div class="row"><label>Video</label>' +
       '<select name="vga">' + opts(PCATGL_VGAS, i.vga || 'std') + '</select>' +
       note('std for the SoftGPU / 3dfx wrapper') + '</div>' +
-    '<div class="row"><label>Frame limit</label>' +
-      '<input type="number" name="fpslimit" min="0" step="1" value="' +
+    '<div class="row"><label>Frame rate (FPS)</label>' +
+      '<input type="number" name="fpslimit" min="20" max="75" step="1" value="' +
       h.esc(String(fps)) + '">' +
-      note('mesagl.cfg FpsLimit, in FPS; 0 = unlimited') + '</div>' +
+      note('console frame rate (20-75, default 60): caps the guest (mesagl ' +
+           'FpsLimit) and the x11vnc capture/send') + '</div>' +
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + opts(PCATGL_BOOTS, i.boot || 'hd') +
       '</select></div>' +
@@ -108,7 +109,7 @@ function pcatglHardware(i, h) {
     ['&#9889; Acceleration', h.esc(spec.accel || 'KVM')],
     ['&#9203; ACPI', h.esc(spec.acpi || 'ACPI enabled')],
     ['&#9635; Video', h.esc(spec.video || i.vga || 'std')],
-    ['&#127909; Frame limit', h.esc(spec.fpslimit ||
+    ['&#127909; Frame rate', h.esc(spec.fpslimit ||
       ((i.fpslimit && String(i.fpslimit) !== '0') ? i.fpslimit + ' FPS'
         : (String(i.fpslimit) === '0' ? 'unlimited' : '60 FPS')))],
     ['&#128421; Display', h.esc(spec.display ||
@@ -160,9 +161,9 @@ function pcatglWizardOptions(h) {
   return '<div class="row"><label>Video</label>' +
       '<select name="vga">' + opts(PCATGL_VGAS, 'std') + '</select>' +
       h.note('std for the SoftGPU / 3dfx wrapper') + '</div>' +
-    '<div class="row"><label>Frame limit</label>' +
-      '<input type="number" name="fpslimit" min="0" step="1" value="60">' +
-      h.note('mesagl.cfg FpsLimit, in FPS; 0 = unlimited') + '</div>' +
+    '<div class="row"><label>Frame rate (FPS)</label>' +
+      '<input type="number" name="fpslimit" min="20" max="75" step="1" value="60">' +
+      h.note('console frame rate (20-75, default 60): guest cap + x11vnc capture') + '</div>' +
     '<div class="row"><label>Boot from</label>' +
       '<select name="boot">' + opts(PCATGL_BOOTS, 'hd') + '</select></div>' +
     '<div class="row"><label>Network</label>' +
@@ -182,7 +183,7 @@ function pcatglWizardConfirm(v, h) {
     ['Name', h.esc(v.name || '(unnamed)')],
     ['Machine type', 'DOS/V PC + 3dfx (GL)'],
     ['Video', pick(PCATGL_VGAS, v.vga, 'std')],
-    ['Frame limit', String(fps) === '0' ? 'unlimited' : fps + ' FPS'],
+    ['Frame rate', (fps || '60') + ' FPS'],
     ['Acceleration', 'KVM'],
     ['ACPI', 'Enabled'],
     ['Boot from', pick(PCATGL_BOOTS, v.boot, 'hd')],
