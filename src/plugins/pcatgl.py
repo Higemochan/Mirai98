@@ -39,7 +39,7 @@ import time
 # current (build-n/build-m/... are still moving), and this default is only
 # the last resort so a bench with neither set still runs.
 QEMU_3DFX_DEFAULT = ("/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/"
-                     "build-n/qemu-system-i386")
+                     "build-o/qemu-system-i386")
 
 # The GL display stack's own geometry.  Xwayland gets this, x11vnc exports
 # whatever the guest actually draws inside it.
@@ -406,15 +406,19 @@ def _reap(pids, timeout=5):
                 pass
 
 
-def _pid_runs_qemu(pid):
-    """True if pid is alive and its command line still names our QEMU.
+def _pid_matches(pid, needle):
+    """True if pid is alive and its command line contains needle (bytes).
     pids.json survives a restart, so a recycled pid could otherwise read
-    as a running instance and refuse every start with 'already running'."""
+    as a running instance and refuse every start with 'already running'.
+    The caller passes this instance's own "tcp:127.0.0.1:<qmp>," -- the
+    QMP arg is index-specific and path-independent, so it cannot match an
+    unrelated QEMU (or a differently-built one) the way a bare "qemu" in
+    the binary path could."""
     if not _alive(pid):
         return False
     try:
         with open("/proc/%d/cmdline" % pid, "rb") as f:
-            return b"qemu" in f.read()
+            return needle in f.read()
     except OSError:
         return True     # unreadable: do not claim it died
 
@@ -616,13 +620,18 @@ def _stop_now(api, inst):
     # before anything is forced -- a KILL mid write-back to a raw disk
     # corrupts it -- then fall back to _kill_pids for the display stack
     # (and for QEMU too, if QMP was unreachable).
+    delivered = True
     try:
         _qmp_command(qmp_port, "quit")
     except OSError:
-        pass
-    deadline = time.time() + 15
-    while qemu and _alive(qemu) and time.time() < deadline:
-        time.sleep(0.25)
+        delivered = False
+    # only wait for a clean self-exit if quit actually reached QEMU; if QMP
+    # was unreachable it is not going to quit on its own, so go to TERM now
+    # rather than idling the full 15s
+    if delivered:
+        deadline = time.time() + 15
+        while qemu and _alive(qemu) and time.time() < deadline:
+            time.sleep(0.25)
     _kill_pids(pids)
     _save_pids(d, {})
 
@@ -658,7 +667,9 @@ def pcatgl_reset(api, inst):
 
 
 def is_up(api, inst):
-    return _pid_runs_qemu(_load_pids(_inst_dir(api, inst)).get("qemu"))
+    qmp_port = api.ports_of(inst)[2]
+    pid = _load_pids(_inst_dir(api, inst)).get("qemu")
+    return _pid_matches(pid, ("tcp:127.0.0.1:%d," % qmp_port).encode())
 
 
 # --- QMP (a minimal client; the core never speaks to an engine over QMP) ---

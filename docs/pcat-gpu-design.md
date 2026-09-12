@@ -53,3 +53,11 @@ VNC -- GL unavailable: <理由>」と表示。既定バイナリ不在(Popen OSE
 - weston/Xwayland/x11vnc のインスタンス並列は index 由来の DISPLAY/ソケット名
   +起動前 sweep/reap で分離(レビューで OK 判定)。実機同時起動は配備後に確認。
 - core の usage stats は engine["pid"]=qemu-3dfx の pid で流用。
+
+
+## 低・注記のみ (2026-09-12 再レビュー、非修正)
+- `_reap`/`_kill_pids` の `os.killpg` は各ヘルパが自セッション(start_new_session)で
+  pid==pgid であることが前提。孤児が何らかの理由で別 pgid に居ると killpg が取り逃す
+  (try/except で握り潰し)。現構成では未観測。
+- `pcatgl_hardware` の cfg 判定は毎描画で現世代 pcatgl.log 全体を読む(起動時 .1 退避で
+  上限あり=readback 5 秒ログで約 17KB/時)。負荷は軽微につき非修正。
