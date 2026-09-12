@@ -234,7 +234,7 @@ def _qemu_argv(api, inst, ports, gl):
         "-m", inst.get("memory") or "256M",
         "-rtc", "base=localtime",
         "-vga", vga + ",retrace=precise",
-        "-audiodev", "none,id=snd",
+        "-audiodev", "pa,id=snd",
         "-device", "sb16,audiodev=snd",
         # an absolute pointer for the VNC console: the guest's PS/2 mouse is
         # relative, so a VNC/xdotool click at an absolute position lands at
@@ -341,6 +341,233 @@ def _fallback_marker(d):
     return os.path.join(d, "gl_fallback")
 
 
+AUDIO_RATE = 44100          # s16le stereo, the worklet's rate
+
+
+RELAY_SRC = r'''"""Fan one audio stream out to however many listeners there are.
+
+ffmpeg's own "-listen 1" served exactly one client and stopped listening
+while it did, so a second consumer could not connect at all, and a
+disconnect left ~2.1s with nothing listening (measured, 2026-09-09). Any
+probe of that port therefore shut the browser out for as long as it held
+the slot -- an observer effect that made the audio look flaky on its own.
+This listens instead: never stops listening, never exits when a client
+leaves, serves as many as turn up.
+
+Two stream shapes, because the two have different join rules:
+
+  pcm  -- raw s16le stereo. A listener may join anywhere, so long as it
+          joins on a frame boundary: four bytes in, left and right. Half
+          a frame in and the channels stay crossed for the rest of the
+          connection. There is nothing else to replay.
+
+  webm -- only decodable from its initialisation segment (everything
+          before the first Cluster), so that is kept and replayed to
+          each new client, which then starts at the NEXT cluster
+          boundary. Mid-cluster is no better than no header at all.
+
+Either way a consumer that stops reading is dropped at a hard cap rather
+than buffered without bound: a client that far behind is going to
+reconnect anyway, and the memory belongs to everyone else.
+"""
+import os
+import select
+import socket
+import sys
+
+PORT = int(sys.argv[1])
+MODE = sys.argv[2] if len(sys.argv) > 2 else "webm"
+CLUSTER = b"\x1f\x43\xb6\x75"          # EBML id of a WebM Cluster
+FRAME = 4                              # s16le stereo: 2 bytes x 2 channels
+MAXQ = 2 * 1024 * 1024                 # per client, then it is dropped
+CHUNK = 65536
+
+srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", PORT))
+srv.listen(8)
+srv.setblocking(False)
+
+src = sys.stdin.buffer
+os.set_blocking(src.fileno(), False)
+
+init = b""          # webm: everything before the first Cluster
+have_init = MODE == "pcm"
+tail = b""          # webm: carry, so a Cluster id split across reads is found
+pos = 0             # pcm: bytes of stream seen, to find a frame boundary
+clients = {}        # sock -> [queue bytes, started bool]
+
+
+def drop(sock, why):
+    clients.pop(sock, None)
+    try:
+        sock.close()
+    except OSError:
+        pass
+    sys.stderr.write("relay: dropped a client (%s)\n" % why)
+    sys.stderr.flush()
+
+
+while True:
+    writers = [s for s, st in clients.items() if st[0]]
+    r, w, _ = select.select([srv, src] + list(clients), writers, [], 1.0)
+
+    if srv in r:
+        try:
+            sock, _addr = srv.accept()
+            sock.setblocking(False)
+            clients[sock] = [b"", False]
+        except OSError:
+            pass
+
+    for sock in list(clients):
+        if sock in r:
+            try:
+                if not sock.recv(4096):
+                    drop(sock, "closed")
+            except OSError:
+                drop(sock, "recv failed")
+
+    if src in r:
+        try:
+            data = src.read(CHUNK)
+        except OSError:
+            data = b""
+        if data is None:
+            data = b""
+        if data == b"":
+            break                      # the source went away; the loop restarts it
+
+        if MODE == "pcm":
+            for sock, st in clients.items():
+                if st[1]:
+                    st[0] += data
+                else:
+                    # join on a frame boundary, never mid-frame
+                    skip = (FRAME - (pos % FRAME)) % FRAME
+                    if skip < len(data):
+                        st[0] = data[skip:]
+                        st[1] = True
+            pos += len(data)
+        else:
+            if not have_init:
+                init += data
+                idx = init.find(CLUSTER)
+                if idx >= 0:
+                    have_init, data, init = True, init[idx:], init[:idx]
+                else:
+                    data = b""
+            if have_init and data:
+                hay = tail + data
+                boundary = hay.find(CLUSTER)
+                tail = hay[-3:]
+                for sock, st in clients.items():
+                    if st[1]:
+                        st[0] += data
+                    elif boundary >= 0:
+                        st[0] = init + hay[boundary:]
+                        st[1] = True
+
+        for sock, st in list(clients.items()):
+            if len(st[0]) > MAXQ:
+                drop(sock, "too far behind")
+
+    for sock in w:
+        st = clients.get(sock)
+        if not st or not st[0]:
+            continue
+        try:
+            n = sock.send(st[0])
+            st[0] = st[0][n:]
+        except OSError:
+            drop(sock, "send failed")
+'''
+
+
+def _write_relay(d):
+    path = os.path.join(d, "audiorelay.py")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(RELAY_SRC)
+    return path
+
+
+def _pulse_env(base=None):
+    """A copy of `base` (os.environ by default) that can actually reach
+    PulseAudio.
+
+    libpulse finds the daemon at $XDG_RUNTIME_DIR/pulse/native, and a
+    systemd unit is started with no XDG_RUNTIME_DIR at all -- there is no
+    login session behind it to have made one. Confirmed live, 2026-09-09:
+    from mirai98.service's own environment `pactl info` answers
+    "Connection failure: Connection refused", while the identical call
+    with XDG_RUNTIME_DIR=/run/user/0 answers normally, and the socket is
+    right there at /run/user/0/pulse/native the whole time.
+
+    Every single thing box86 does with audio went through that failure:
+    the null sink was never created (pactl could not connect), 86Box
+    itself had nowhere to play into, ffmpeg could not open the sink's
+    monitor, and the sink was never unloaded on stop either. That is why
+    a box86 machine has never made a sound -- not a missing sound card,
+    not the browser, not the codec: nothing was ever connected to
+    PulseAudio at all. It also explains the box86_N sinks left lying
+    around from instances that no longer exist: those were made by a
+    server started from a login shell, which does have the variable.
+
+    Only filled in when the caller has neither PULSE_SERVER nor
+    XDG_RUNTIME_DIR already, and only when that socket really is there,
+    so a host that puts PulseAudio somewhere else is left alone.
+    """
+    env = dict(os.environ if base is None else base)
+    if env.get("PULSE_SERVER") or env.get("XDG_RUNTIME_DIR"):
+        return env
+    runtime = "/run/user/%d" % os.getuid()
+    if os.path.exists(os.path.join(runtime, "pulse", "native")):
+        env["XDG_RUNTIME_DIR"] = runtime
+    return env
+
+
+def _pactl(args, timeout=5):
+    """One pactl call that can reach the daemon, with its result kept.
+
+    Returns the CompletedProcess. Callers that care whether it worked
+    have to look -- the sink load used to be fired with check=False and
+    its result dropped on the floor, which is how a daemon that refused
+    every connection stayed invisible for as long as it did.
+    """
+    return subprocess.run(["pactl"] + list(args), capture_output=True,
+                          timeout=timeout, check=False, env=_pulse_env(),
+                          text=True)
+
+
+def _find_sink_modules(sink_name):
+    """Every module-null-sink loaded under this name, newest last.
+
+    Plural on purpose: PulseAudio happily loads the same sink_name twice
+    and renames the sinks (box86_8, box86_8.2, box86_8.3 ...), so "the"
+    module for a name is not a thing. Returning one of them, as this
+    used to, left the rest behind for good -- three had piled up on the
+    host by the time anyone looked (2026-09-09).
+    """
+    try:
+        out = _pactl(["list", "short", "modules"]).stdout or ""
+    except OSError:
+        return []
+    found = []
+    for line in out.splitlines():
+        if "module-null-sink" in line and ("sink_name=%s" % sink_name) in line:
+            found.append(line.split("\t", 1)[0])
+    return found
+
+
+def _sink_for_index(index):
+    """This instance's own PulseAudio null sink name."""
+    return "pcatgl_%d" % index
+
+
+def _sink_name(inst):
+    return _sink_for_index(inst["index"])
+
+
 def _vncloop_marker(index):
     """A stable, per-instance token for the x11vnc respawn loop's command
     line, so the orphan sweep and _kill_pids can find it (a bare
@@ -406,6 +633,9 @@ def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
         # (still holding the disk) went unswept.
         "tcp:127.0.0.1:%d," % qmp_port,     # qemu QMP
         _vncloop_marker(index),             # the x11vnc respawn loop
+        "%s.monitor" % _sink_for_index(index),     # parec on the sink
+        "%s.audiorelay" % _sink_for_index(index),  # the relay loop
+        "127.0.0.1:%d " % (4620 + index),          # websockify_audio -> relay
     )
     mine = os.getpid()
     signaled = []
@@ -440,7 +670,8 @@ def _kill_pids(pids):
     By process GROUP: each helper called setsid (start_new_session), and a
     supervisor-loop entry is a shell whose child would outlive the shell.
     """
-    for key in ("qemu", "websockify", "x11vnc", "xwayland", "weston"):
+    for key in ("qemu", "websockify_audio", "audio_relay",
+                "websockify", "x11vnc", "xwayland", "weston"):
         pid = pids.get(key)
         if pid and _alive(pid):
             try:
@@ -669,17 +900,49 @@ def on_start(api, inst):
         except OSError:
             pass
 
+    # Console audio: QEMU plays into a per-instance PulseAudio null sink
+    # (-audiodev pa + PULSE_SINK below); parec reads that sink's monitor as
+    # raw s16le, a relay fans it out, and websockify wraps it as the audio
+    # websocket the browser's worklet reads -- box86's path, since x11vnc
+    # carries no audio and QEMU's own VNC audio is off (vncAudio false).
+    # In effect in the fallback (-vnc) mode too.
+    sink = _sink_name(inst)
+    audio_tcp = 4620 + index
+    for stale in _find_sink_modules(sink):
+        _pactl(["unload-module", stale])
+    loaded = _pactl(["load-module", "module-null-sink",
+                     "sink_name=%s" % sink,
+                     "sink_properties=device.description=%s" % sink])
+    if loaded.returncode != 0:
+        log.write(("[pcatgl] pactl load-module failed (rc=%d): %s\n"
+                   % (loaded.returncode,
+                      (loaded.stderr or "").strip())).encode())
+        log.flush()
+    relay = _write_relay(d)
+    spawn("audio_relay", ["bash", "-c",
+          "AUDIORELAY=%s; while true; do "
+          "parec --device='%s.monitor' --format=s16le --rate=%d "
+          "--channels=2 --latency-msec=20 --raw "
+          "| python3 %s %d pcm; sleep 0.2; done"
+          % ("%s.audiorelay" % sink, sink, AUDIO_RATE, relay, audio_tcp)],
+          env=_pulse_env())
+    spawn("websockify_audio",
+          ["websockify", str(_audio), "127.0.0.1:%d" % audio_tcp])
+
     argv = _qemu_argv(api, inst, ports, gl)
     log.write((" ".join(argv) + "\n").encode())
     log.flush()
 
-    qemu_env = None
+    # QEMU's audio is a PulseAudio client (-audiodev pa) routed to this
+    # instance's null sink: _pulse_env gives it the runtime dir a systemd
+    # unit lacks, PULSE_SINK names the sink.
+    qemu_env = dict(_pulse_env(), PULSE_SINK=sink)
     qemu_cwd = d
     if gl:
         # GL output to the X server; SDL on x11, WAYLAND_DISPLAY absent so
         # SDL uses X and not the compositor directly
-        qemu_env = dict(os.environ, DISPLAY=":%d" % display_num,
-                        SDL_VIDEODRIVER="x11", XDG_RUNTIME_DIR=XDG_RUNTIME_DIR)
+        qemu_env.update(DISPLAY=":%d" % display_num, SDL_VIDEODRIVER="x11",
+                        XDG_RUNTIME_DIR=XDG_RUNTIME_DIR)
         qemu_env.pop("WAYLAND_DISPLAY", None)
 
     try:
@@ -743,6 +1006,9 @@ def _stop_now(api, inst):
         while qemu and _alive(qemu) and time.time() < deadline:
             time.sleep(0.25)
     _kill_pids(pids)
+    # drop this instance's null sink, or a stale one lingers on the host
+    for stale in _find_sink_modules(_sink_name(inst)):
+        _pactl(["unload-module", stale])
     _save_pids(d, {})
 
 
