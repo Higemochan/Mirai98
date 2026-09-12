@@ -11,7 +11,7 @@
   QEMU 自身の -vnc)は**全インターフェース待受が正常**(他機と同じ)。隔離対象は
   **x11vnc(-listen 127.0.0.1) と QMP(tcp:127.0.0.1) のみ**。
 - qemu-3dfx バイナリは固定せず設定値。既定は build-s
-  `/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-s/qemu-system-i386`(md5 edbd22b694287b367369dfd2b61c109e)。
+  `/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-s/qemu-system-i386`(md5 c56ad3b1fcf72e16ee6d70b519e06bf6)。
 
 ---
 
