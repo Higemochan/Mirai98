@@ -86,7 +86,10 @@ def register(api):
     api.machine_shown("pcat-gl", lambda inst: pcatgl_hardware(api, inst))
     # "vga" and "fpslimit" are this machine's own fields.  "" is accepted
     # so the global-by-name validators stay harmless for other machines,
-    # which never carry these fields.
+    # which never carry these fields.  NB: "vga" is also registered by
+    # pcat.py with the identical validator; PLUGIN_FIELDS is keyed by name,
+    # so whichever loads last wins -- kept identical on purpose, and if one
+    # side's accepted set ever changes the other must change with it.
     api.add_field("vga", lambda v: None if v in ("", "std", "cirrus")
                   else "unknown video card")
     api.add_field("fpslimit", _validate_fpslimit)
