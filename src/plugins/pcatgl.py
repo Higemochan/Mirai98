@@ -168,35 +168,35 @@ def _write_mesagl_cfg(api, inst, d):
 
 
 def _drive_args(api, inst):
-    """The IDE disks, CD and floppy, in the same layout plain pcat uses:
-    hdd1/hdd2 on the primary/secondary as index 0/1, the CD as index 2,
-    a floppy as fd A."""
+    """IDE hard disks (index 0/1) and the CD (secondary master, index 2),
+    plus both floppies.  The CD and the floppies exist even with an empty
+    tray, so a disc or disk can be put in from the Media row over QMP
+    without a restart -- exactly as plain pcat does, which is what makes
+    the edit form's "can be swapped while running" true here too."""
     argv = []
-    ide = []
-    if inst.get("hdd1"):
-        ide.append((0, inst["hdd1"]))
-    if inst.get("hdd2"):
-        ide.append((1, inst["hdd2"]))
-    for index, key in ide:
-        path = api.disk_path(inst, "hdd1" if index == 0 else "hdd2")
+    for index, key in enumerate([k for k in ("hdd1", "hdd2") if inst.get(k)]):
         argv += ["-drive", "if=ide,index=%d,%s"
-                 % (index, api.drive_backing(path))]
+                 % (index, api.drive_backing(api.disk_path(inst, key)))]
+    cd = "if=ide,index=2,media=cdrom,readonly=on"
     if inst.get("cd"):
-        cd = api.disk_path(inst, "cd")
-        argv += ["-drive", "if=ide,index=2,media=cdrom,%s"
-                 % api.drive_backing(cd)]
-    if inst.get("fdd1"):
-        fdd = api.disk_path(inst, "fdd1")
-        argv += ["-drive", "if=floppy,%s" % api.drive_backing(fdd)]
+        cd += "," + api.drive_backing(api.disk_path(inst, "cd"))
+    argv += ["-drive", cd]
+    for index, key in enumerate(("fdd1", "fdd2")):
+        drive = "if=floppy,index=%d" % index
+        if inst.get(key):
+            drive += "," + api.drive_backing(api.disk_path(inst, key))
+        argv += ["-drive", drive]
     return argv
 
 
 def _qemu_argv(api, inst, ports, gl):
     """The qemu-3dfx command line.  gl=True routes output to the X server
     (SDL, no -vnc); gl=False is the fallback -- the same binary and disks,
-    but plain -vnc so the instance still runs when the GL stack could not
-    be brought up.  ACPI is on either way (the guest wrapper needs it)."""
-    vnc, _ws, qmp_port, _audio = ports
+    but a plain -vnc console (with the websocket and SB16 mix the core
+    console expects) so the instance still runs, and is reachable, when
+    the GL stack could not be brought up.  ACPI is on either way (the
+    guest wrapper needs it)."""
+    vnc, ws, qmp_port, _audio = ports
     display = vnc - 5900
     host = "127.0.0.1" if api.LOOPBACK else "0.0.0.0"
     vga = inst.get("vga") or "std"
@@ -217,20 +217,36 @@ def _qemu_argv(api, inst, ports, gl):
         "-vga", vga + ",retrace=precise",
         "-audiodev", "none,id=snd",
         "-device", "sb16,audiodev=snd",
-        # no -nic/-netdev leaves QEMU sprouting a default NIC on a slirp
-        # user net that can reach the host; this machine is isolated
-        "-nic", "none",
-        # a QMP port so media swap and reset have a control channel even
-        # though the core never speaks to an engine over QMP itself
-        "-qmp", "tcp:%s:%d,server,nowait" % (host, qmp_port),
+        # QMP stays on loopback whatever LOOPBACK is: it is unauthenticated
+        # and the production service runs without --loopback, so binding
+        # the host address would put it on the LAN.  _qmp_command connects
+        # to 127.0.0.1 to match.
+        "-qmp", "tcp:127.0.0.1:%d,server=on,wait=off" % qmp_port,
     ]
     if gl:
         # GL output to the X server; SDL is qemu-3dfx's GLX carrier
         argv += ["-display", "sdl"]
     else:
-        # fallback: an ordinary VNC head, no GL
-        argv += ["-vnc", "%s:%d" % (host, display)]
+        # fallback: an ordinary VNC console with the browser websocket and
+        # the SB16 mix on the stream, the same shape plain pcat uses, so
+        # the core console (ports_of's ws) connects and on_start's
+        # _port_open(ws) wait is satisfied rather than timing out
+        argv += ["-display", "none",
+                 "-vnc", "%s:%d,websocket=%d,audiodev=snd"
+                 % (host, display, ws)]
+    if inst.get("snapshot"):
+        # the record's Snapshot flag: throw guest writes away at shutdown
+        # rather than letting them reach the original disk
+        argv.append("-snapshot")
     argv += _drive_args(api, inst)
+    # net "" is isolated; net "nat" is an RTL8139 behind QEMU's own NAT
+    # (Win98 has a driver).  bridge is not offered by this machine.
+    if inst.get("net") == "nat":
+        argv += ["-netdev", "user,id=lan", "-device", "rtl8139,netdev=lan"]
+    else:
+        # given no -nic/-netdev, QEMU fits a default NIC on a slirp user
+        # net that can reach the host; an isolated guest must not have one
+        argv += ["-nic", "none"]
     argv += ["-boot", "order=%s" % boot]
     if inst.get("extra"):
         argv += inst["extra"].split()
