@@ -10,8 +10,8 @@
 - `--loopback` 無し運用では、ブラウザ用の待受(websockify の ws ポート、フォールバック時の
   QEMU 自身の -vnc)は**全インターフェース待受が正常**(他機と同じ)。隔離対象は
   **x11vnc(-listen 127.0.0.1) と QMP(tcp:127.0.0.1) のみ**。
-- qemu-3dfx バイナリは固定せず設定値。既定は build-s
-  `/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-s/qemu-system-i386`(md5 c56ad3b1fcf72e16ee6d70b519e06bf6)。
+- qemu-3dfx バイナリは固定せず設定値。既定は build-cd
+  `/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-cd/qemu-system-i386`(md5 5b679a305fb22f60dd9736d8d7231151)。
 
 ---
 
@@ -37,7 +37,7 @@ md5(HEAD 585d754 時点。**再レビュー修正が入れば変わるので配�
 2. 既存ファイルは日付付きで退避(box86.py.pre-… と同流儀): 例 `cp -a <dst> <dst>.pre-pcatgl.$(date +%Y%m%d-%H%M%S)`。
 3. コピー後、**配備先の md5 が 1 と一致**することを確認。
 4. qemu-3dfx パスを設定に追加: `/opt/mirai98/web/pc98web.json` に
-   `"qemu_3dfx": "/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-s/qemu-system-i386"` を入れる
+   `"qemu_3dfx": "/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-cd/qemu-system-i386"` を入れる
    (JSON 構文維持)。未設定なら既定パスにフォールバックするが、明示が安全。
 5. 再起動: `systemctl restart mirai98.service`。**KillMode=process なので稼働中 VM(vm-0 等)は生存**。
    確認: 再起動前後で稼働 VM の QEMU pid が不変(`pgrep -af qemu-system-i386`)。
@@ -194,3 +194,19 @@ vnc=5920+index、ws=5830+index、qmp=4820+index)。
 | (7) 停止・孤児掃除 |  |  |  |
 
 実施者: ______  日付: ______  総合: 合 / 否(要修正: ____________)
+
+---
+
+## 検証時の入力の勘所(合成入力 / 計器)
+
+- **ゲスト入力は QMP `input-send-event` を使う**。キー間隔 **0.18s**・押下保持 **0.03s**・撮影は投入の **4s 後**(反映が遅い)。vncdotool の `type` と QMP キー **0.05s 間隔**は文字を落とす(例: `command.com`→`comand.co`)。道具: `/tmp/fc-qmpkey.py`(text/keys)、`/tmp/fc-qmpin.py`(move/click)。
+- **xdotool / XTEST は Xwayland 上で偽陰性**(絶対ポインタ move/click が不達に見え AE=0 になる)。クリック命中の実経路検証は **生 RFB PointerEvent を x11vnc に直送**するか vncdotool を x11vnc に直結すること。2026-09-12 の #49 検証で、xdotool AE=0 を「まだ壊れている」と誤読しかけた(実際は usb-tablet active 後に RFB 経路で命中)。
+- 画面が自走(Blendermark 等)・起動途中だと 2 枚差分が confound になる。判定は必ず**実像**で、静止画面で採る。
+
+## Final Reality での 3D 計測メモ (#54)
+
+- **Final Reality に「Average FPS」項目は無い**。3D tests タブの **シーン別 images/s**(Robots / City scene)が fps 相当。3D performance は Reality marks(総合指標)。
+- **FpsLimit は D3D 実効 fps の律速ではない**(上限であって下限でない)。実測: FpsLimit,60→Robots 23.74/City 28.21、FpsLimit,75→Robots 23.67/City 29.17(誤差内)。重い D3D シーンは SoftGPU WineD3D→GL→qemu-3dfx の描画自体が律速で 24〜29 images/s、60 に届かない=キャップを上げても不変。
+- **Visual appearance 100%**(2回とも)=描画内容は正しい、速度だけの問題。
+- **pcat-gl で Direct3D 実レンダを初確認**(列挙→実描画→数値まで到達)。D3D 出力は GL surface(qemu-3dfx)経由なので **QMP screendump は黒**(std-VGA を撮るため)、実像は x11vnc/SDL 窓側でのみ見える。
+- 「60fps」の二義: (A) コンソール更新レート=x11vnc -wait でキャップ(17ms=60/13ms=76)、軽い画面は 60 対応。(B) 3D レンダ実 fps=FR の images/s、重シーンは 3D 側律速。
