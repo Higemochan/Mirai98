@@ -10,8 +10,8 @@
 - `--loopback` 無し運用では、ブラウザ用の待受(websockify の ws ポート、フォールバック時の
   QEMU 自身の -vnc)は**全インターフェース待受が正常**(他機と同じ)。隔離対象は
   **x11vnc(-listen 127.0.0.1) と QMP(tcp:127.0.0.1) のみ**。
-- qemu-3dfx バイナリは固定せず設定値。既定は build-o
-  `/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-o/qemu-system-i386`(md5 ec9f057d3a22450ca66a5a06299e5a2b)。
+- qemu-3dfx バイナリは固定せず設定値。既定は build-q
+  `/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-q/qemu-system-i386`(md5 783a2600d1cbc6319a6749f0b10fc093)。
 
 ---
 
@@ -37,7 +37,7 @@ md5(HEAD 585d754 時点。**再レビュー修正が入れば変わるので配�
 2. 既存ファイルは日付付きで退避(box86.py.pre-… と同流儀): 例 `cp -a <dst> <dst>.pre-pcatgl.$(date +%Y%m%d-%H%M%S)`。
 3. コピー後、**配備先の md5 が 1 と一致**することを確認。
 4. qemu-3dfx パスを設定に追加: `/opt/mirai98/web/pc98web.json` に
-   `"qemu_3dfx": "/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-o/qemu-system-i386"` を入れる
+   `"qemu_3dfx": "/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/build-q/qemu-system-i386"` を入れる
    (JSON 構文維持)。未設定なら既定パスにフォールバックするが、明示が安全。
 5. 再起動: `systemctl restart mirai98.service`。**KillMode=process なので稼働中 VM(vm-0 等)は生存**。
    確認: 再起動前後で稼働 VM の QEMU pid が不変(`pgrep -af qemu-system-i386`)。

@@ -39,7 +39,7 @@ import time
 # current (build-n/build-m/... are still moving), and this default is only
 # the last resort so a bench with neither set still runs.
 QEMU_3DFX_DEFAULT = ("/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/"
-                     "build-o/qemu-system-i386")
+                     "build-q/qemu-system-i386")
 
 # The GL display stack's own geometry.  Xwayland gets this, x11vnc exports
 # whatever the guest actually draws inside it.
