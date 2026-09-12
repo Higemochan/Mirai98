@@ -3420,6 +3420,13 @@ def qemu_argv(inst):
         # straight onto the LAN through the host's bridge
         argv += ["-netdev", "bridge,id=lan,br=" + BRIDGE,
                  "-device", "pc98-lgy98,netdev=lan"]
+    else:
+        # net "" (isolated): given no -netdev/-nic, QEMU fits a default NIC
+        # on a slirp user net (restrict=off -- it can reach the host's
+        # network), so info network on a supposedly isolated pc98 guest
+        # shows type=user,net=10.0.2.0,restrict=off (measured 2026-09-12).
+        # Say so explicitly, as pcat/towns already do.
+        argv += ["-nic", "none"]
     if inst.get("serial"):
         argv += ["-chardev", "serial,id=ser0,path=" + inst["serial"],
                  "-device", "serial98,chardev=ser0"]
