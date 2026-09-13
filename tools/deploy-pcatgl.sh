@@ -38,7 +38,7 @@ FILES=(
 # stays in step with the code.  Fill in the expected md5 when a build is
 # blessed (build-p) to have the script refuse to deploy against the wrong
 # binary; leave it empty to skip the check.
-QEMU3DFX_EXPECTED_MD5="5b679a305fb22f60dd9736d8d7231151"    # build-cd の md5(CD+MIDI)。別ビルドにしたらここも更新(空=検査しない)
+QEMU3DFX_EXPECTED_MD5="d803ef11ed1d9e24d3bf6e537e67c595"    # build-cd の md5(CD+MIDI、cue単一FILE修正後)。別ビルドにしたらここも更新(空=検査しない)
 
 die() { echo "DEPLOY ABORTED: $*" >&2; exit 1; }
 
