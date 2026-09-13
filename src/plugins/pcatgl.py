@@ -275,12 +275,17 @@ def _qemu_argv(api, inst, ports, gl):
     # MPU-401 (pc98-midi) synthesised by FluidSynth, on the CD/MIDI builds.
     # Its defaults are PC-98 values -- iobase 0xe0d0, irq 6 -- and irq 6 is
     # the standard-PC floppy, so override to a free port and IRQ (SB16 is
-    # irq 5, and there is no NIC or other ISA IRQ user here).  No audiodev
-    # property on this device: its output rides the single pa audiodev, the
-    # same sink SB16 uses, so MIDI reaches the browser over #52's path.
-    # Gated: build-s has no pc98-midi and would refuse to start with it.
+    # irq 5, and there is no NIC or other ISA IRQ user here).  iobase is
+    # 0x210, not the more usual 0x330: Win98's own bundled "Music Quest
+    # MPU-401 Compatible" driver only declares one Basic Configuration,
+    # 0x210/IRQ9, and has no UI to point it anywhere else -- 0x330 left the
+    # device unreachable (Code 24) with no way for the guest to find it.
+    # No audiodev property on this device: its output rides the single pa
+    # audiodev, the same sink SB16 uses, so MIDI reaches the browser over
+    # #52's path. Gated: build-s has no pc98-midi and would refuse to start
+    # with it.
     if _midi_supported(_qemu_bin(api)):
-        argv += ["-device", "pc98-midi,iobase=0x330,irq=9,soundfont=%s"
+        argv += ["-device", "pc98-midi,iobase=0x210,irq=9,soundfont=%s"
                  % (api.CONFIG.get("pcatgl_soundfont") or PCATGL_SOUNDFONT)]
     if gl:
         # GL output to the X server; SDL is qemu-3dfx's GLX carrier
