@@ -3606,6 +3606,12 @@ def media_devices(inst):
     for block in reply["return"]:
         if not block.get("removable"):
             continue
+        # A BlockBackend with no qdev is a slot QEMU made by default and
+        # never wired to anything -- i440fx has no SD controller, yet
+        # query-block still lists an empty "sd0".  Offering it as a drive
+        # to swap media into is a phantom: nothing would read the disc.
+        if not block.get("qdev"):
+            continue
         inserted = (block.get("inserted") or {}).get("file", "")
         # a snapshotted drive shows its temp overlay, the image is behind
         if '"filename": "' in inserted:
@@ -3619,17 +3625,66 @@ def media_devices(inst):
     return out
 
 
+# Win9x's CD-ROM/MCI stack never issues GET_EVENT_STATUS_NOTIFICATION
+# (confirmed live: zero occurrences across every guest ATAPI trace taken
+# for this investigation) and relies instead on TEST UNIT READY's own
+# two-stage UNIT_ATTENTION dance -- hw/ide/atapi.c's own comment: "we
+# have to report an ejected state and then a loaded state to guests ...
+# [g]uests that do not use GET_EVENT_STATUS_NOTIFICATION ... rely on
+# this behavior". A bare blockdev-change-medium still raises that dance
+# (sense 2/0x3A then 6/0x28, confirmed byte-for-byte with gdb against
+# this build's own hw/ide/atapi.c -- no porting breakage), but the
+# guest only ever samples the "medium not present" step once, in
+# passing: measured live, that is not enough for the audio (MCI
+# cdaudio) side to notice, and CD Player keeps showing whatever disc
+# was in the drive at boot no matter how many tracks the new one has.
+# An actual eject the guest can poll for several seconds does make it
+# re-read (measured: 6s recovers it; DOSBox-X's own fix for the same
+# Windows behavior uses ~4s). 7s below is a safety margin over that.
+CD_SWAP_EJECT_SETTLE_SECONDS = 7.0
+
+
 def change_media(inst, device, path):
     """Put a disk in a running machine's drive, or take one out."""
-    known = {d["device"] for d in media_devices(inst)}
-    if device not in known:
+    drives = {d["device"]: d for d in media_devices(inst)}
+    if device not in drives:
         return "no drive called %s" % device
     if not path:
         reply = qmp(inst, "eject", {"device": device, "force": True})
         text = "ejected"
     else:
+        # Eject first and give the guest time to actually poll the
+        # drive while it reads empty (CD_SWAP_EJECT_SETTLE_SECONDS
+        # above) before the new disc goes in, rather than swapping
+        # straight to blockdev-change-medium. This runs on the calling
+        # HTTP request's own thread (ThreadingHTTPServer hands each
+        # connection its own thread, and the handler's only lock --
+        # _lock, around find_instance()/load_instances() -- is already
+        # released by the time change_media() is reached), so the wait
+        # holds up this one response, not other instances or requests.
+        previous_file = drives[device]["file"]
+        eject_reply = qmp(inst, "eject", {"device": device, "force": True})
+        if eject_reply is None:
+            return "the machine did not answer"
+        if "error" in eject_reply:
+            return eject_reply["error"].get("desc", "refused")
+        time.sleep(CD_SWAP_EJECT_SETTLE_SECONDS)
         reply = qmp(inst, "blockdev-change-medium",
                     {"device": device, "filename": path, "format": "raw"})
+        if reply is not None and "error" in reply and previous_file:
+            # the eject above already went through, so a failed insert
+            # (bad format, an image gone missing, ...) would otherwise
+            # leave a working machine's drive empty; put the disc that
+            # was there back rather than leave it that way
+            desc = reply["error"].get("desc", "refused")
+            restore = qmp(inst, "blockdev-change-medium",
+                          {"device": device, "filename": previous_file,
+                           "format": "raw"})
+            if restore is None or "error" in restore:
+                return ("%s; the drive is now empty and %s could not be "
+                        "put back" % (desc, os.path.basename(previous_file)))
+            return "%s; kept %s in %s" \
+                   % (desc, os.path.basename(previous_file), device)
         text = "loaded %s" % os.path.basename(path)
     if reply is None:
         return "the machine did not answer"
