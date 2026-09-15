@@ -754,8 +754,16 @@ async function listView(force) {
 function diskOptions(files, value) {
   const groups = [...new Set(files.map(f => f.group || ''))]
     .filter(Boolean).sort();
-  const opt = f => '<option' + (f.name === value ? ' selected' : '') + '>' +
-                   esc(f.name) + '</option>';
+  // A disc that travels with a sheet is one disc, not a file: show it by
+  // the name the two share and keep the extension out of the reader's way
+  // ("A列車で行こう4 (Windows版)", not "... .bin").  The option carries an
+  // explicit value so only the label changes -- what the form submits, and
+  // what gets mounted, is still the data file's own name.  A lone .iso has
+  // no sheet and is shown as it is.
+  const label = f => (f.cue ? f.name.replace(/\.[^.\/]+$/, '') : f.name);
+  const opt = f => '<option value="' + esc(f.name) + '"' +
+                   (f.name === value ? ' selected' : '') + '>' +
+                   esc(label(f)) + '</option>';
   return groups.map(g => '<optgroup label="' + esc(g) + '">' +
       files.filter(f => (f.group || '') === g).map(opt).join('') +
       '</optgroup>').join('') +
@@ -2134,6 +2142,12 @@ async function detailView(name) {
   // and nothing else on this page needs a third possible machine to
   // special-case yet.
   const isBox86 = i.machine === 'box86';
+  // Rows below describe PC-98 hardware (PEGC/GA-98NB, LGY-98, fat98,
+  // GP-IB, N88 BASIC).  A machine that ships its own hardware view
+  // is not a PC-98 and must not inherit them by falling off the end
+  // of the machine chain -- pcat-gl did exactly that and reported
+  // itself as PEGC + GA-98NB.
+  const ownHw = !!window.MiraiPlugins.hardware[i.machine];
   view.innerHTML =
     '<div class="crumb"><a href="#/">' +
     esc(facts.hostname || 'host') + '</a> &rsaquo; ' +
@@ -2198,7 +2212,7 @@ async function detailView(name) {
     '<div style="flex:1;min-width:18em"><dl>' +
     '<dt>Machine type</dt><dd>' + esc(i.machine || 'pc9821') + '</dd>' +
     '<dt>BIOS</dt><dd>' + biosLabel(i) + '</dd>' +
-    (i.machine === 'towns' || isBox86 ? '' :
+    (i.machine === 'towns' || isBox86 || ownHw ? '' :
      '<dt>Font</dt><dd>' + (i.font === 'real' ? 'real machine ROM'
                                               : 'compatible') + '</dd>') +
     (isBox86 ? '' :
@@ -2206,13 +2220,14 @@ async function detailView(name) {
                       : 'KVM (Experimental)') + '</dd>') +
     '<dt>Memory</dt><dd>' + esc(i.memory) + '</dd>' +
     '<dt>Disks</dt><dd>' + (disks.length ||
-     (isBox86 ? 'private seed hard disk' : 'none — N88 BASIC')) + '</dd>' +
+     (isBox86 ? 'private seed hard disk'
+      : ownHw ? 'none' : 'none — N88 BASIC')) + '</dd>' +
     '<dt>Console</dt><dd>VNC :' + (i.ports[0] - 5900) + '</dd></dl></div>' +
     '<div style="width:16em" id="gauges"></div></div>' +
     // the two panels, as VMware arranges them
     '<div class="grid2" style="grid-template-columns:1fr 1fr">' +
     '<div class="card"><h3>General information</h3><table>' +
-    (isBox86 ? '' :
+    (isBox86 || ownHw ? '' :
      '<tr><td style="width:11em;color:#8d99a5">Networking</td><td>' +
      (i.net === 'nat' ? 'LGY-98, user NAT'
       : i.net === 'bridge' ? 'LGY-98, bridged to the LAN' : 'none') +
@@ -2220,12 +2235,12 @@ async function detailView(name) {
     '<tr><td style="width:11em;color:#8d99a5">Storage</td><td>' +
     (disks.length + ' disk' + (disks.length === 1 ? '' : 's')) +
     (i.snapshot ? ', changes discarded at shutdown' : '') + '</td></tr>' +
-    (i.machine === 'towns' ? '' :
+    (i.machine === 'towns' || ownHw ? '' :
      '<tr><td style="color:#8d99a5">Display</td><td>' +
      (isBox86 ? 'S3 ViRGE/DX + 3Dfx Voodoo2 (passthrough)'
       : i.machine === 'pc9801' ? 'PC-9801 standard'
       : 'PEGC + GA-98NB') + '</td></tr>') +
-    (isBox86 ? '' :
+    (isBox86 || ownHw ? '' :
      '<tr><td style="color:#8d99a5">Shared folder</td><td>' +
      (i.mount ? esc(i.mount) + ' (fat98)' : 'none') + '</td></tr>' +
      '<tr><td style="color:#8d99a5">Serial port</td><td>' +

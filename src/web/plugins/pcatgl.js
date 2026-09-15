@@ -365,7 +365,7 @@ window.registerMachinePlugin({
                  fpslimit: '60', accel: 'kvm', sound: 'none', bios: 'real',
                  acpi: 'on', lockSound: true, lockBios: true }
   },
-  badge: { 'pcat-gl': '3dfx' },
+  badge: { 'pcat-gl': 'DOS/V' },
   labels: { 'pcat-gl': 'DOS/V PC + 3dfx (GL)' },
   editForm: { 'pcat-gl': pcatglEditForm },
   hardware: { 'pcat-gl': pcatglHardware },
