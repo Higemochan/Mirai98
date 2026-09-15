@@ -20,6 +20,7 @@
 set -uo pipefail
 
 WT="/storage/work/pcat-wt"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 DST="/opt/mirai98/web"
 SERVICE="mirai98.service"
 VMROOT="/storage/pc98/vm"
@@ -38,7 +39,7 @@ FILES=(
 # stays in step with the code.  Fill in the expected md5 when a build is
 # blessed (build-p) to have the script refuse to deploy against the wrong
 # binary; leave it empty to skip the check.
-QEMU3DFX_EXPECTED_MD5="9cd26286b53e5fce78ffa5951b40e414"    # build-cd の md5(CD+MIDI、cue単一FILE修正+ACPI SCI IRQ9→10移設後)。別ビルドにしたらここも更新(空=検査しない)
+QEMU3DFX_EXPECTED_MD5="2dcf75416495fb7513585d2f790a065b"    # build-cd の md5(CD+MIDI、cue単一FILE修正+ACPI SCI IRQ9→10移設+ATAPI DMA が cd_img を迂回していた件の修正後)。別ビルドにしたらここも更新(空=検査しない)
 
 die() { echo "DEPLOY ABORTED: $*" >&2; exit 1; }
 
@@ -91,6 +92,40 @@ for pair in "${FILES[@]}"; do
   src="$WT/${pair%%|*}"
   [ -f "$src" ] || die "source missing: $src"
 done
+
+# --- preflight: does the code actually run? --------------------------------
+# A NameError does not exist until its line runs, so neither py_compile nor a
+# reviewer reading a diff can see one.  On 2026-09-14 a renamed variable left
+# one use behind, reached production, and stopped every vm-0 start: on_start
+# threw before QEMU was spawned, the display stack came up around nothing, and
+# the console answered "no answer".  Both checks below run before a single
+# byte is copied, and both are validated against that very file.
+PYFLAKES_WHL="$SELF_DIR/pyflakes-3.4.0-py2.py3-none-any.whl"
+SMOKE="$SELF_DIR/smoke_onstart.py"
+[ -f "$PYFLAKES_WHL" ] || die "deploy gate needs $PYFLAKES_WHL"
+[ -f "$SMOKE" ]        || die "deploy gate needs $SMOKE"
+
+for pair in "${FILES[@]}"; do
+  src="$WT/${pair%%|*}"
+  case "$src" in *.py) ;; *) continue ;; esac
+  python3 -m py_compile "$src" || die "py_compile failed: $src"
+  # count the output rather than test $?: pyflakes exits non-zero for its own
+  # reasons and a pipe would report the last command's status, not its own
+  lint="$(PYTHONPATH="$PYFLAKES_WHL" python3 -m pyflakes "$src" 2>&1)"
+  n="$(printf '%s' "$lint" | grep -c . || true)"
+  if [ "$n" != "0" ]; then
+    printf '%s\n' "$lint" >&2
+    die "pyflakes: $n undefined-name/unused problem(s) in $src"
+  fi
+  printf '  lint ok:  %s\n' "$src"
+done
+
+# Executes on_start for real with the outside world replaced, then judges it
+# by what it did -- the audio websockify must have been spawned with its port
+# -- rather than by which lines it touched, because a line number rots on the
+# next edit.  Hermetic: nothing spawned, no port bound, temp files only.
+python3 "$SMOKE" "$WT/src/plugins/pcatgl.py" || die "on_start smoke failed"
+echo
 
 # --- snapshot running guests BEFORE the restart ----------------------------
 # Every running guest must survive the restart (KillMode=process).  Core
