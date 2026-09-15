@@ -43,6 +43,13 @@ import time
 QEMU_3DFX_DEFAULT = ("/storage/work/kvm98/src/qemu-3dfx-0b399bd-fix/"
                      "build-cd/qemu-system-i386")
 
+# How often x11vnc looks at the captured window (-wait) and how long it
+# holds a captured frame before sending it (-defer), in milliseconds.  Both
+# are fixed rather than derived from the instance's fps: see the measurement
+# table where they are used.
+VNC_POLL_MS = 10
+VNC_DEFER_MS = 1
+
 # The GL display stack's own geometry.  Xwayland gets this, x11vnc exports
 # whatever the guest actually draws inside it.
 SCREEN_W = 1024
@@ -280,12 +287,31 @@ def _qemu_argv(api, inst, ports, gl):
     # MPU-401 Compatible" driver only declares one Basic Configuration,
     # 0x210/IRQ9, and has no UI to point it anywhere else -- 0x330 left the
     # device unreachable (Code 24) with no way for the guest to find it.
-    # No audiodev property on this device: its output rides the single pa
-    # audiodev, the same sink SB16 uses, so MIDI reaches the browser over
-    # #52's path. Gated: build-s has no pc98-midi and would refuse to start
-    # with it.
+    # IRQ 9 matches what the guest's driver declares, and it has to: the
+    # bundled "Music Quest MPU-401 Compatible" offers one Basic
+    # Configuration and no way to pick another, so moving the device to
+    # IRQ10 only left the two disagreeing -- measured live 2026-09-13,
+    # the wizard still asked for IRQ9 and the reboot still died.
+    # IRQ9 is also the ACPI SCI here, and sharing it stops Win98's ACPI
+    # restart from completing: the guest falls through to a soft-off, so
+    # QEMU sees SHUTDOWN/guest-shutdown and exits(0) on every reboot once
+    # the driver is bound (with no driver bound the same reboot raised
+    # RESET/guest-reset and QEMU stayed up).  The fix belongs on the SCI
+    # side, not here.
+    # audiodev=snd is required, not optional.  pc98-midi takes
+    # DEFINE_AUDIO_PROPERTIES, and hw/audio/pc98-midi.c's realize spells out
+    # what an unset one means: "Without an audiodev the card is still there
+    # for the guest to program; it simply has nowhere to play" -- and
+    # midi_synth_open leaves the synthesiser silent.  Measured live
+    # 2026-09-13: with it unset, `info qtree` showed pc98-midi audiodev ""
+    # next to sb16's "snd", the guest bound the driver and Media Player
+    # played a 30 s MIDI, and parec on pcatgl_6.monitor recorded 18 s of
+    # exact silence (rms 0, peak 0).  It shares the single pa audiodev with
+    # SB16, so MIDI reaches the browser over #52's path.  Gated: build-s has
+    # no pc98-midi and would refuse to start with it.
     if _midi_supported(_qemu_bin(api)):
-        argv += ["-device", "pc98-midi,iobase=0x210,irq=9,soundfont=%s"
+        argv += ["-device",
+                 "pc98-midi,audiodev=snd,iobase=0x210,irq=9,soundfont=%s"
                  % (api.CONFIG.get("pcatgl_soundfont") or PCATGL_SOUNDFONT)]
     if gl:
         # GL output to the X server; SDL is qemu-3dfx's GLX carrier
@@ -363,6 +389,112 @@ def _port_open(port):
             return True
     except OSError:
         return False
+
+
+def _listen_inodes(port):
+    """Socket inodes LISTENing on 127.0.0.1:<port>, from /proc/net/tcp.
+
+    Reading the kernel's own table answers "is this port actually taken",
+    which a command-line scan cannot: a helper that forked, was re-exec'd,
+    or was adopted by init still holds its socket no matter what its argv
+    looks like now.
+    """
+    want = "%08X:%04X" % (0x0100007F, port)      # 127.0.0.1, big-endian hex
+    inodes = set()
+    for path in ("/proc/net/tcp",):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                next(fh, None)
+                for line in fh:
+                    col = line.split()
+                    if len(col) < 10:
+                        continue
+                    # st == 0A is TCP_LISTEN; a bound-but-closing socket
+                    # (TIME_WAIT) has no owner to kill and frees itself.
+                    if col[3] != "0A":
+                        continue
+                    if col[1] == want or col[1].endswith(":%04X" % port):
+                        inodes.add(col[9])
+        except (OSError, StopIteration):
+            pass
+    return inodes
+
+
+def _port_holders(port):
+    """Pids holding a LISTEN socket on <port>, by matching /proc/*/fd."""
+    inodes = _listen_inodes(port)
+    if not inodes:
+        return []
+    want = set("socket:[%s]" % i for i in inodes)
+    mine = os.getpid()
+    held = []
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid == mine:
+            continue
+        try:
+            fds = os.listdir("/proc/%d/fd" % pid)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink("/proc/%d/fd/%s" % (pid, fd)) in want:
+                    held.append(pid)
+                    break
+            except OSError:
+                continue
+    return held
+
+
+def _free_ports(ports, log):
+    """Make sure this instance's own ports are actually free before the new
+    generation binds them.
+
+    The cmdline sweep above catches helpers it can recognise; this catches
+    whatever is left by asking the kernel who is LISTENing.  It is safe to
+    be blunt here because every port is index-derived: nothing but this
+    instance's own leftovers can be sitting on them.
+    """
+    stuck = []
+    for port in ports:
+        for pid in _port_holders(port):
+            if pid not in stuck:
+                stuck.append(pid)
+                try:
+                    cmd = open("/proc/%d/cmdline" % pid, "rb").read()
+                    cmd = cmd.replace(b"\0", b" ").decode("utf-8", "replace")
+                except OSError:
+                    cmd = "?"
+                log.write(("[pcatgl] port %d still held by pid %d: %s\n"
+                           % (port, pid, cmd[:200])).encode())
+    if not stuck:
+        return
+    log.flush()
+    for pid in stuck:
+        for sig in (15,):
+            try:
+                os.killpg(os.getpgid(pid), sig)
+            except OSError:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if not any(_port_holders(p) for p in ports):
+            break
+        time.sleep(0.2)
+    for port in ports:
+        for pid in _port_holders(port):
+            try:
+                os.kill(pid, 9)
+                log.write(("[pcatgl] port %d: SIGKILL pid %d\n"
+                           % (port, pid)).encode())
+            except OSError:
+                pass
+    log.flush()
 
 
 def _wl_socket(index):
@@ -602,11 +734,14 @@ def _sink_name(inst):
 
 def _console_fps(inst):
     """The console frame rate (FPS) this instance targets: the mesagl guest
-    cap (FpsLimit) and the x11vnc capture/send rate both follow it.  Read
-    from the "fpslimit" field (kept for back-compat); default 60, clamped
-    to 20-75.  Below ~20 is choppy; above ~75 only adds host readback
-    (glReadPixels) load for frames the guest (~60) never makes, and a poll
-    faster than the guest presents buys nothing."""
+    cap (FpsLimit) follows it.  Read from the "fpslimit" field (kept for
+    back-compat); default 60, clamped to 20-75.  Below ~20 is choppy; above
+    ~75 only adds host readback (glReadPixels) load for frames the guest
+    (~60) never makes.
+
+    x11vnc's capture rate no longer follows it -- see VNC_POLL_MS /
+    VNC_DEFER_MS, which are set from what the capture path was measured to
+    carry rather than from what the guest is asked to draw."""
     v = inst.get("fpslimit")
     try:
         n = 60 if v in ("", None) else int(v)
@@ -736,6 +871,7 @@ def _kill_pids(pids):
                 os.killpg(pid, 9)
             except OSError:
                 pass
+    _reap_exited(pids.values())
 
 
 def _reap(pids, timeout=5):
@@ -745,6 +881,7 @@ def _reap(pids, timeout=5):
     deadline = time.time() + timeout
     while time.time() < deadline:
         if not any(_alive(p) for p in pids):
+            _reap_exited(pids)
             return
         time.sleep(0.2)
     for p in pids:
@@ -753,6 +890,30 @@ def _reap(pids, timeout=5):
                 os.killpg(p, 9)
             except OSError:
                 pass
+    _reap_exited(pids)
+
+
+def _reap_exited(pids):
+    """Clear the kernel entries of helpers that have already exited.
+
+    Nothing here waits: a pid still running answers WNOHANG and is left
+    alone.  Only pids this plugin recorded are asked about -- never
+    waitpid(-1), and never SIGCHLD=SIG_IGN.  The manager reads
+    Popen.poll()/.returncode in several places, and both of those broader
+    strokes would let an exit status be collected out from under one of
+    those handles.  These pids carry no such handle: spawn() keeps
+    proc.pid and lets the Popen go, and QEMU's is local to on_start and
+    out of scope by the time any of this runs.
+    """
+    for pid in pids:
+        if not pid:
+            continue
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass        # not ours: pids.json outlived a manager restart
+        except OSError:
+            pass
 
 
 def _pid_matches(pid, needle):
@@ -863,12 +1024,28 @@ def _start_display_stack(api, inst, d, ports, pids, log):
             # discipline a missing display-stack binary already gets.
             return "x11vnc not found"
         findwin = _write_findwin(d)
-        # x11vnc's default screen poll (-wait) and update defer are ~20ms,
-        # which caps the console at ~50fps regardless of how fast the guest
-        # presents.  Drive both from the target frame rate so ~60fps (or
-        # more) actually reaches the browser; 0 (unlimited) polls fast.
-        fps = _console_fps(inst)          # clamped 20-75
-        wait_ms = round(1000 / fps)       # 60 -> 17ms, 75 -> 13ms
+        # x11vnc's poll (-wait) and send defer (-defer) used to be driven
+        # from the target frame rate, both set to a whole frame interval.
+        # -defer is how long x11vnc sits on a frame it has ALREADY captured
+        # before putting it on the wire, so a frame-long defer spends a
+        # frame period of delay on every frame and drops most of them.
+        #
+        # Measured on CT209 for #62 (2026-09-14), GL source presenting
+        # 62-77fps into a 1024x768 window, counting the FramebufferUpdates
+        # a client actually received (not what x11vnc reports about itself):
+        #
+        #     -wait 16 -defer 16   21.9 updates/s   <- what this used to do
+        #     -wait 16 -defer  1   34.9
+        #     -wait 10 -defer  1   44.8             <- what it does now
+        #     -wait  5 -defer  1   56.8
+        #
+        # 10ms rather than the 5ms that scores highest: the guests this
+        # console exists for present well under 60 (Final Reality sits near
+        # 29, bounded by the guest's own 3D throughput, not by this path),
+        # so 44.8 is already headroom over anything they make, while 5ms
+        # costs about 20 more points of host CPU polling for frames that
+        # were never drawn.  Neither figure caps the guest; they are what
+        # this path can carry of the frames that do exist.
         # -cursor most: this guest draws no cursor into the framebuffer (the
         # SDL/host draws a sprite x11vnc's -id capture never sees), so noVNC
         # would only show its fallback dot.  -cursor most fetches the real
@@ -884,7 +1061,7 @@ def _start_display_stack(api, inst, d, ports, pids, log):
               "-wait %d -defer %d -cursor most; "
               "fi; sleep 1; done"
               % (_vncloop_marker(index), findwin, display_num,
-                 display_num, vnc, wait_ms, wait_ms)])
+                 display_num, vnc, VNC_POLL_MS, VNC_DEFER_MS)])
 
         spawn("websockify", ["websockify", str(ws), "127.0.0.1:%d" % vnc])
     except _DisplayHelperLaunchError as exc:
@@ -910,9 +1087,17 @@ def _cfg_confirmed(log_path):
 def on_start(api, inst):
     index = inst["index"]
     ports = api.ports_of(inst)
-    vnc, ws, qmp_port, _audio = ports
+    vnc, ws, qmp_port, audio_ws = ports
     display_num = vnc - 5900
     d = _inst_dir(api, inst)
+
+    # A guest that powered itself off leaves QEMU exited but unreaped:
+    # nothing waited on it, and the orphan sweep further down cannot see
+    # it either, since a zombie's /proc/<pid>/cmdline is empty and so
+    # matches no command line.  The pids this instance recorded last time
+    # are exactly the ones to ask about, and asking costs nothing once
+    # they are gone.
+    _reap_exited(_load_pids(d).values())
 
     try:
         os.remove(_fallback_marker(d))
@@ -948,6 +1133,15 @@ def on_start(api, inst):
     swept = _sweep_orphans(d, index, display_num, vnc, qmp_port, log)
     if swept:
         _reap(swept)
+    # Preflight: the sweep matches on command lines, so anything it cannot
+    # recognise -- a forked x11vnc child adopted by init is the one seen in
+    # practice -- keeps its listening socket and the next start loops on
+    # "could not obtain listening port".  Ask the kernel instead.
+    # Both audio ports, not just the relay it feeds: ports_of hands back
+    # the websocket (AUDIO_WS_BASE + index) as well, and that is the one
+    # seen surviving in practice -- a websockify whose x11vnc has gone
+    # keeps its port bound, and the next start has nowhere to listen.
+    _free_ports((vnc, ws, qmp_port, audio_ws, 4620 + index), log)
 
     _write_mesagl_cfg(api, inst, d)
 
@@ -998,7 +1192,7 @@ def on_start(api, inst):
               % ("%s.audiorelay" % sink, sink, AUDIO_RATE, relay, audio_tcp)],
               env=_pulse_env())
         spawn("websockify_audio",
-              ["websockify", str(_audio), "127.0.0.1:%d" % audio_tcp])
+              ["websockify", str(audio_ws), "127.0.0.1:%d" % audio_tcp])
     else:
         log.write(b"[pcatgl] audio disabled: parec or websockify not found;"
                   b" video continues\n")
