@@ -98,6 +98,10 @@ def register(api):
     })
     api.machine_sanitize("pcat-gl", pcatgl_sanitize)
     api.machine_shown("pcat-gl", lambda inst: pcatgl_hardware(api, inst))
+    # the console's own pointer relay for FPS mouselook; see
+    # pcatgl_fps_input for why a game needs it and the desktop does not
+    api.instance_action("pcat-gl", "fps-input",
+                        lambda inst, data: pcatgl_fps_input(api, inst, data))
     # "vga" and "fpslimit" are this machine's own fields.  "" is accepted
     # so the global-by-name validators stay harmless for other machines,
     # which never carry these fields.  NB: "vga" is also registered by
@@ -1543,13 +1547,100 @@ def is_up(api, inst):
     return up
 
 
+# --- FPS mouselook ---------------------------------------------------------
+
+# What each instance's console last said its buttons were, so a mask can be
+# turned into the press and release transitions QEMU's input layer wants.
+# Keyed by index; cleared when the mask goes back to 0, which the console
+# sends when the toggle goes off, so nothing is left held down in the guest.
+_fps_buttons = {}
+
+# DOM button order, which is what capturePointer's mask is built from.
+_FPS_BUTTON = {0: "left", 1: "middle", 2: "right"}
+
+# One flush is a single animation frame's worth of movement.  Anything
+# larger did not come from a hand on a mouse.
+_FPS_MAX_DELTA = 4096
+
+
+def pcatgl_fps_input(api, inst, data):
+    """One flush of the console's captured pointer, as RELATIVE motion.
+
+    The console already holds true relative deltas -- Pointer Lock gives
+    movementX/Y -- but RFB can only carry an absolute position, so the
+    normal path integrates them, x11vnc warps the X pointer there, and the
+    guest's usb-tablet reports a coordinate.  A game that looks around by
+    reading the cursor, taking its distance from centre and warping it
+    back (SiN, and every Quake-era engine) gets nothing back from its own
+    warp: the tablet still reports where the host pointer is, the next
+    read is the same large distance, and the view pins to an edge.
+
+    So this hands the deltas to the guest's PS/2 mouse instead, which is
+    always there on this machine type alongside the tablet (query-mice:
+    "QEMU PS/2 Mouse", absolute false), over QMP -- which takes x11vnc, X
+    and SDL out of the input path altogether, and with them the warp
+    fighting that a relative grab on the X side would bring back.
+
+    Dispatched with the core's global _lock held, like every plugin
+    action, so the QMP timeout here is short on purpose: a machine that
+    has stopped answering must not hold that lock for a second on every
+    frame.  The console stops sending after one failure.
+    """
+    try:
+        dx = int(data.get("dx") or 0)
+        dy = int(data.get("dy") or 0)
+        mask = int(data.get("buttons") or 0)
+    except (TypeError, ValueError):
+        return (400, "dx, dy and buttons must be whole numbers")
+    if abs(dx) > _FPS_MAX_DELTA or abs(dy) > _FPS_MAX_DELTA:
+        return (400, "a frame of movement is not that large")
+
+    events = []
+    if dx:
+        events.append({"type": "rel", "data": {"axis": "x", "value": dx}})
+    if dy:
+        events.append({"type": "rel", "data": {"axis": "y", "value": dy}})
+    index = inst["index"]
+    was = _fps_buttons.get(index, 0)
+    if mask != was:
+        for bit, button in sorted(_FPS_BUTTON.items()):
+            if (mask ^ was) & (1 << bit):
+                events.append({"type": "btn",
+                               "data": {"button": button,
+                                        "down": bool(mask & (1 << bit))}})
+        if mask:
+            _fps_buttons[index] = mask
+        else:
+            _fps_buttons.pop(index, None)
+    if not events:
+        return {"result": "nothing to send"}
+
+    qmp_port = api.ports_of(inst)[2]
+    try:
+        _qmp_command(qmp_port, "input-send-event", {"events": events},
+                     timeout=0.3)
+    except OSError as exc:
+        # the console turns itself off on this rather than repeating it
+        return (503, "the machine is not answering: %s" % exc)
+    return {"result": "sent", "events": len(events)}
+
+
 # --- QMP (a minimal client; the core never speaks to an engine over QMP) ---
 
-def _qmp_command(port, command, arguments=None):
+def _qmp_command(port, command, arguments=None, timeout=1):
     """Open the QMP port, negotiate capabilities, run one command, close.
     Raises OSError if the port is not there (a stopped or fallback-less
-    instance) -- callers treat that as nothing to do."""
-    with socket.create_connection(("127.0.0.1", port), timeout=1) as s:
+    instance) -- callers treat that as nothing to do.
+
+    A fresh connection every time, and deliberately so: QEMU serves one
+    QMP client at a time on a socket, so a connection held open for the
+    console's pointer would leave stop, reset and the thumbnail with
+    nowhere to go -- measured 2026-09-15, the second client is accepted
+    and then never greeted.  The connect and capability exchange cost
+    about 1.08 ms on loopback, against 0.78 ms for a held-open one: not a
+    trade worth taking the monitor for.
+    """
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as s:
         f = s.makefile("rwb")
         f.readline()                      # the greeting
         f.write(b'{"execute":"qmp_capabilities"}\n')

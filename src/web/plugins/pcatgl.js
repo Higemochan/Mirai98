@@ -300,8 +300,93 @@ function startPcatglAudio(target, port, onPlayFailed) {
 // window._pluginConsoleAudio -- the same button every console has, driving
 // this pipeline).  No 86Box menubar here: this is QEMU.
 function pcatglConsole(rfb, target, name) {
+  // --- FPS mouselook ---------------------------------------------------
+  // A game that looks around by reading the cursor, taking its distance
+  // from the centre of the screen and warping it back there -- every
+  // Quake-era engine, SiN among them -- gets nothing back from that warp
+  // through this console.  The captured pointer's deltas are integrated
+  // into an absolute position (app.js capturePointer), because RFB can
+  // carry nothing else, x11vnc warps the X pointer there, and it reaches
+  // the guest as a usb-tablet coordinate.  The guest's own warp moves no
+  // tablet, so the next read is the same large distance again and the
+  // view pins to an edge.
+  //
+  // While this is on the deltas go to pcatgl.py's fps-input action
+  // instead, which hands them to the guest's PS/2 mouse over QMP as
+  // relative motion -- x11vnc, X and SDL all out of the input path.  Off
+  // by default: the absolute pointer is what the desktop wants, and it is
+  // what makes a click land where it was aimed.
+  let fpsOn = false, inFlight = false, qx = 0, qy = 0, qMask = 0, qDirty = false;
+  const fpsPost = (dx, dy, m) =>
+    window.apiQuiet('/api/instances/' + encodeURIComponent(name) +
+                    '/x/fps-input',
+                    {method: 'POST',
+                     body: JSON.stringify({dx: dx, dy: dy, buttons: m})});
+  // One request in flight at a time, with whatever arrives meanwhile
+  // riding on the next.  A frame's movement is a sum, so coalescing loses
+  // nothing; queuing a request per frame against a machine that has
+  // stopped answering would lose the pointer instead.
+  const fpsDrain = () => {
+    if (inFlight || (!qx && !qy && !qDirty)) return;
+    inFlight = true;
+    const dx = qx, dy = qy, m = qMask;
+    qx = 0; qy = 0; qDirty = false;
+    fpsPost(dx, dy, m).then((got) => {
+      inFlight = false;
+      if (got && !got.ok) {
+        // say it once and hand the pointer back, rather than every frame
+        if (fpsOn) { fpsSet(false); toast('FPSマウス: ' + got.error); }
+        return;
+      }
+      fpsDrain();
+    }).catch(() => { inFlight = false; });
+  };
+  const fpsRelay = (dx, dy, m) => {
+    qx += dx; qy += dy;
+    if (m !== qMask) { qMask = m; qDirty = true; }
+    fpsDrain();
+  };
+  const fpsLabel = () => {
+    const b = document.getElementById('btn-fps');
+    if (!b) return;
+    b.textContent = fpsOn ? '\u{1F3AF} FPSマウス ON' : '\u{1F3AF} FPSマウス';
+    b.style.fontWeight = fpsOn ? 'bold' : '';
+  };
+  const fpsSet = (on) => {
+    fpsOn = on;
+    window.MiraiConsole.pointerRelay = on ? fpsRelay : null;
+    if (!on) {
+      // let go of whatever the guest is still holding down
+      qx = 0; qy = 0; qMask = 0; qDirty = true;
+      fpsDrain();
+    }
+    fpsLabel();
+  };
+  const addFpsButton = () => {
+    const anchor = document.getElementById('btn-audio');
+    if (!anchor || !anchor.parentNode || document.getElementById('btn-fps'))
+      return;
+    const b = document.createElement('button');
+    b.id = 'btn-fps';
+    b.type = 'button';
+    b.title = 'FPS 用の相対マウス。視点が端に張り付くときに入れる' +
+              '（デスクトップ操作では切っておく）';
+    b.onclick = () => {
+      fpsSet(!fpsOn);
+      toast(fpsOn ? 'FPSマウス ON' : 'FPSマウス OFF');
+    };
+    anchor.parentNode.insertBefore(b, anchor);
+    fpsLabel();
+  };
+  addFpsButton();
+  const fpsCleanup = () => {
+    fpsSet(false);
+    const b = document.getElementById('btn-fps');
+    if (b && b.parentNode) b.parentNode.removeChild(b);
+  };
+
   const port = pcatglAudioPort.get(name);
-  if (port == null) return () => {};
+  if (port == null) return fpsCleanup;
   let stop = null;
   const label = (on) => {
     const btn = document.getElementById('btn-audio');
@@ -338,7 +423,7 @@ function pcatglConsole(rfb, target, name) {
     }
   };
   label(false);
-  return () => { off(); window._pluginConsoleAudio = null; };
+  return () => { fpsCleanup(); off(); window._pluginConsoleAudio = null; };
 }
 
 window.registerMachinePlugin({

@@ -146,6 +146,15 @@ FAKE_HELPER="$SELF_DIR/fakehelper.py"
 [ -f "$FAKE_HELPER" ] || die "deploy gate needs $FAKE_HELPER"
 python3 "$CRASH_SMOKE" "$WT/src/plugins/pcatgl.py" "$FAKE_HELPER" \
   || die "crash-teardown smoke failed"
+
+# ... and the FPS pointer relay (#77).  Its job is turning a browser button
+# mask into the press and release transitions QEMU wants, and getting that
+# wrong leaves a button held down in the guest -- which in a game is a
+# trigger held down, and shows up as the game misbehaving rather than as
+# anything that looks like a console bug.  Stubs QMP: no machine, no ports.
+FPS_SMOKE="$SELF_DIR/smoke_fps.py"
+[ -f "$FPS_SMOKE" ] || die "deploy gate needs $FPS_SMOKE"
+python3 "$FPS_SMOKE" "$WT/src/plugins/pcatgl.py" || die "fps-input smoke failed"
 echo
 
 # --- snapshot running guests BEFORE the restart ----------------------------

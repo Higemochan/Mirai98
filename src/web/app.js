@@ -14,6 +14,12 @@ window.MiraiPlugins = window.MiraiPlugins ||
   { machines: [], defaults: {}, badge: {}, console: [], editForm: {},
     hardware: {}, wizard: {}, diskFormats: {}, labels: {}, actions: {},
     platform: {}, relativePointer: {}, vncAudio: {}, mediaRow: {} };
+// The console as it is right now, for a plugin that has to reach into one
+// while it runs.  pointerRelay, when a plugin sets it, takes the captured
+// pointer's deltas instead of them becoming an absolute VNC position --
+// pcat-gl's FPS mouselook is the one user; capturePointer reads it on
+// every send.
+window.MiraiConsole = window.MiraiConsole || { pointerRelay: null };
 window.registerMachinePlugin = (p) => {
   const P = window.MiraiPlugins;
   P.consolePrep = P.consolePrep || [];
@@ -519,6 +525,11 @@ async function api(path, opts) {
  * they need; everything else they are handed.
  */
 window.api = (path, opts) => api(path, opts);
+// the same thing without the toast, and with the failure handed back: a
+// plugin sending at the frame rate (pcatgl.js's FPS mouselook) would
+// otherwise paper the screen over the moment the machine stopped
+// answering, once per frame.
+window.apiQuiet = (path, opts) => apiResult(path, opts);
 window.task = (what, status) => task(what, status);
 // plugins add their own phrases to this; it is theirs to reach as well
 window.JA = JA;
@@ -1760,6 +1771,16 @@ function capturePointer(rfb, target, absolute) {
   let captured = lastPx !== null && emuHeld;
   const canvas = () => target.querySelector('canvas');
   const send = (dx, dy, m) => {
+    // A machine plugin may take the captured pointer for itself: pcat-gl
+    // does, for FPS mouselook, where the guest wants relative motion and
+    // RFB has only an absolute position to offer (pcatgl.js, and
+    // pcatgl.py's fps-input).  The capture, the rAF flush and the Esc or
+    // middle-button release above are all unchanged -- only where the
+    // numbers go changes.  px/py stop moving while it is diverted, which
+    // is the truth: nothing is driving the guest's cursor to a position
+    // any more, so there is no position to keep.
+    const relay = window.MiraiConsole && window.MiraiConsole.pointerRelay;
+    if (relay) { relay(dx, dy, m); return; }
     if (!rfb || rfb._rfbConnectionState !== 'connected') return;
     if (!absolute) {
       RFB.messages.pointerEvent(rfb._sock,
@@ -1807,7 +1828,11 @@ function capturePointer(rfb, target, absolute) {
   const onDown = (ev) => {
     if (!locked) {
       if (target.contains(ev.target)) {
-        if (absolute && !captured) {
+        // ... but not while a plugin has the pointer: that seed is a
+        // left press and release, and in a game it is a shot fired at the
+        // moment the pointer is taken.
+        if (absolute && !captured &&
+            !(window.MiraiConsole && window.MiraiConsole.pointerRelay)) {
           // Nothing is known about where the guest's cursor is on a page
           // that has not had a console yet, so start from this click.
           // After a Ctrl+End there is no need: the emulator was not
