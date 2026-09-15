@@ -792,18 +792,18 @@ def _write_findwin(d):
     return path
 
 
-def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
-    """Kill anything still holding this instance's display, compositor
-    socket or ports.  Reaching on_start means the core found this instance
-    not running, so every match is a leftover of a previous generation --
-    every token is derived from this instance's own index.  They survive a
-    restart of the manager because each helper is in its own session.
+def _instance_tokens(index, display_num, vnc, qmp_port):
+    """Command-line fragments that belong to this instance and to no other.
+
+    Every one is derived from this instance's own index, and that is what
+    makes both the start-time sweep and the crash teardown safe to fire
+    without first asking who a process belongs to.
 
     Number-final tokens carry a trailing space so "-display :2 " does not
     match ":21"; the joined cmdline's final NUL becomes that space, so a
     number at the very end still matches.
     """
-    tokens = (
+    return (
         "%s " % _wl_socket(index),          # weston --socket=wl-pcatgl-N
         "Xwayland :%d " % display_num,      # the X server
         "-display :%d " % display_num,      # x11vnc's -display
@@ -819,6 +819,28 @@ def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
         "%s.audiorelay" % _sink_for_index(index),  # the relay loop
         "127.0.0.1:%d " % (4620 + index),          # websockify_audio -> relay
     )
+
+
+def _cmdline(pid):
+    """This pid's command line as text, "" for a zombie (which has none),
+    None if /proc could not be read at all.  The caller that decides
+    whether to signal wants those two apart: an empty one is a process on
+    its way out, an unreadable one is a process this cannot identify."""
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
+    """Kill anything still holding this instance's display, compositor
+    socket or ports.  Reaching on_start means the core found this instance
+    not running, so every match is a leftover of a previous generation.
+    They survive a restart of the manager because each helper is in its
+    own session.
+    """
+    tokens = _instance_tokens(index, display_num, vnc, qmp_port)
     mine = os.getpid()
     signaled = []
     for entry in os.listdir("/proc"):
@@ -827,11 +849,7 @@ def _sweep_orphans(d, index, display_num, vnc, qmp_port, log):
         pid = int(entry)
         if pid == mine:
             continue
-        try:
-            with open("/proc/%d/cmdline" % pid, "rb") as f:
-                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace")
-        except OSError:
-            continue
+        cmd = _cmdline(pid)
         if not cmd or not any(t in cmd for t in tokens):
             continue
         try:
@@ -863,6 +881,11 @@ def _kill_pids(pids):
     deadline = time.time() + 5
     while time.time() < deadline:
         if not any(_alive(pid) for pid in pids.values()):
+            # Gone, but not collected: _alive reads a zombie as dead, so
+            # this is the path taken exactly when every one of them is
+            # one.  The next on_start used to be what cleared them --
+            # after a crash teardown there may not be one for days.
+            _reap_exited(pids.values())
             return
         time.sleep(0.2)
     for pid in pids.values():
@@ -872,6 +895,34 @@ def _kill_pids(pids):
             except OSError:
                 pass
     _reap_exited(pids.values())
+
+
+def _kill_pids_verified(pids, tokens, log):
+    """_kill_pids, but only for pids that still look like this instance's
+    own helpers.
+
+    pids.json outlives the manager, so a pid a previous generation recorded
+    can have been recycled into something unrelated by the time a crash is
+    noticed -- and the crash path, unlike a stop somebody asked for, fires
+    on its own.  A pid whose command line no longer carries any of this
+    instance's tokens is left alone; one that still does is this
+    instance's, whatever else has changed since.  A zombie has no command
+    line and needs no signal: _reap_exited is what it wants.
+    """
+    keep = {}
+    for key, pid in pids.items():
+        if not pid or not _alive(pid):
+            continue
+        cmd = _cmdline(pid)
+        if cmd and any(t in cmd for t in tokens):
+            keep[key] = pid
+        elif cmd is not None:
+            log.write(("[pcatgl] pid %d (recorded as %s) carries none of "
+                       "this instance's tokens; left alone\n"
+                       % (pid, key)).encode())
+    log.flush()
+    _kill_pids(keep)
+    return keep
 
 
 def _reap(pids, timeout=5):
@@ -1084,7 +1135,30 @@ def _cfg_confirmed(log_path):
     return (b"FpsLimit [" in data) or (b"ReadbackPresent enabled" in data)
 
 
+# Indices inside on_start.  The crash teardown stands off while one is
+# here: is_up is called from inside the start, to watch QEMU come up, and
+# pids.json still names the previous generation until the last lines of it
+# -- so without this the teardown would fire on a start that is going
+# perfectly well, against a recorded set whose recycled pids could by then
+# belong to the generation being built.
+#
+# A plain set needs no lock of its own: the core calls start_instance with
+# its global _lock held (pc98web.py, the /start and /resume dispatch), and
+# that lock is not reentrant, so two on_start calls cannot overlap and the
+# discard below cannot lift another start's guard.
+_starting = set()
+
+
 def on_start(api, inst):
+    index = inst["index"]
+    _starting.add(index)
+    try:
+        return _start_now(api, inst)
+    finally:
+        _starting.discard(index)
+
+
+def _start_now(api, inst):
     index = inst["index"]
     ports = api.ports_of(inst)
     vnc, ws, qmp_port, audio_ws = ports
@@ -1222,6 +1296,10 @@ def on_start(api, inst):
         qemu_proc = spawn("qemu", argv, env=qemu_env, cwd=qemu_cwd)
     except OSError as exc:
         _kill_pids(pids)
+        # the previous generation is still what pids.json holds until the
+        # save below, and QEMU never started this time: clear it, or the
+        # crash watch reads a stale set as a generation to take down
+        _save_pids(d, {})
         log.close()
         return "failed: %s" % exc
 
@@ -1240,6 +1318,12 @@ def on_start(api, inst):
         result = "started (slow to come up)"
 
     _save_pids(d, pids)
+    # QEMU ending on its own reaches none of the helpers -- every one of
+    # them is its own session -- so nothing here would notice.  Watch it.
+    if pids.get("qemu"):
+        threading.Thread(target=_watch_for_crash,
+                         args=(api, inst, pids["qemu"], qmp_port),
+                         daemon=True).start()
     # The mesagl.cfg-applied marker (FpsLimit [ N FPS ] / ReadbackPresent
     # enabled) is not written until the guest loads the wrapper DLL and
     # creates a GL context -- long after this returns and after Win98 has
@@ -1253,6 +1337,135 @@ def on_start(api, inst):
 # --- stop / reset ----------------------------------------------------------
 
 _stopping = set()
+
+# Indices whose crash teardown is running, and the lock that hands it out.
+# The core serves on a ThreadingHTTPServer, so several requests are answered
+# at once and is_up with them; two status polls arriving together would
+# otherwise both get past a bare membership test.
+_crash_sweeping = set()
+_crash_lock = threading.Lock()
+
+CRASH_POLL = 5.0            # seconds between checks of a running QEMU
+
+
+def _claim_crash(index):
+    """Take the crash teardown for this instance, if nothing else holds
+    it: a teardown already running, a stop somebody asked for, or a start
+    in progress all outrank it."""
+    with _crash_lock:
+        if (index in _crash_sweeping or index in _stopping
+                or index in _starting):
+            return False
+        _crash_sweeping.add(index)
+        return True
+
+
+def _tear_down_stack(api, inst, d, pids, why, log):
+    """Signal this instance's own helpers, free its ports, drop its sink.
+
+    Split out so _crash_teardown's own finally can take the generation off
+    the record whatever happens in here.
+    """
+    index = inst["index"]
+    vnc, ws, qmp_port, audio_ws = api.ports_of(inst)
+    display_num = vnc - 5900
+    log.write(("[pcatgl] %s: QEMU is gone (%s); taking this instance's "
+               "display stack down\n"
+               % (time.strftime("%F %T"), why)).encode())
+    log.flush()
+    # QEMU itself first: nothing waited for it, so it is a zombie until
+    # something does, and a zombie holds its pid against the next
+    # generation.
+    _reap_exited(pids.values())
+    _kill_pids_verified(pids, _instance_tokens(index, display_num, vnc,
+                                               qmp_port), log)
+    # websockify forks a child per browser connection and that child
+    # inherits the listening socket; x11vnc can leave one adopted by init.
+    # killpg reaches the first (it is in the group of the parent it was
+    # forked from) but not the second, so ask the kernel who still holds
+    # the ports rather than trusting the record.
+    _free_ports((vnc, ws, qmp_port, audio_ws, 4620 + index), log)
+    for stale in _find_sink_modules(_sink_name(inst)):
+        _pactl(["unload-module", stale])
+
+
+def _crash_teardown(api, inst, why):
+    """Take this instance's display stack down after QEMU ended on its own.
+
+    _stop_now is the only other place this happens, and it is reached only
+    when somebody asks for a stop.  A QEMU that dies by itself -- SIGSEGV
+    is the case in hand -- leaves weston holding the compositor socket, the
+    x11vnc loop respawning on the display, and both websockify holding
+    their ports; each is its own session, so QEMU's death reaches none of
+    them.  Until this, the next on_start was the only thing that swept
+    them, which could be days away, and in the meantime the console still
+    answers -- with the guest's last frame -- and the ports stay taken.
+    """
+    index = inst["index"]
+    if not _claim_crash(index):
+        return
+    try:
+        d = _inst_dir(api, inst)
+        pids = _load_pids(d)
+        if not pids:
+            return
+        try:
+            log = open(os.path.join(d, "pcatgl.log"), "ab")
+        except OSError:
+            return
+        try:
+            _tear_down_stack(api, inst, d, pids, why, log)
+        finally:
+            # Whatever went wrong on the way, the generation must come off
+            # the record: is_up would otherwise call this again on the next
+            # status poll, and the one after that, for as long as anyone is
+            # looking.  Anything that survived is the next on_start's to
+            # sweep -- exactly where it stood before any of this.
+            _save_pids(d, {})
+            log.close()
+    finally:
+        _crash_sweeping.discard(index)
+
+
+def _start_crash_teardown(api, inst, why):
+    """Off the caller's thread.
+
+    is_up is reached both with the core's global _lock held (the action
+    endpoints take it around the whole dispatch) and without it (the status
+    endpoints take it only to find the instance).  A teardown takes seconds,
+    and _lock is not reentrant, so spending them here would wedge every
+    other endpoint for as long as it ran.
+    """
+    if inst["index"] in _crash_sweeping:
+        return
+    threading.Thread(target=_crash_teardown, args=(api, inst, why),
+                     daemon=True).start()
+
+
+def _watch_for_crash(api, inst, qemu_pid, qmp_port):
+    """Notice QEMU ending on its own, and take the stack down with it.
+
+    Keyed on the pid of the generation that armed it: a later start writes
+    a different pid into pids.json and this returns without touching the
+    new generation.  It polls rather than waiting on the Popen -- that
+    handle belongs to on_start, and the manager reads poll()/returncode
+    elsewhere, so the exit status is not this thread's to collect.
+    _reap_exited does that, once, from the teardown.
+    """
+    needle = ("tcp:127.0.0.1:%d," % qmp_port).encode()
+    d = _inst_dir(api, inst)
+    index = inst["index"]
+    while True:
+        time.sleep(CRASH_POLL)
+        if _load_pids(d).get("qemu") != qemu_pid:
+            return              # stopped, or a newer generation took over
+        if index in _stopping:
+            return              # on_stop is already taking it down
+        if _pid_matches(qemu_pid, needle):
+            continue
+        _crash_teardown(api, inst,
+                        "pid %d ended without being asked to" % qemu_pid)
+        return
 
 
 def _stop_now(api, inst):
@@ -1317,8 +1530,17 @@ def pcatgl_reset(api, inst):
 
 def is_up(api, inst):
     qmp_port = api.ports_of(inst)[2]
-    pid = _load_pids(_inst_dir(api, inst)).get("qemu")
-    return _pid_matches(pid, ("tcp:127.0.0.1:%d," % qmp_port).encode())
+    pids = _load_pids(_inst_dir(api, inst))
+    up = _pid_matches(pids.get("qemu"),
+                      ("tcp:127.0.0.1:%d," % qmp_port).encode())
+    if not up and pids:
+        # A generation is on record but its QEMU is not there: a crash the
+        # watch thread did not catch, which is what a restart of this
+        # manager leaves behind -- the watch does not survive one, and the
+        # orphans do.  The core asks this on every status poll, so this is
+        # where a restarted manager finds them.
+        _start_crash_teardown(api, inst, "recorded QEMU gone, seen by is_up")
+    return up
 
 
 # --- QMP (a minimal client; the core never speaks to an engine over QMP) ---

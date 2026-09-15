@@ -133,6 +133,19 @@ done
 # -- rather than by which lines it touched, because a line number rots on the
 # next edit.  Hermetic: nothing spawned, no port bound, temp files only.
 python3 "$SMOKE" "$WT/src/plugins/pcatgl.py" || die "on_start smoke failed"
+
+# ... and the same discipline for the crash path (#74).  The teardown that
+# runs when QEMU dies on its own has no user action behind it, so nothing
+# would exercise it before a guest crashed in earnest.  This starts real
+# stand-in processes on scratch ports far above any instance, kills the one
+# standing in for QEMU, and asserts the rest went -- and that a recorded pid
+# which is no longer ours was left alone.
+CRASH_SMOKE="$SELF_DIR/smoke_crashreap.py"
+FAKE_HELPER="$SELF_DIR/fakehelper.py"
+[ -f "$CRASH_SMOKE" ] || die "deploy gate needs $CRASH_SMOKE"
+[ -f "$FAKE_HELPER" ] || die "deploy gate needs $FAKE_HELPER"
+python3 "$CRASH_SMOKE" "$WT/src/plugins/pcatgl.py" "$FAKE_HELPER" \
+  || die "crash-teardown smoke failed"
 echo
 
 # --- snapshot running guests BEFORE the restart ----------------------------
