@@ -3,8 +3,14 @@
 # pcat-plugin worktree to the running mirai98 install on CT209.
 #
 # Run this INSIDE the container as root (pct exec 209 -- bash, or a root
-# shell on the container).  It does NOT deploy pc98web.py (#24) -- that is
-# a separate single-file copy.  It does NOT touch pc98web.json.
+# shell on the container).  It does NOT touch pc98web.json.
+#
+# pc98web.py and app.js used to be left out of FILES on the grounds that
+# they were "a separate single-file copy" (#24).  In practice that meant a
+# fix to either had to be carried across by hand, with none of the md5
+# verification, backup or guest-survival check the rest of this script
+# does -- and on 2026-09-14 that is exactly what happened twice.  They are
+# deployed here now, by the same rules as everything else.
 #
 # Safety: it verifies every file against the worktree's md5 before AND
 # after copying, backs the old file up first, and aborts before the
@@ -28,6 +34,8 @@ TS="$(date +%Y%m%d-%H%M%S)"
 
 # src (in the worktree)            -> dst (in the running install)
 FILES=(
+  "src/pc98web.py|pc98web.py"
+  "src/web/app.js|ui/app.js"
   "src/plugins/pcatgl.py|plugins/pcatgl.py"
   "src/web/plugins/pcatgl.js|ui/plugins/pcatgl.js"
   "src/web/plugins/pcat.js|ui/plugins/pcat.js"
