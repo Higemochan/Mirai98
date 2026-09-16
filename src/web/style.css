@@ -133,7 +133,13 @@
     machine plugin -- box86 -- that draws its own there instead) */
  .media-toolbar { display: flex; gap: .3em; }
  .media-btn { position: relative; }
- .media-btn > button.media-icon { position: relative; padding: .3em .8em .3em .6em;
+ /* display:inline-flex + centering here (not just padding) so a glyph
+    with no font-metrics of its own -- the hdd faceplate svg, unlike
+    the floppy/CD emoji -- lines up with its siblings on both axes
+    regardless of what it actually measures */
+ .media-btn > button.media-icon { position: relative; display: inline-flex;
+                                   align-items: center; justify-content: center;
+                                   padding: .3em .8em .3em .6em;
                                    font-size: 15px; line-height: 1; }
  .media-btn > button.media-icon.loaded { border-color: var(--accent); }
  /* a hard disk's own icon has no popover behind it -- no pointer, no
@@ -141,7 +147,13 @@
     invite a click the way they do */
  .media-btn > button.media-icon.hdd { cursor: default; }
  .media-btn > button.media-icon.hdd:hover { background: var(--panel2); }
- .hdd-glyph { display: block; width: 20px; height: 20px; }
+ /* an emoji glyph's own ink sits well inside its font-size box (the
+    floppy/CD icons above render smaller than their 15px font-size
+    already suggests); a full-bleed 24x24-viewBox svg at even a
+    matching pixel size reads visibly larger for having no such margin
+    of its own -- sized down to compensate, matched by eye against a
+    screenshot rather than assumed correct at a first guess */
+ .hdd-glyph { display: block; width: 15px; height: 15px; }
  /* the drive letter drawMedia() assigns each icon (A:/B:/C:/D:...,
     left to right across floppies, hard disks and the CD-ROM) -- the
     extra right padding above clears room for this and the lamp below
