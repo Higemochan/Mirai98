@@ -2391,10 +2391,11 @@ const HDD_GLYPH =
 function hddToolbarIndicator(hdd, letter) {
   const short = hdd.file ? hdd.file.split('/').pop() : '';
   const id = mediaElemId(hdd.device);
+  const label = 'Hard disk' + (letter ? ' ' + letter + ':' : '');
   return '<div class="media-btn"><button type="button" ' +
-    'class="media-icon hdd" title="Hard disk ' + esc(letter) + ': ' +
+    'class="media-icon hdd" title="' + esc(label) + (letter ? ' ' : ': ') +
     esc(short || '(unknown)') + '">' + HDD_GLYPH +
-    '<span class="media-letter">' + esc(letter) + '</span>' +
+    (letter ? '<span class="media-letter">' + esc(letter) + '</span>' : '') +
     '<span class="media-led" id="' + id + '-led"></span>' +
     '</button></div>';
 }
@@ -2511,31 +2512,27 @@ async function drawMedia(name) {
   const d = await api('/api/instances/' + encodeURIComponent(name) +
                       '/media');
   if (!d || !document.getElementById('media-toolbar')) return;
-  // left to right the way DOS itself hands out drive letters: A:/B:
-  // (the floppies, sorted by their own device id so floppy0 -- A: --
-  // never lands after floppy1), then C:/D:.. (hd_devices, already in
-  // that order from pc98web.py), then the CD-ROM last -- which still
-  // gets no letter of its own (the user's own call, round one of this
-  // feature: one CD-ROM needs no telling apart from another).
   const fdds = d.drives.filter(dr => dr.kind === 'fdd')
                         .sort((a, b) => a.device < b.device ? -1 : 1);
   const cdroms = d.drives.filter(dr => dr.kind !== 'fdd');
   const hdds = d.hdd || [];
-  // One continuous A:/B:/C:/D:... sequence, DOS's own order: the two
-  // floppies, then however many hard disks this instance actually has
-  // (hd_devices' own order), then the CD-ROM last -- so a second hard
-  // disk really does push the CD from D: to E:, the same as it would
-  // under DOS itself.
+  // A:/B:/C:/D:... left to right (floppies, then hd_devices' own
+  // order, then the CD-ROM last) is DOS/V's own drive-letter
+  // convention, and it is only DOS/V's: PC-98 and FM TOWNS assign
+  // theirs differently (a PC-98 can start a hard disk at A: with no
+  // floppy in the sequence at all) -- confirmed wrong on-screen for
+  // pc9821/towns once this reached them. Shown only for the machines
+  // it is actually right for; everything else keeps the icon and the
+  // access lamp with no letter, rather than one guessed at and wrong.
+  const showLetters = machine === 'pcat' || machine === 'pcat-gl';
   let nextLetter = 65;   // 'A'
+  const letter = () => showLetters ? String.fromCharCode(nextLetter++) : '';
   const buttons = [
     ...fdds.map(drive => mediaToolbarButton(
-        name, drive, platform, typed[drive.device] || '',
-        String.fromCharCode(nextLetter++))),
-    ...hdds.map(hdd =>
-      hddToolbarIndicator(hdd, String.fromCharCode(nextLetter++))),
+        name, drive, platform, typed[drive.device] || '', letter())),
+    ...hdds.map(hdd => hddToolbarIndicator(hdd, letter())),
     ...cdroms.map(drive => mediaToolbarButton(
-        name, drive, platform, typed[drive.device] || '',
-        String.fromCharCode(nextLetter++))),
+        name, drive, platform, typed[drive.device] || '', letter())),
   ];
   document.getElementById('media-toolbar').innerHTML = buttons.length
     ? buttons.join('')
