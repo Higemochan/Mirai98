@@ -132,6 +132,11 @@
  .media-btn > button.media-icon { position: relative; padding: .3em .8em .3em .6em;
                                    font-size: 15px; line-height: 1; }
  .media-btn > button.media-icon.loaded { border-color: var(--accent); }
+ /* a hard disk's own icon has no popover behind it -- no pointer, no
+    hover-darken, so it does not look like its floppy/CD siblings
+    invite a click the way they do */
+ .media-btn > button.media-icon.hdd { cursor: default; }
+ .media-btn > button.media-icon.hdd:hover { background: var(--panel2); }
  /* A:/B:, floppyLetter()'s own reading of the drive's QMP device id --
     the extra right padding above clears room for this and the lamp
     below so neither one sits on top of the glyph itself */

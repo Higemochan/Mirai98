@@ -3657,6 +3657,42 @@ def media_devices(inst):
     return out
 
 
+def hdd_devices(inst):
+    """This instance's own IDE hard disks, as QEMU names them -- for the
+    web UI's own read-only drive-letter indicator, not for swapping:
+    a hard disk has no tray, and the one way to change what is behind
+    hdd1/hdd2 is still stop the machine, Edit, Save.
+
+    Asked of QEMU rather than built from pcatgl.py's own hdd1/hdd2 ->
+    -drive argv order, because that order skips a slot outright when
+    hdd1 is unset and hdd2 is not (enumerate() over just the keys that
+    are actually there) -- whatever QEMU itself put first on the bus is
+    drive C:, whichever of hdd1/hdd2 that happens to be, and asking QEMU
+    is the one way to get that right without re-deriving pcatgl.py's own
+    indexing here a second time.  Sorted by the bus/unit QEMU's own
+    default id already encodes (ide0-hd0 before ide0-hd1), the same
+    order the drive letters read left to right.
+    """
+    reply = qmp(inst, "query-block")
+    if not reply or "return" not in reply:
+        return []
+    out = []
+    for block in reply["return"]:
+        if block.get("removable"):
+            continue
+        if not block.get("qdev"):
+            continue
+        name = block.get("device", "")
+        if "-hd" not in name:
+            continue
+        inserted = (block.get("inserted") or {}).get("file", "")
+        if '"filename": "' in inserted:
+            inserted = inserted.split('"filename": "')[1].split('"')[0]
+        out.append({"device": name, "file": inserted})
+    out.sort(key=lambda d: d["device"])
+    return out
+
+
 # Win9x's CD-ROM/MCI stack never issues GET_EVENT_STATUS_NOTIFICATION
 # (confirmed live: zero occurrences across every guest ATAPI trace taken
 # for this investigation) and relies instead on TEST UNIT READY's own
@@ -4227,8 +4263,9 @@ class Handler(BaseHTTPRequestHandler):
         elif extra == "":
             self.reply(200, self.shown(inst))
         elif extra == "media":
-            self.reply(200, {"drives": media_devices(inst)
-                             if is_running(inst) else []})
+            running = is_running(inst)
+            self.reply(200, {"drives": media_devices(inst) if running else [],
+                             "hdd": hdd_devices(inst) if running else []})
         elif extra == "stats":
             usage = usage_of(inst) if is_running(inst) else None
             out = {"running": usage is not None}

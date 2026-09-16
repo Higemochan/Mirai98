@@ -2367,6 +2367,25 @@ const floppyLetter = device => {
 const mediaElemId = device =>
   'media-' + device.replace(/[^A-Za-z0-9_-]/g, '_');
 
+// A hard disk's own toolbar icon: no popover, no onclick at all -- a
+// hard disk has no tray to eject or swap what's behind it (stop the
+// machine, Edit, Save is still the only way to change hdd1/hdd2, the
+// same as it always has been), so this is read-only, its own access
+// lamp included. A <button> (not disabled: that reads as "cannot do
+// this right now", not "there is nothing to do") so it sizes and
+// spaces exactly like its floppy/CD siblings; .hdd in style.css turns
+// its hover off so it does not look like the other two invite a click.
+function hddToolbarIndicator(hdd, letter) {
+  const short = hdd.file ? hdd.file.split('/').pop() : '';
+  const id = mediaElemId(hdd.device);
+  return '<div class="media-btn"><button type="button" ' +
+    'class="media-icon hdd" title="Hard disk ' + esc(letter) + ': ' +
+    esc(short || '(unknown)') + '">' + '\u{1F4BD}' +
+    '<span class="media-letter">' + esc(letter) + '</span>' +
+    '<span class="media-led" id="' + id + '-led"></span>' +
+    '</button></div>';
+}
+
 // One toolbar icon per drive: click opens a small popover in its place
 // (position:absolute, closed by the document-level click/Escape
 // listeners below) holding the exact picker the old inline Media row
@@ -2475,10 +2494,26 @@ async function drawMedia(name) {
   const d = await api('/api/instances/' + encodeURIComponent(name) +
                       '/media');
   if (!d || !document.getElementById('media-toolbar')) return;
-  document.getElementById('media-toolbar').innerHTML = d.drives.length
-    ? d.drives.map(drive =>
-        mediaToolbarButton(name, drive, platform, typed[drive.device] || ''))
-        .join('')
+  // left to right the way DOS itself hands out drive letters: A:/B:
+  // (the floppies, sorted by their own device id so floppy0 -- A: --
+  // never lands after floppy1), then C:/D:.. (hd_devices, already in
+  // that order from pc98web.py), then the CD-ROM last -- which still
+  // gets no letter of its own (the user's own call, round one of this
+  // feature: one CD-ROM needs no telling apart from another).
+  const fdds = d.drives.filter(dr => dr.kind === 'fdd')
+                        .sort((a, b) => a.device < b.device ? -1 : 1);
+  const cdroms = d.drives.filter(dr => dr.kind !== 'fdd');
+  const hdds = d.hdd || [];
+  const buttons = [
+    ...fdds.map(drive => mediaToolbarButton(name, drive, platform,
+                                             typed[drive.device] || '')),
+    ...hdds.map((hdd, i) =>
+      hddToolbarIndicator(hdd, String.fromCharCode(67 + i))),
+    ...cdroms.map(drive => mediaToolbarButton(name, drive, platform,
+                                               typed[drive.device] || '')),
+  ];
+  document.getElementById('media-toolbar').innerHTML = buttons.length
+    ? buttons.join('')
     : '<span class="note" style="align-self:center">' +
       'no floppy or CD-ROM drive</span>';
 }
