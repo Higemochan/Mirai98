@@ -123,6 +123,22 @@
  .row > label:first-child { width: 9em; color: var(--dim); flex: none; }
  .bar-btns { display: flex; gap: .5em; flex-wrap: wrap; }
 
+ /* the toolbar's own floppy/CD swap: one compact icon per drive, in
+    place of the wide filter+select row Media used to take in the
+    General information card below (still that row, unchanged, for a
+    machine plugin -- box86 -- that draws its own there instead) */
+ .media-toolbar { display: flex; gap: .3em; }
+ .media-btn { position: relative; }
+ .media-btn > button.media-icon { padding: .28em .55em; font-size: 15px;
+                                   line-height: 1; }
+ .media-btn > button.media-icon.loaded { border-color: var(--accent); }
+ .media-menu { position: absolute; top: 100%; left: 0; margin-top: .3em;
+               z-index: 15; width: 22em; max-width: 90vw; padding: .6em;
+               background: var(--panel); border: 1px solid var(--line);
+               border-radius: 3px; box-shadow: 0 8px 24px #000b; }
+ .media-menu .current { margin-bottom: .4em; overflow-wrap: anywhere; }
+ .media-menu .row { flex-wrap: wrap; }
+
  /* graphs, cockpit style: labels outside, plot stretches */
  .graphs { display: grid; grid-template-columns: repeat(auto-fit,
            minmax(20em, 1fr)); gap: 1.2em; }

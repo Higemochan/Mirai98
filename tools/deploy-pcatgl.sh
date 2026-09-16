@@ -39,6 +39,7 @@ FILES=(
   "src/plugins/pcatgl.py|plugins/pcatgl.py"
   "src/web/plugins/pcatgl.js|ui/plugins/pcatgl.js"
   "src/web/plugins/pcat.js|ui/plugins/pcat.js"
+  "src/web/style.css|ui/style.css"
 )
 
 # --- optional qemu-3dfx binary sanity check --------------------------------

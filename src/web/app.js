@@ -2207,6 +2207,15 @@ async function detailView(name) {
       i.running
         ? '<button onclick="act(\'' + name + '\',\'reset\')">Restart' +
           '</button>' : '',
+      // one compact floppy/CD icon per removable drive, right in the
+      // toolbar: filled in async, below, from the same /media QMP data
+      // the General information card's own Media row used to spend a
+      // full filter+select on per drive.  Left out for a machine plugin
+      // that draws that row itself (box86MediaRow: 86Box has no QMP of
+      // its own for /media to ever answer with, and already has its own
+      // live swap UI right there) -- this must never double up with it.
+      i.running && !window.MiraiPlugins.mediaRow[i.machine]
+        ? '<span class="media-toolbar" id="media-toolbar"></span>' : '',
       // a machine plugin may put its own verbs beside the stock ones;
       // a plugin that throws or hands back something else must not take
       // the page down with it, as the console hooks below also guard
@@ -2278,8 +2287,14 @@ async function detailView(name) {
      (i.gpib ? esc(i.gpib) : 'none') + '</td></tr>') +
     '<tr><td style="color:#8d99a5">Home</td><td>vm/vm-' + i.index +
     '/</td></tr>' +
-    (i.running ? '<tr><td style="color:#8d99a5">Media</td>' +
-     '<td id="media-row" class="note">reading...</td></tr>' : '') +
+    // Media used to be a row here for every machine; it is now the
+    // toolbar's own icon buttons above (actionBar, "media-toolbar") for
+    // anything QMP-backed. Kept here, unchanged, only for a machine
+    // plugin that draws this row itself (box86MediaRow) -- its own live
+    // swap UI, with nowhere else it is drawn instead.
+    (i.running && window.MiraiPlugins.mediaRow[i.machine]
+     ? '<tr><td style="color:#8d99a5">Media</td>' +
+       '<td id="media-row" class="note">reading...</td></tr>' : '') +
     (isBox86 ? '' :
      '<tr><td style="color:#8d99a5">QMP</td><td>127.0.0.1:' + i.ports[2] +
      '</td></tr>') +
@@ -2332,21 +2347,99 @@ async function detailView(name) {
 // /media below) updates the record server-side, and drawing a plugin's
 // own hook from a stale copy would just keep showing what a swap
 // already changed.
+// icon + noun per drive kind: media_devices() (pc98web.py) only ever
+// reports these two, so this is exhaustive, not a default/fallback pair
+const MEDIA_ICON = {fdd: '\u{1F4BE}', cdrom: '\u{1F4BF}'};    // floppy, CD
+const MEDIA_NOUN = {fdd: 'floppy', cdrom: 'CD-ROM'};
+
+// One toolbar icon per drive: click opens a small popover in its place
+// (position:absolute, closed by the document-level click/Escape
+// listeners below) holding the exact picker the old inline Media row
+// offered, plus a one-click eject. "loaded" only changes the icon's own
+// look, the same signal the old row gave by the <select> not reading
+// "(empty)" -- nothing here decides what a drive plays, only what
+// swapMedia is asked to put in it.
+function mediaToolbarButton(name, drive, platform, filterText) {
+  const short = drive.file ? drive.file.split('/').pop() : '';
+  // built into the id itself, not just esc()'d: this also lands inside
+  // a single-quoted JS string in the onclick below, where an escaped
+  // quote (&#39;) would still decode back to ' before the inline
+  // handler's own script runs and break out of it just the same --
+  // device names are QEMU's own fixed qdev ids (floppy0, ide1-cd0, ...)
+  // and never hold one today, but this makes it impossible regardless
+  const id = 'media-' + drive.device.replace(/[^A-Za-z0-9_-]/g, '_');
+  const icon = MEDIA_ICON[drive.kind] || '\u{1F5B4}';
+  const noun = MEDIA_NOUN[drive.kind] || drive.device;
+  return '<div class="media-btn">' +
+    '<button type="button" class="media-icon' + (short ? ' loaded' : '') +
+    '" title="' + esc(noun) + ': ' + esc(short || '(empty)') + '" ' +
+    'onclick="toggleMediaMenu(\'' + id + '\')">' + icon + '</button>' +
+    '<div class="media-menu" id="' + id + '-menu" style="display:none">' +
+    '<div class="current">' + esc(noun) + ': ' +
+    (short ? esc(short) : '<span class="note">(empty)</span>') + '</div>' +
+    '<div class="row" style="margin:.3em 0">' +
+    diskPicker(drive.kind, short,
+               {orphans: true, empty: '(empty)', platform,
+                filter: filterText || '',
+                box: ' data-device="' + esc(drive.device) + '"',
+                attrs: 'onchange="swapMedia(\'' + name + '\',\'' +
+                       drive.device + '\',this.value)"'}) +
+    '</div>' +
+    (short ? '<button type="button" onclick="swapMedia(\'' + name +
+             '\',\'' + esc(drive.device) +
+             '\',\'\')">&#9167; Eject</button>' : '') +
+    '</div></div>';
+}
+window.toggleMediaMenu = (id) => {
+  const menu = document.getElementById(id + '-menu');
+  if (!menu) return;
+  const opening = menu.style.display === 'none';
+  closeAllMediaMenus();
+  if (opening) menu.style.display = 'block';
+};
+function closeAllMediaMenus() {
+  document.querySelectorAll('.media-menu').forEach(m => {
+    m.style.display = 'none';
+  });
+}
+// outside click / Escape closes whichever menu is open; harmless (and a
+// no-op) on every other page, where .media-btn/.media-menu never exist
+document.addEventListener('click', ev => {
+  if (!ev.target.closest('.media-btn')) closeAllMediaMenus();
+});
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape') closeAllMediaMenus();
+});
+
+// The detail view's own Media picture: a machine plugin may draw the old
+// inline row itself (window.MiraiPlugins.mediaRow, box86MediaRow for
+// instance -- 86Box has no QMP of its own for the stock path just below
+// to ever get real drives back from at all); everything else is drawn
+// as the toolbar's own icon buttons instead (actionBar, above). Always
+// re-fetches this instance's own record first (never the page's own,
+// possibly stale, instances array): a live swap (box86_swap_media, or
+// QMP's own /media below) updates the record server-side, and drawing a
+// plugin's own hook -- or the toolbar -- from a stale copy would just
+// keep showing what a swap already changed.
 async function drawMedia(name) {
-  const slot = document.getElementById('media-row');
-  if (!slot) return;
+  if (!document.getElementById('media-row') &&
+      !document.getElementById('media-toolbar')) return;
   // a redraw (a swap, or a plugin's own window.redrawMediaRow) must not
   // lose a filter someone was typing to find a disc -- it comes back
-  // with them, the same way it always has
+  // with them, the same way it always has, wherever it might be: the
+  // old inline row for a machine plugin's own hook, or the toolbar's
+  // own popovers for everything else
   const typed = {};
-  for (const box of document.querySelectorAll('#media-row .disk-filter'))
+  for (const box of document.querySelectorAll(
+      '#media-row .disk-filter, #media-toolbar .disk-filter'))
     typed[box.dataset.device] = box.value;
   const inst = await api('/api/instances/' + encodeURIComponent(name));
-  if (!inst || !document.getElementById('media-row')) return;
+  if (!inst) return;
   const machine = inst.machine;
   const platform = window.MiraiPlugins.platform[machine] || 'pc98';
   const hook = window.MiraiPlugins.mediaRow[machine];
   if (hook) {
+    if (!document.getElementById('media-row')) return;
     const html = await Promise.resolve(
       hook(inst, {esc, diskPicker, platform, filters: typed}));
     if (html != null) {
@@ -2354,36 +2447,29 @@ async function drawMedia(name) {
       return;
     }
   }
+  if (!document.getElementById('media-toolbar')) return;
   const d = await api('/api/instances/' + encodeURIComponent(name) +
                       '/media');
-  if (!d || !document.getElementById('media-row')) return;
-  if (!d.drives.length) {
-    document.getElementById('media-row').textContent =
-      'no floppy or CD-ROM drive';
-    return;
-  }
-  document.getElementById('media-row').innerHTML = d.drives.map(drive =>
-    '<div class="row" style="margin:.1em 0">' +
-      '<span style="width:5.5em">' + esc(drive.device) + '</span>' +
-      diskPicker(drive.kind, drive.file.split('/').pop(),
-                 {orphans: true, empty: '(empty)', platform,
-                  filter: typed[drive.device] || '',
-                  box: ' data-device="' + esc(drive.device) + '"',
-                  attrs: 'onchange="swapMedia(\'' + name + '\',\'' +
-                         drive.device + '\',this.value)"'}) +
-    '</div>').join('');
+  if (!d || !document.getElementById('media-toolbar')) return;
+  document.getElementById('media-toolbar').innerHTML = d.drives.length
+    ? d.drives.map(drive =>
+        mediaToolbarButton(name, drive, platform, typed[drive.device] || ''))
+        .join('')
+    : '<span class="note" style="align-self:center">' +
+      'no floppy or CD-ROM drive</span>';
 }
 window.swapMedia = (name, device, file) => {
   api('/api/instances/' + encodeURIComponent(name) + '/media',
       {method: 'POST', body: JSON.stringify({device, name: file})})
     .then(r => { if (r) { toast(device + ': ' + r.result);
                           task('VM ' + name + ' - ' + device, r.result); }
+                 closeAllMediaMenus();
                  drawMedia(name); });
 };
 // a machine plugin's own mediaRow hook calls this after its own live
-// swap succeeds, the same way swapMedia already redraws its own QMP
-// picture above -- without it the row would just keep showing what
-// was there before the swap until something else happened to redraw it
+// swap succeeds, the same way swapMedia already redraws its own picture
+// above -- without it the row/toolbar would just keep showing what was
+// there before the swap until something else happened to redraw it
 window.redrawMediaRow = (name) => drawMedia(name);
 
 // the three readings VMware stacks down the right of a VM summary
