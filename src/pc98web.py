@@ -3721,24 +3721,44 @@ def change_media(inst, device, path):
         reply = qmp(inst, "eject", {"device": device, "force": True})
         text = "ejected"
     else:
-        # Eject first and give the guest time to actually poll the
-        # drive while it reads empty (CD_SWAP_EJECT_SETTLE_SECONDS
-        # above) before the new disc goes in, rather than swapping
-        # straight to blockdev-change-medium. This runs on the calling
-        # HTTP request's own thread (ThreadingHTTPServer hands each
-        # connection its own thread, and the handler's only lock --
-        # _lock, around find_instance()/load_instances() -- is already
-        # released by the time change_media() is reached), so the wait
-        # holds up this one response, not other instances or requests.
         previous_file = drives[device]["file"]
-        eject_reply = qmp(inst, "eject", {"device": device, "force": True})
-        if eject_reply is None:
-            return "the machine did not answer"
-        if "error" in eject_reply:
-            return eject_reply["error"].get("desc", "refused")
-        time.sleep(CD_SWAP_EJECT_SETTLE_SECONDS)
-        reply = qmp(inst, "blockdev-change-medium",
-                    {"device": device, "filename": path, "format": "raw"})
+        if device.startswith("floppy"):
+            # A floppy has none of a CD-ROM's UNIT_ATTENTION dance to
+            # settle (see the eject-then-wait comment in the other
+            # branch) -- the emulated FDC signals a media change to the
+            # guest driver the moment the backend actually changes, in
+            # the one blockdev-change-medium below, not by however long
+            # the drive was left reporting empty first. What IS confirmed
+            # live (this build, i440fx/pcat-gl, Win98): the eject-then-
+            # sleep sequence below, tried here too before this branch
+            # existed, left the FDC stuck reporting busy well past the
+            # settle time -- A: read as "cannot access the drive," not
+            # the freshly inserted image or the disc that was in it. This
+            # single-command branch is the fix for that, not itself
+            # re-confirmed live independently of the deploy/test pass
+            # this shipped with -- see that report for whether it holds.
+            reply = qmp(inst, "blockdev-change-medium",
+                        {"device": device, "filename": path,
+                         "format": "raw"})
+        else:
+            # Eject first and give the guest time to actually poll the
+            # drive while it reads empty (CD_SWAP_EJECT_SETTLE_SECONDS
+            # above) before the new disc goes in, rather than swapping
+            # straight to blockdev-change-medium. This runs on the calling
+            # HTTP request's own thread (ThreadingHTTPServer hands each
+            # connection its own thread, and the handler's only lock --
+            # _lock, around find_instance()/load_instances() -- is already
+            # released by the time change_media() is reached), so the wait
+            # holds up this one response, not other instances or requests.
+            eject_reply = qmp(inst, "eject", {"device": device, "force": True})
+            if eject_reply is None:
+                return "the machine did not answer"
+            if "error" in eject_reply:
+                return eject_reply["error"].get("desc", "refused")
+            time.sleep(CD_SWAP_EJECT_SETTLE_SECONDS)
+            reply = qmp(inst, "blockdev-change-medium",
+                        {"device": device, "filename": path,
+                         "format": "raw"})
         if reply is not None and "error" in reply and previous_file:
             # the eject above already went through, so a failed insert
             # (bad format, an image gone missing, ...) would otherwise
