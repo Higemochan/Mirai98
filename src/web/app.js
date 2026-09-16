@@ -2516,23 +2516,40 @@ async function drawMedia(name) {
                         .sort((a, b) => a.device < b.device ? -1 : 1);
   const cdroms = d.drives.filter(dr => dr.kind !== 'fdd');
   const hdds = d.hdd || [];
-  // A:/B:/C:/D:... left to right (floppies, then hd_devices' own
-  // order, then the CD-ROM last) is DOS/V's own drive-letter
-  // convention, and it is only DOS/V's: PC-98 and FM TOWNS assign
-  // theirs differently (a PC-98 can start a hard disk at A: with no
-  // floppy in the sequence at all) -- confirmed wrong on-screen for
-  // pc9821/towns once this reached them. Shown only for the machines
-  // it is actually right for; everything else keeps the icon and the
-  // access lamp with no letter, rather than one guessed at and wrong.
-  const showLetters = machine === 'pcat' || machine === 'pcat-gl';
+  // A:/B: (floppies) then C:/D:... (hd_devices' own order) is shared by
+  // DOS/V and FM TOWNS alike -- confirmed for DOS/V from the start,
+  // and not disputed anywhere found for TOWNS either. Where the two
+  // part ways is the CD-ROM: DOS/V just continues the same sequence,
+  // while TOWNS reserves the whole A-P range for real physical drives
+  // regardless of how many actually exist, so its CD-ROM (mounted the
+  // way MSCDEX would be) always lands on Q: -- one detailed source,
+  // not independently corroborated elsewhere, so medium confidence,
+  // not certainty; still a config-independent rule either way, unlike
+  // PC-98's own (see below).
+  //
+  // PC-98 assigns letters by which device actually booted, not by
+  // device type (a PC-98 can start a hard disk at A: with no floppy in
+  // the sequence at all -- confirmed wrong on-screen once the DOS/V
+  // scheme below reached pc9821 instances) -- and there is no boot-
+  // device field this app tracks for a base PC-98 instance to read
+  // that back from (unlike pcat-gl's own inst.boot, which pcatgl.py
+  // itself already reads for -boot order=; pc9801/pc9821 have no such
+  // field anywhere in this codebase, in qemu_argv() or its own edit
+  // form). Guessing which device booted would risk exactly the earlier
+  // mismatch complaint again, so PC-98 keeps the icon and the access
+  // lamp with no letter until there is something real to read.
+  const isDosV = machine === 'pcat' || machine === 'pcat-gl';
+  const isTowns = machine === 'towns';
   let nextLetter = 65;   // 'A'
-  const letter = () => showLetters ? String.fromCharCode(nextLetter++) : '';
+  const nextSeqLetter = () =>
+    (isDosV || isTowns) ? String.fromCharCode(nextLetter++) : '';
+  const cdLetter = () => isTowns ? 'Q' : nextSeqLetter();
   const buttons = [
     ...fdds.map(drive => mediaToolbarButton(
-        name, drive, platform, typed[drive.device] || '', letter())),
-    ...hdds.map(hdd => hddToolbarIndicator(hdd, letter())),
+        name, drive, platform, typed[drive.device] || '', nextSeqLetter())),
+    ...hdds.map(hdd => hddToolbarIndicator(hdd, nextSeqLetter())),
     ...cdroms.map(drive => mediaToolbarButton(
-        name, drive, platform, typed[drive.device] || '', letter())),
+        name, drive, platform, typed[drive.device] || '', cdLetter())),
   ];
   document.getElementById('media-toolbar').innerHTML = buttons.length
     ? buttons.join('')
