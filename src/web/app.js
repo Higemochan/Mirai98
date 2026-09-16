@@ -2351,16 +2351,6 @@ async function detailView(name) {
 // reports these two, so this is exhaustive, not a default/fallback pair
 const MEDIA_ICON = {fdd: '\u{1F4BE}', cdrom: '\u{1F4BF}'};    // floppy, CD
 const MEDIA_NOUN = {fdd: 'floppy', cdrom: 'CD-ROM'};
-// A:/B: are QEMU's own floppy0/floppy1 (pcatgl.py: "if=floppy,index=%d"
-// for fdd1/fdd2 in that order, and QEMU's own default id for a legacy
-// if=floppy drive is if_name+unit -- "floppy"+index, confirmed straight
-// from this build's own blockdev.c) -- read from the device id itself,
-// not assumed from a drive's position in whatever order /media answers
-// with, since that order is never itself promised to be fdd1-then-fdd2.
-const floppyLetter = device => {
-  const m = /^floppy(\d+)$/.exec(device);
-  return m ? String.fromCharCode(65 + Number(m[1])) : '';
-};
 // the id every DOM node for one drive's toolbar button shares, safe to
 // use both as an HTML id and inside a single-quoted inline-JS string
 // (see the comment this used to carry, kept below at its call site)
@@ -2375,12 +2365,35 @@ const mediaElemId = device =>
 // this right now", not "there is nothing to do") so it sizes and
 // spaces exactly like its floppy/CD siblings; .hdd in style.css turns
 // its hover off so it does not look like the other two invite a click.
+// The faceplate glyph itself: geometry and layering are the user's own
+// pick ("案B" -- a front-panel/drive-bay look), out of a shortlist that
+// also had an LED of its own baked into the icon; the lamp already
+// shared with every other drive here (media-led, below) is the one
+// that ever lights, so this SVG carries no LED shape at all. Colour by
+// CSS custom property (--hdd-face/--hdd-edge/--hdd-slot, in style.css)
+// rather than literal hex here, the same way every other themed colour
+// in this file already goes through a var(--...) rather than a value
+// of its own -- this app itself has no light/dark toggle to speak of
+// (:root in style.css defines one palette, unconditionally), so these
+// three are that one palette's own values, not a light-mode guess.
+const HDD_GLYPH =
+  '<svg viewBox="0 0 24 24" class="hdd-glyph" aria-hidden="true">' +
+  '<rect x="2.5" y="5" width="19" height="14" rx="1.8" ' +
+  'fill="var(--hdd-face)" stroke="var(--hdd-edge)" stroke-width="1"/>' +
+  '<rect x="2.5" y="5" width="19" height="4.6" rx="1.8" ' +
+  'fill="#fff" opacity=".12"/>' +
+  '<rect x="4.6" y="11" width="11" height="2.2" rx="1" ' +
+  'fill="var(--hdd-slot)" opacity=".65"/>' +
+  '<rect x="4.6" y="14.4" width="7.5" height="1.4" rx=".7" ' +
+  'fill="var(--hdd-slot)" opacity=".5"/>' +
+  '</svg>';
+
 function hddToolbarIndicator(hdd, letter) {
   const short = hdd.file ? hdd.file.split('/').pop() : '';
   const id = mediaElemId(hdd.device);
   return '<div class="media-btn"><button type="button" ' +
     'class="media-icon hdd" title="Hard disk ' + esc(letter) + ': ' +
-    esc(short || '(unknown)') + '">' + '\u{1F4BD}' +
+    esc(short || '(unknown)') + '">' + HDD_GLYPH +
     '<span class="media-letter">' + esc(letter) + '</span>' +
     '<span class="media-led" id="' + id + '-led"></span>' +
     '</button></div>';
@@ -2397,7 +2410,7 @@ function hddToolbarIndicator(hdd, letter) {
 // (below) when this drive's own op count moves -- this function only
 // ever draws it dark, since a fresh draw has no poll behind it yet to
 // say otherwise.
-function mediaToolbarButton(name, drive, platform, filterText) {
+function mediaToolbarButton(name, drive, platform, filterText, letter) {
   const short = drive.file ? drive.file.split('/').pop() : '';
   // built into the id itself, not just esc()'d: this also lands inside
   // a single-quoted JS string in the onclick below, where an escaped
@@ -2407,18 +2420,22 @@ function mediaToolbarButton(name, drive, platform, filterText) {
   // and never hold one today, but this makes it impossible regardless
   const id = mediaElemId(drive.device);
   const icon = MEDIA_ICON[drive.kind] || '\u{1F5B4}';
-  const letter = drive.kind === 'fdd' ? floppyLetter(drive.device) : '';
+  // the letter (if any) is drawMedia()'s own call, not derived here:
+  // it is one continuous A:/B:/C:/D:... sequence across floppies, hard
+  // disks and the CD-ROM together, so only the caller -- holding all
+  // three groups at once -- knows where each one actually falls
   const noun = (MEDIA_NOUN[drive.kind] || drive.device) +
                (letter ? ' ' + letter + ':' : '');
   return '<div class="media-btn">' +
     '<button type="button" class="media-icon' + (short ? ' loaded' : '') +
-    '" title="' + esc(noun) + ': ' + esc(short || '(empty)') + '" ' +
+    '" title="' + esc(noun) + (letter ? ' ' : ': ') +
+    esc(short || '(empty)') + '" ' +
     'onclick="toggleMediaMenu(\'' + id + '\')">' + icon +
-    (letter ? '<span class="media-letter">' + letter + '</span>' : '') +
+    (letter ? '<span class="media-letter">' + esc(letter) + '</span>' : '') +
     '<span class="media-led" id="' + id + '-led"></span>' +
     '</button>' +
     '<div class="media-menu" id="' + id + '-menu" style="display:none">' +
-    '<div class="current">' + esc(noun) + ': ' +
+    '<div class="current">' + esc(noun) + (letter ? ' ' : ': ') +
     (short ? esc(short) : '<span class="note">(empty)</span>') + '</div>' +
     '<div class="row" style="margin:.3em 0">' +
     diskPicker(drive.kind, short,
@@ -2504,13 +2521,21 @@ async function drawMedia(name) {
                         .sort((a, b) => a.device < b.device ? -1 : 1);
   const cdroms = d.drives.filter(dr => dr.kind !== 'fdd');
   const hdds = d.hdd || [];
+  // One continuous A:/B:/C:/D:... sequence, DOS's own order: the two
+  // floppies, then however many hard disks this instance actually has
+  // (hd_devices' own order), then the CD-ROM last -- so a second hard
+  // disk really does push the CD from D: to E:, the same as it would
+  // under DOS itself.
+  let nextLetter = 65;   // 'A'
   const buttons = [
-    ...fdds.map(drive => mediaToolbarButton(name, drive, platform,
-                                             typed[drive.device] || '')),
-    ...hdds.map((hdd, i) =>
-      hddToolbarIndicator(hdd, String.fromCharCode(67 + i))),
-    ...cdroms.map(drive => mediaToolbarButton(name, drive, platform,
-                                               typed[drive.device] || '')),
+    ...fdds.map(drive => mediaToolbarButton(
+        name, drive, platform, typed[drive.device] || '',
+        String.fromCharCode(nextLetter++))),
+    ...hdds.map(hdd =>
+      hddToolbarIndicator(hdd, String.fromCharCode(nextLetter++))),
+    ...cdroms.map(drive => mediaToolbarButton(
+        name, drive, platform, typed[drive.device] || '',
+        String.fromCharCode(nextLetter++))),
   ];
   document.getElementById('media-toolbar').innerHTML = buttons.length
     ? buttons.join('')

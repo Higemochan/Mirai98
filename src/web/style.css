@@ -2,6 +2,10 @@
    --bg: #1b1f24; --panel: #232a31; --panel2: #2b333b; --line: #38424c;
    --ink: #d6dde4; --dim: #8d99a5; --accent: #0095d9; --link: #4db8f0;
    --ok: #6cc04a; --off: #7d858c; --cpu: #0095d9; --mem: #00b39f;
+   /* the media toolbar's own hard-disk faceplate glyph (app.js's
+      HDD_GLYPH) -- this app has one palette, not a light/dark pair, so
+      these are that palette's own values, not a light-mode guess */
+   --hdd-face: #565d69; --hdd-edge: #3a404b; --hdd-slot: #8b93a2;
  }
  * { box-sizing: border-box; }
  html, body { height: 100%; }
@@ -137,9 +141,11 @@
     invite a click the way they do */
  .media-btn > button.media-icon.hdd { cursor: default; }
  .media-btn > button.media-icon.hdd:hover { background: var(--panel2); }
- /* A:/B:, floppyLetter()'s own reading of the drive's QMP device id --
-    the extra right padding above clears room for this and the lamp
-    below so neither one sits on top of the glyph itself */
+ .hdd-glyph { display: block; width: 20px; height: 20px; }
+ /* the drive letter drawMedia() assigns each icon (A:/B:/C:/D:...,
+    left to right across floppies, hard disks and the CD-ROM) -- the
+    extra right padding above clears room for this and the lamp below
+    so neither one sits on top of the glyph itself */
  .media-letter { position: absolute; top: 0; right: 1px; font-size: 8px;
                  font-weight: 700; color: var(--ink); line-height: 1;
                  background: var(--panel2); padding: 0 1px; border-radius: 2px; }
