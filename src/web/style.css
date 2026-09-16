@@ -129,9 +129,21 @@
     machine plugin -- box86 -- that draws its own there instead) */
  .media-toolbar { display: flex; gap: .3em; }
  .media-btn { position: relative; }
- .media-btn > button.media-icon { padding: .28em .55em; font-size: 15px;
-                                   line-height: 1; }
+ .media-btn > button.media-icon { position: relative; padding: .3em .8em .3em .6em;
+                                   font-size: 15px; line-height: 1; }
  .media-btn > button.media-icon.loaded { border-color: var(--accent); }
+ /* A:/B:, floppyLetter()'s own reading of the drive's QMP device id --
+    the extra right padding above clears room for this and the lamp
+    below so neither one sits on top of the glyph itself */
+ .media-letter { position: absolute; top: 0; right: 1px; font-size: 8px;
+                 font-weight: 700; color: var(--ink); line-height: 1;
+                 background: var(--panel2); padding: 0 1px; border-radius: 2px; }
+ /* the access lamp: dark at rest, flashMediaLeds() (updateUsage's own
+    3s poll) lights it briefly on a read/write op-count change */
+ .media-led { position: absolute; right: 1px; bottom: 1px; width: 5px;
+              height: 5px; border-radius: 50%; background: #444;
+              box-shadow: 0 0 0 1px #0006; }
+ .media-led.active { background: var(--ok); box-shadow: 0 0 4px 1px var(--ok); }
  .media-menu { position: absolute; top: 100%; left: 0; margin-top: .3em;
                z-index: 15; width: 22em; max-width: 90vw; padding: .6em;
                background: var(--panel); border: 1px solid var(--line);

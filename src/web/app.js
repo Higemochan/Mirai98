@@ -2351,6 +2351,21 @@ async function detailView(name) {
 // reports these two, so this is exhaustive, not a default/fallback pair
 const MEDIA_ICON = {fdd: '\u{1F4BE}', cdrom: '\u{1F4BF}'};    // floppy, CD
 const MEDIA_NOUN = {fdd: 'floppy', cdrom: 'CD-ROM'};
+// A:/B: are QEMU's own floppy0/floppy1 (pcatgl.py: "if=floppy,index=%d"
+// for fdd1/fdd2 in that order, and QEMU's own default id for a legacy
+// if=floppy drive is if_name+unit -- "floppy"+index, confirmed straight
+// from this build's own blockdev.c) -- read from the device id itself,
+// not assumed from a drive's position in whatever order /media answers
+// with, since that order is never itself promised to be fdd1-then-fdd2.
+const floppyLetter = device => {
+  const m = /^floppy(\d+)$/.exec(device);
+  return m ? String.fromCharCode(65 + Number(m[1])) : '';
+};
+// the id every DOM node for one drive's toolbar button shares, safe to
+// use both as an HTML id and inside a single-quoted inline-JS string
+// (see the comment this used to carry, kept below at its call site)
+const mediaElemId = device =>
+  'media-' + device.replace(/[^A-Za-z0-9_-]/g, '_');
 
 // One toolbar icon per drive: click opens a small popover in its place
 // (position:absolute, closed by the document-level click/Escape
@@ -2358,7 +2373,11 @@ const MEDIA_NOUN = {fdd: 'floppy', cdrom: 'CD-ROM'};
 // offered, plus a one-click eject. "loaded" only changes the icon's own
 // look, the same signal the old row gave by the <select> not reading
 // "(empty)" -- nothing here decides what a drive plays, only what
-// swapMedia is asked to put in it.
+// swapMedia is asked to put in it. The little dot in the corner is a
+// drive-activity lamp, lit briefly by updateUsage()'s own polling
+// (below) when this drive's own op count moves -- this function only
+// ever draws it dark, since a fresh draw has no poll behind it yet to
+// say otherwise.
 function mediaToolbarButton(name, drive, platform, filterText) {
   const short = drive.file ? drive.file.split('/').pop() : '';
   // built into the id itself, not just esc()'d: this also lands inside
@@ -2367,13 +2386,18 @@ function mediaToolbarButton(name, drive, platform, filterText) {
   // handler's own script runs and break out of it just the same --
   // device names are QEMU's own fixed qdev ids (floppy0, ide1-cd0, ...)
   // and never hold one today, but this makes it impossible regardless
-  const id = 'media-' + drive.device.replace(/[^A-Za-z0-9_-]/g, '_');
+  const id = mediaElemId(drive.device);
   const icon = MEDIA_ICON[drive.kind] || '\u{1F5B4}';
-  const noun = MEDIA_NOUN[drive.kind] || drive.device;
+  const letter = drive.kind === 'fdd' ? floppyLetter(drive.device) : '';
+  const noun = (MEDIA_NOUN[drive.kind] || drive.device) +
+               (letter ? ' ' + letter + ':' : '');
   return '<div class="media-btn">' +
     '<button type="button" class="media-icon' + (short ? ' loaded' : '') +
     '" title="' + esc(noun) + ': ' + esc(short || '(empty)') + '" ' +
-    'onclick="toggleMediaMenu(\'' + id + '\')">' + icon + '</button>' +
+    'onclick="toggleMediaMenu(\'' + id + '\')">' + icon +
+    (letter ? '<span class="media-letter">' + letter + '</span>' : '') +
+    '<span class="media-led" id="' + id + '-led"></span>' +
+    '</button>' +
     '<div class="media-menu" id="' + id + '-menu" style="display:none">' +
     '<div class="current">' + esc(noun) + ': ' +
     (short ? esc(short) : '<span class="note">(empty)</span>') + '</div>' +
@@ -2472,6 +2496,34 @@ window.swapMedia = (name, device, file) => {
 // there before the swap until something else happened to redraw it
 window.redrawMediaRow = (name) => drawMedia(name);
 
+// A drive's own access lamp: usage_of() (pc98web.py) already polls this
+// instance's process every 3s for the CPU/RSS gauges below and, for a
+// machine with QMP of its own, now folds in query-blockstats too -- one
+// combined rd+wr op count per device -- so this reads the same poll
+// rather than adding one of its own. Op counts only ever grow, so any
+// increase since the last poll is real activity; briefly lighting the
+// lamp (not leaving it lit until the next 3s tick) is what makes a
+// single sector read look like the blink an LED gives one, not a slow
+// on/off toggle three seconds at a time. Keyed on the instance being
+// polled, and reset the moment that changes: a stale count carried over
+// from whatever VM was open before this one would otherwise read as a
+// burst of activity the moment the first poll of a new one lands.
+let blinkFor = '', blinkOps = {};
+function flashMediaLeds(name, blockstats) {
+  if (!blockstats) return;
+  if (name !== blinkFor) { blinkFor = name; blinkOps = {}; }
+  for (const device in blockstats) {
+    const ops = blockstats[device];
+    const prev = blinkOps[device];
+    blinkOps[device] = ops;
+    if (prev == null || ops <= prev) continue;
+    const led = document.getElementById(mediaElemId(device) + '-led');
+    if (!led) continue;
+    led.classList.add('active');
+    setTimeout(() => led.classList.remove('active'), 800);
+  }
+}
+
 // the three readings VMware stacks down the right of a VM summary
 async function updateUsage(name) {
   const slot = document.getElementById('gauges');
@@ -2489,6 +2541,7 @@ async function updateUsage(name) {
     render();
     return;
   }
+  flashMediaLeds(name, s.blockstats);
   const gauge = (label, value, note) =>
     '<div style="display:flex;align-items:center;gap:.6em;' +
     'margin-bottom:.9em"><div style="flex:1;text-align:right">' +

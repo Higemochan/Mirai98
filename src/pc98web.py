@@ -1735,7 +1735,15 @@ def qmp(inst, command, arguments=None, timeout=3.0):
                     if "return" in msg or "error" in msg:
                         break
             return msg
-    except OSError:
+    # OSError: the usual unreachable/reset/timed-out socket. ValueError
+    # (json.JSONDecodeError is one): a line read back truncated or
+    # otherwise not valid JSON -- which a second, unrelated client
+    # writing to and reading from this same QMP socket at the same time
+    # is exactly the sort of thing that can produce. Unlikely before
+    # usage_of() added the first caller that asks this every 3s for as
+    # long as an instance's page stays open; still just "unreachable
+    # this time" either way, not a reason to take the caller down.
+    except (OSError, ValueError):
         return None
 
 
@@ -1785,7 +1793,11 @@ def pid_of(inst):
 
 
 def usage_of(inst):
-    """CPU %% of one guest CPU and resident bytes, from /proc.
+    """CPU %% of one guest CPU and resident bytes, from /proc, plus (for a
+    machine with QMP of its own) each drive's own read+write op count --
+    the web UI's own drive-activity lamps, one flat number per device
+    rather than the raw rd/wr split, since the page only ever asks
+    whether a count moved at all since its last poll, not which way.
 
     A PC-98 guest has no channel for reporting how it feels inside, so
     the host's view of the QEMU process is what there is.
@@ -1809,7 +1821,27 @@ def usage_of(inst):
         cpu = (ticks - previous[1]) / hz / (now - previous[2]) * 100
         cpu = round(max(cpu, 0.0), 1)
     _cpu_cache[inst["name"]] = (pid, ticks, now)
-    return {"pid": pid, "cpu": cpu, "rss": rss}
+    out = {"pid": pid, "cpu": cpu, "rss": rss}
+    # A machine with its own engine (box86, on 86Box) has no QMP for
+    # query-blockstats to ask at all -- MACHINE_ENGINE is the same test
+    # is_running()/pid_of() already gate their own QMP-vs-engine path on,
+    # just above. A short timeout of its own: this is a cosmetic extra
+    # riding the usual 3s poll, and a slow or busy QMP (a script driving
+    # the machine through its own connection) must not hold up the
+    # CPU/RSS reading the rest of this function already has in hand.
+    if not MACHINE_ENGINE.get(inst.get("machine")):
+        reply = qmp(inst, "query-blockstats", timeout=1.0)
+        if reply and "return" in reply:
+            try:
+                out["blockstats"] = dict(
+                    (b["device"], b["stats"]["rd_operations"] +
+                                  b["stats"]["wr_operations"])
+                    for b in reply["return"] if b.get("device"))
+            except (KeyError, TypeError):
+                # a lamp that stays dark is a cosmetic loss; the CPU/RSS
+                # reading above, already earned, must not go with it
+                pass
+    return out
 
 
 def drive_backing(path):
