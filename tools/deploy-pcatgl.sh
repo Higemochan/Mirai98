@@ -47,7 +47,7 @@ FILES=(
 # stays in step with the code.  Fill in the expected md5 when a build is
 # blessed (build-p) to have the script refuse to deploy against the wrong
 # binary; leave it empty to skip the check.
-QEMU3DFX_EXPECTED_MD5="2dcf75416495fb7513585d2f790a065b"    # build-cd の md5(CD+MIDI、cue単一FILE修正+ACPI SCI IRQ9→10移設+ATAPI DMA が cd_img を迂回していた件の修正後)。別ビルドにしたらここも更新(空=検査しない)
+QEMU3DFX_EXPECTED_MD5="481a15d947c4285dcc7d458a2b56acaf"    # build-cd の md5(CD+MIDI、cue単一FILE修正+ACPI SCI IRQ9→10移設+ATAPI DMA が cd_img を迂回していた件の修正後+DiscJuggler .cdi(session1/track1 Mode1)対応)。別ビルドにしたらここも更新(空=検査しない)
 
 die() { echo "DEPLOY ABORTED: $*" >&2; exit 1; }
 
